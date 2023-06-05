@@ -21,6 +21,7 @@ package org.apache.iceberg;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
+import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
 
 /**
@@ -72,6 +73,11 @@ public interface Snapshot extends Serializable {
    */
   List<ManifestFile> allManifests(FileIO io);
 
+  default List<ManifestFile> allManifests(FileIO fileIO, EncryptionManager encryption) {
+    throw new UnsupportedOperationException(
+        this.getClass().getName() + " doesn't implement allManifests with encryption");
+  }
+
   /**
    * Return a {@link ManifestFile} for each data manifest in this snapshot.
    *
@@ -80,6 +86,11 @@ public interface Snapshot extends Serializable {
    */
   List<ManifestFile> dataManifests(FileIO io);
 
+  default List<ManifestFile> dataManifests(FileIO io, EncryptionManager encryption) {
+    throw new UnsupportedOperationException(
+        this.getClass().getName() + " doesn't implement dataManifests with encryption");
+  }
+
   /**
    * Return a {@link ManifestFile} for each delete manifest in this snapshot.
    *
@@ -87,6 +98,7 @@ public interface Snapshot extends Serializable {
    * @return a list of ManifestFile
    */
   List<ManifestFile> deleteManifests(FileIO io);
+  // TODO add encryption manager
 
   /**
    * Return the name of the {@link DataOperations data operation} that produced this snapshot.
@@ -114,6 +126,7 @@ public interface Snapshot extends Serializable {
    * @return all data files added to the table in this snapshot.
    */
   Iterable<DataFile> addedDataFiles(FileIO io);
+  // TODO add encryption manager
 
   /**
    * Return all data files removed from the table in this snapshot.
@@ -126,6 +139,7 @@ public interface Snapshot extends Serializable {
    * @return all data files removed from the table in this snapshot.
    */
   Iterable<DataFile> removedDataFiles(FileIO io);
+  // TODO add encryption manager
 
   /**
    * Return all delete files added to the table in this snapshot.
@@ -140,6 +154,7 @@ public interface Snapshot extends Serializable {
     throw new UnsupportedOperationException(
         this.getClass().getName() + " doesn't implement addedDeleteFiles");
   }
+  // TODO add encryption manager
 
   /**
    * Return all delete files removed from the table in this snapshot.
@@ -154,6 +169,7 @@ public interface Snapshot extends Serializable {
     throw new UnsupportedOperationException(
         this.getClass().getName() + " doesn't implement removedDeleteFiles");
   }
+  // TODO add encryption manager
 
   /**
    * Return the location of this snapshot's manifest list, or null if it is not separate.
@@ -169,6 +185,10 @@ public interface Snapshot extends Serializable {
    * @return schema id associated with this snapshot
    */
   default Integer schemaId() {
+    return null;
+  }
+
+  default String manifestKeyMetadata() {
     return null;
   }
 }

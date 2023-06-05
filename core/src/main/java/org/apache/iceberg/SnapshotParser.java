@@ -48,6 +48,7 @@ public class SnapshotParser {
   private static final String MANIFESTS = "manifests";
   private static final String MANIFEST_LIST = "manifest-list";
   private static final String SCHEMA_ID = "schema-id";
+  private static final String MANIFEST_LIST_KEY_METADATA = "manifest-list-key-metadata";
 
   static void toJson(Snapshot snapshot, JsonGenerator generator) throws IOException {
     generator.writeStartObject();
@@ -91,6 +92,10 @@ public class SnapshotParser {
     // schema ID might be null for snapshots written by old writers
     if (snapshot.schemaId() != null) {
       generator.writeNumberField(SCHEMA_ID, snapshot.schemaId());
+    }
+
+    if (snapshot.manifestKeyMetadata() != null) {
+      generator.writeStringField(MANIFEST_LIST_KEY_METADATA, snapshot.manifestKeyMetadata());
     }
 
     generator.writeEndObject();
@@ -147,6 +152,10 @@ public class SnapshotParser {
     if (node.has(MANIFEST_LIST)) {
       // the manifest list is stored in a manifest list file
       String manifestList = JsonUtil.getString(MANIFEST_LIST, node);
+
+      // Manifest list can be encrypted
+      String manifestListKeyMetadata = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
+
       return new BaseSnapshot(
           sequenceNumber,
           snapshotId,
@@ -155,7 +164,8 @@ public class SnapshotParser {
           operation,
           summary,
           schemaId,
-          manifestList);
+          manifestList,
+          manifestListKeyMetadata);
 
     } else {
       // fall back to an embedded manifest list. pass in the manifest's InputFile so length can be
