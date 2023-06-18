@@ -237,10 +237,31 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
+    EncryptionManager encryptionManager = ops.encryption();
+    EncryptedOutputFile encryptedManifestList = encryptionManager.encrypt(manifestList);
+    ByteBuffer manifestListEncryptionKey = encryptedManifestList.keyMetadata().encryptionKey();
+    String manifestListKeyMetadata = null;
+    if (manifestListEncryptionKey != null) {
+      Preconditions.checkArgument(
+          encryptionManager instanceof StandardEncryptionManager,
+          "Encryption manager for encrypted manifest list files can currently only be an instance of "
+              + StandardEncryptionManager.class);
+      ByteBuffer wrappedEncryptionKey =
+          ((StandardEncryptionManager) encryptionManager).wrapKey(manifestListEncryptionKey);
+
+      ByteBuffer manifestListAADPrefix = encryptedManifestList.keyMetadata().aadPrefix();
+      manifestListKeyMetadata =
+          Base64.getEncoder()
+              .encodeToString(
+                  EncryptionUtil.createKeyMetadata(wrappedEncryptionKey, manifestListAADPrefix)
+                      .buffer()
+                      .array());
+    }
+
     try (ManifestListWriter writer =
         ManifestLists.write(
             ops.current().formatVersion(),
-            manifestList,
+            encryptedManifestList.encryptingOutputFile(),
             snapshotId(),
             parentSnapshotId,
             sequenceNumber)) {
@@ -269,7 +290,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         operation(),
         summary(base),
         base.currentSchemaId(),
-        manifestList.location());
+        manifestList.location(),
+        manifestListKeyMetadata);
   }
 
   protected abstract Map<String, String> summary();
