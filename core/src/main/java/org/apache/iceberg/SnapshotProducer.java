@@ -34,7 +34,9 @@ import static org.apache.iceberg.TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,6 +47,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionKeyMetadata;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -239,17 +246,22 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     EncryptionManager encryptionManager = ops.encryption();
     EncryptedOutputFile encryptedManifestList = encryptionManager.encrypt(manifestList);
-    ByteBuffer manifestListEncryptionKey = encryptedManifestList.keyMetadata().encryptionKey();
+
+    long manifestListSize;
     String manifestListKeyMetadata = null;
-    if (manifestListEncryptionKey != null) {
+    if (encryptedManifestList.keyMetadata() != null
+        && encryptedManifestList.keyMetadata() != EncryptionKeyMetadata.EMPTY) {
       Preconditions.checkArgument(
           encryptionManager instanceof StandardEncryptionManager,
           "Encryption manager for encrypted manifest list files can currently only be an instance of "
               + StandardEncryptionManager.class);
+      NativeEncryptionKeyMetadata keyMetadata =
+          (NativeEncryptionKeyMetadata) encryptedManifestList.keyMetadata();
+      ByteBuffer manifestListEncryptionKey = keyMetadata.encryptionKey();
       ByteBuffer wrappedEncryptionKey =
           ((StandardEncryptionManager) encryptionManager).wrapKey(manifestListEncryptionKey);
 
-      ByteBuffer manifestListAADPrefix = encryptedManifestList.keyMetadata().aadPrefix();
+      ByteBuffer manifestListAADPrefix = keyMetadata.aadPrefix();
       manifestListKeyMetadata =
           Base64.getEncoder()
               .encodeToString(
@@ -278,6 +290,9 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           .run(index -> manifestFiles[index] = manifestsWithMetadata.get(manifests.get(index)));
 
       writer.addAll(Arrays.asList(manifestFiles));
+
+      writer.close();
+      manifestListSize = writer.length();
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to write manifest list file");
     }
@@ -291,6 +306,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         summary(base),
         base.currentSchemaId(),
         manifestList.location(),
+        manifestListSize,
         manifestListKeyMetadata);
   }
 

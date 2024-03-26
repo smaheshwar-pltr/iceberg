@@ -25,11 +25,10 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import org.apache.iceberg.encryption.EncryptedFiles;
-import org.apache.iceberg.encryption.EncryptedInputFile;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionKeyMetadata;
-import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
 import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.CloseableIterable;
@@ -48,6 +47,7 @@ class BaseSnapshot implements Snapshot {
   private final long sequenceNumber;
   private final long timestampMillis;
   private final String manifestListLocation;
+  private final long manifestListSize;
   private final String operation;
   private final Map<String, String> summary;
   private final Integer schemaId;
@@ -63,6 +63,7 @@ class BaseSnapshot implements Snapshot {
   private transient List<DeleteFile> addedDeleteFiles = null;
   private transient List<DeleteFile> removedDeleteFiles = null;
 
+  /** Tests only */
   BaseSnapshot(
       long sequenceNumber,
       long snapshotId,
@@ -81,6 +82,7 @@ class BaseSnapshot implements Snapshot {
         summary,
         schemaId,
         manifestList,
+        -1L,
         null);
   }
 
@@ -92,7 +94,8 @@ class BaseSnapshot implements Snapshot {
       String operation,
       Map<String, String> summary,
       Integer schemaId,
-      String manifestList,
+      String manifestListLocation,
+      long manifestListSize,
       String manifestListKeyMetadata) {
     this.sequenceNumber = sequenceNumber;
     this.snapshotId = snapshotId;
@@ -101,7 +104,8 @@ class BaseSnapshot implements Snapshot {
     this.operation = operation;
     this.summary = summary;
     this.schemaId = schemaId;
-    this.manifestListLocation = manifestList;
+    this.manifestListLocation = manifestListLocation;
+    this.manifestListSize = manifestListSize;
     this.v1ManifestLocations = null;
     this.manifestListKeyMetadata = manifestListKeyMetadata;
   }
@@ -123,6 +127,7 @@ class BaseSnapshot implements Snapshot {
     this.summary = summary;
     this.schemaId = schemaId;
     this.manifestListLocation = null;
+    this.manifestListSize = -1L;
     this.v1ManifestLocations = v1ManifestLocations;
     this.manifestListKeyMetadata = null;
   }
@@ -163,15 +168,16 @@ class BaseSnapshot implements Snapshot {
   }
 
   @Override
-  public String manifestKeyMetadata() {
+  public String manifestListKeyMetadata() {
     return manifestListKeyMetadata;
   }
 
-  private void cacheManifests(FileIO fileIO) {
-    cacheManifests(fileIO, null); // TODO remove
+  @Override
+  public long manifestListSize() {
+    return manifestListSize;
   }
 
-  private void cacheManifests(FileIO fileIO, EncryptionManager encryption) {
+  private void cacheManifests(FileIO fileIO) {
     if (fileIO == null) {
       throw new IllegalArgumentException("Cannot cache changes: FileIO is null");
     }
@@ -186,29 +192,38 @@ class BaseSnapshot implements Snapshot {
 
     if (allManifests == null) {
       // if manifests isn't set, then the snapshotFile is set and should be read to get the list
-
+      // TODO GG
       InputFile manifestListFile = fileIO.newInputFile(manifestListLocation);
-      if (encryption != null && manifestListKeyMetadata != null) {
+      if (manifestListKeyMetadata != null) { // encrypted manifest list file
         Preconditions.checkArgument(
-            encryption instanceof StandardEncryptionManager,
+            fileIO instanceof EncryptingFileIO,
+            "No encryption in FileIO class " + fileIO.getClass());
+        EncryptingFileIO encryptingFileIO = (EncryptingFileIO) fileIO;
+        Preconditions.checkArgument(
+            encryptingFileIO.encryptionManager() instanceof StandardEncryptionManager,
             "Encryption manager for encrypted manifest list files can currently only be an instance of "
-                + StandardEncryptionManager.class);
+                + StandardEncryptionManager.class
+                + ". Not "
+                + encryptingFileIO.encryptionManager().getClass());
+        StandardEncryptionManager standardEncryptionManager =
+            (StandardEncryptionManager) encryptingFileIO.encryptionManager();
+
         ByteBuffer keyMetadataBytes =
             ByteBuffer.wrap(Base64.getDecoder().decode(manifestListKeyMetadata));
-        ByteBuffer unwrappedManfestListKey = null;
+
         // Unwrap manifest list key
-        unwrappedManfestListKey =
-            ((StandardEncryptionManager) encryption)
-                .unwrapKey(EncryptionUtil.fileEncryptionKey(keyMetadataBytes));
+        NativeEncryptionKeyMetadata keyMetadata = EncryptionUtil.parseKeyMetadata(keyMetadataBytes);
+        ByteBuffer unwrappedManfestListKey =
+            standardEncryptionManager.unwrapKey(keyMetadata.encryptionKey());
 
-        EncryptionKeyMetadata keyMetadata =
-            EncryptionUtil.createKeyMetadata(
-                unwrappedManfestListKey, EncryptionUtil.aadPrefix(keyMetadataBytes));
+        EncryptionKeyMetadata unwrappedKeyMetadata =
+            EncryptionUtil.createKeyMetadata(unwrappedManfestListKey, keyMetadata.aadPrefix());
 
-        EncryptedInputFile encryptedInputFile =
-            EncryptedFiles.encryptedInput(manifestListFile, keyMetadata);
-        manifestListFile = encryption.decrypt(encryptedInputFile);
+        manifestListFile =
+            encryptingFileIO.newDecryptingInputFile(
+                manifestListLocation, manifestListSize, unwrappedKeyMetadata.buffer());
       }
+
       this.allManifests = ManifestLists.read(manifestListFile);
     }
 
@@ -233,25 +248,9 @@ class BaseSnapshot implements Snapshot {
   }
 
   @Override
-  public List<ManifestFile> allManifests(FileIO fileIO, EncryptionManager encryption) {
-    if (allManifests == null) {
-      cacheManifests(fileIO, encryption);
-    }
-    return allManifests;
-  }
-
-  @Override
   public List<ManifestFile> dataManifests(FileIO fileIO) {
     if (dataManifests == null) {
       cacheManifests(fileIO);
-    }
-    return dataManifests;
-  }
-
-  @Override
-  public List<ManifestFile> dataManifests(FileIO fileIO, EncryptionManager encryption) {
-    if (dataManifests == null) {
-      cacheManifests(fileIO, encryption);
     }
     return dataManifests;
   }

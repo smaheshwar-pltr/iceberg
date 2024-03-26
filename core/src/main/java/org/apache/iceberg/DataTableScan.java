@@ -19,7 +19,6 @@
 package org.apache.iceberg;
 
 import java.util.List;
-import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -66,9 +65,8 @@ public class DataTableScan extends BaseTableScan {
     Snapshot snapshot = snapshot();
 
     FileIO io = table().io();
-    EncryptionManager encryption = table().encryption();
-    List<ManifestFile> dataManifests = snapshot.dataManifests(io, encryption);
-    List<ManifestFile> deleteManifests = snapshot.deleteManifests(io); // TODO add encryption
+    List<ManifestFile> dataManifests = snapshot.dataManifests(io);
+    List<ManifestFile> deleteManifests = snapshot.deleteManifests(io);
     scanMetrics().totalDataManifests().increment((long) dataManifests.size());
     scanMetrics().totalDeleteManifests().increment((long) deleteManifests.size());
     ManifestGroup manifestGroup =

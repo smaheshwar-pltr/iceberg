@@ -114,8 +114,6 @@ public class EncryptingFileIO implements FileIO, Serializable {
   }
 
   public InputFile newDecryptingInputFile(String path, long length, ByteBuffer buffer) {
-    // TODO: is the length correct for the encrypted file? It may be the length of the plaintext
-    // stream
     return em.decrypt(wrap(io.newInputFile(path, length), buffer));
   }
 
@@ -157,7 +155,7 @@ public class EncryptingFileIO implements FileIO, Serializable {
   }
 
   private static EncryptionKeyMetadata toKeyMetadata(ByteBuffer buffer) {
-    return buffer != null ? new SimpleKeyMetadata(buffer) : EmptyKeyMetadata.get();
+    return buffer != null ? new SimpleKeyMetadata(buffer) : EncryptionKeyMetadata.empty();
   }
 
   private static class SimpleEncryptedInputFile implements EncryptedInputFile {
@@ -196,24 +194,6 @@ public class EncryptingFileIO implements FileIO, Serializable {
     @Override
     public EncryptionKeyMetadata copy() {
       return new SimpleKeyMetadata(metadataBuffer.duplicate());
-    }
-  }
-
-  private static class EmptyKeyMetadata implements EncryptionKeyMetadata {
-    private static final EmptyKeyMetadata INSTANCE = new EmptyKeyMetadata();
-
-    private static EmptyKeyMetadata get() {
-      return INSTANCE;
-    }
-
-    @Override
-    public ByteBuffer buffer() {
-      return null;
-    }
-
-    @Override
-    public EncryptionKeyMetadata copy() {
-      return this;
     }
   }
 }

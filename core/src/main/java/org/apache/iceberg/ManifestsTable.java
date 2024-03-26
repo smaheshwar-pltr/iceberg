@@ -20,7 +20,6 @@ package org.apache.iceberg;
 
 import java.util.List;
 import java.util.Map;
-import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
@@ -78,7 +77,6 @@ public class ManifestsTable extends BaseMetadataTable {
 
   protected DataTask task(TableScan scan) {
     FileIO io = table().io();
-    EncryptionManager encryption = table().encryption();
     String location = scan.snapshot().manifestListLocation();
     Map<Integer, PartitionSpec> specs = Maps.newHashMap(table().specs());
 
@@ -87,7 +85,7 @@ public class ManifestsTable extends BaseMetadataTable {
             location != null ? location : table().operations().current().metadataFileLocation()),
         schema(),
         scan.schema(),
-        scan.snapshot().allManifests(io, encryption),
+        scan.snapshot().allManifests(io),
         manifest -> {
           PartitionSpec spec = specs.get(manifest.partitionSpecId());
           return ManifestsTable.manifestFileToRow(spec, manifest);

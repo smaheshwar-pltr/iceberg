@@ -49,6 +49,7 @@ public class SnapshotParser {
   private static final String MANIFEST_LIST = "manifest-list";
   private static final String SCHEMA_ID = "schema-id";
   private static final String MANIFEST_LIST_KEY_METADATA = "manifest-list-key-metadata";
+  private static final String MANIFEST_LIST_SIZE = "manifest-list-size";
 
   static void toJson(Snapshot snapshot, JsonGenerator generator) throws IOException {
     generator.writeStartObject();
@@ -94,9 +95,15 @@ public class SnapshotParser {
       generator.writeNumberField(SCHEMA_ID, snapshot.schemaId());
     }
 
-    if (snapshot.manifestKeyMetadata() != null) {
-      generator.writeStringField(MANIFEST_LIST_KEY_METADATA, snapshot.manifestKeyMetadata());
+    if (snapshot.manifestListKeyMetadata() != null) {
+      generator.writeStringField(MANIFEST_LIST_KEY_METADATA, snapshot.manifestListKeyMetadata());
     }
+
+    if (snapshot.manifestListSize() >= 0) {
+      generator.writeNumberField(MANIFEST_LIST_SIZE, snapshot.manifestListSize());
+    }
+
+    // TODO GG Sign aad, size values?
 
     generator.writeEndObject();
   }
@@ -154,7 +161,17 @@ public class SnapshotParser {
       String manifestList = JsonUtil.getString(MANIFEST_LIST, node);
 
       // Manifest list can be encrypted
-      String manifestListKeyMetadata = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
+      String manifestListKeyMetadata = null;
+      if (node.has(MANIFEST_LIST_KEY_METADATA)) {
+        manifestListKeyMetadata = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
+      }
+
+      long manifestListSize = 0;
+      if (node.has(MANIFEST_LIST_SIZE)) {
+        manifestListSize = JsonUtil.getLong(MANIFEST_LIST_SIZE, node);
+      }
+
+      // TODO GG verify (signed) aad, size values?
 
       return new BaseSnapshot(
           sequenceNumber,
@@ -165,6 +182,7 @@ public class SnapshotParser {
           summary,
           schemaId,
           manifestList,
+          manifestListSize,
           manifestListKeyMetadata);
 
     } else {
