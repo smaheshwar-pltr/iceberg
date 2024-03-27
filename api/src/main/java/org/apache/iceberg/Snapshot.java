@@ -163,12 +163,22 @@ public interface Snapshot extends Serializable {
   String manifestListLocation();
 
   /**
-   * Return the size of this snapshot's manifest list. For encrypted tables, a verified plaintext
-   * size must be used.
+   * Return the size of this snapshot's manifest list file. Must be a verified value, taken from a
+   * trusted source.
    */
   default long manifestListSize() {
     throw new UnsupportedOperationException(
         this.getClass().getName() + " doesn't implement manifestListSize");
+  }
+
+  /**
+   * Key metadata for this snapshot's manifest list.
+   *
+   * @return base64-encoded key metadata for the manifest list file encryption key
+   */
+  default String manifestListKeyMetadata() {
+    throw new UnsupportedOperationException(
+        this.getClass().getName() + " doesn't implement manifestKeyMetadata");
   }
 
   /**
@@ -179,15 +189,5 @@ public interface Snapshot extends Serializable {
    */
   default Integer schemaId() {
     return null;
-  }
-
-  /**
-   * Key metadata for encrypted manifest lists.
-   *
-   * @return base64-encoded key metadata for the manifest list file encryption key
-   */
-  default String manifestListKeyMetadata() {
-    throw new UnsupportedOperationException(
-        this.getClass().getName() + " doesn't implement manifestKeyMetadata");
   }
 }

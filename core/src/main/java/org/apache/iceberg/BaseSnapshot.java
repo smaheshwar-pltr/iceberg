@@ -192,7 +192,6 @@ class BaseSnapshot implements Snapshot {
 
     if (allManifests == null) {
       // if manifests isn't set, then the snapshotFile is set and should be read to get the list
-      // TODO GG
       InputFile manifestListFile = fileIO.newInputFile(manifestListLocation);
       if (manifestListKeyMetadata != null) { // encrypted manifest list file
         Preconditions.checkArgument(
@@ -211,7 +210,7 @@ class BaseSnapshot implements Snapshot {
         ByteBuffer keyMetadataBytes =
             ByteBuffer.wrap(Base64.getDecoder().decode(manifestListKeyMetadata));
 
-        // Unwrap manifest list key
+        // Unwrap (decrypt) manifest list key
         NativeEncryptionKeyMetadata keyMetadata = EncryptionUtil.parseKeyMetadata(keyMetadataBytes);
         ByteBuffer unwrappedManfestListKey =
             standardEncryptionManager.unwrapKey(keyMetadata.encryptionKey());

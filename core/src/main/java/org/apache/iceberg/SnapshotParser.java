@@ -99,11 +99,11 @@ public class SnapshotParser {
       generator.writeStringField(MANIFEST_LIST_KEY_METADATA, snapshot.manifestListKeyMetadata());
     }
 
+    // TODO discuss: do we need to sign the size value? Or sign the whole snapshot?
+    // Or rely on REST catalog? - the only option that prevents "full folder replacement" attack.
     if (snapshot.manifestListSize() >= 0) {
       generator.writeNumberField(MANIFEST_LIST_SIZE, snapshot.manifestListSize());
     }
-
-    // TODO GG Sign aad, size values?
 
     generator.writeEndObject();
   }
@@ -170,8 +170,6 @@ public class SnapshotParser {
       if (node.has(MANIFEST_LIST_SIZE)) {
         manifestListSize = JsonUtil.getLong(MANIFEST_LIST_SIZE, node);
       }
-
-      // TODO GG verify (signed) aad, size values?
 
       return new BaseSnapshot(
           sequenceNumber,

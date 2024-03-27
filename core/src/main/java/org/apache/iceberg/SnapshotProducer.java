@@ -47,7 +47,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
-import org.apache.iceberg.encryption.EncryptionKeyMetadata;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
@@ -250,7 +249,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     long manifestListSize;
     String manifestListKeyMetadata = null;
     if (encryptedManifestList.keyMetadata() != null
-        && encryptedManifestList.keyMetadata() != EncryptionKeyMetadata.EMPTY) {
+        && encryptedManifestList.keyMetadata().buffer() != null) {
       Preconditions.checkArgument(
           encryptionManager instanceof StandardEncryptionManager,
           "Encryption manager for encrypted manifest list files can currently only be an instance of "
