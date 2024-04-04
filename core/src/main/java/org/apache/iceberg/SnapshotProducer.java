@@ -246,14 +246,16 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     EncryptionManager encryptionManager = ops.encryption();
     EncryptedOutputFile encryptedManifestList = encryptionManager.encrypt(manifestList);
 
-    long manifestListSize;
+    long manifestListSize = 0L;
     String manifestListKeyMetadata = null;
     if (encryptedManifestList.keyMetadata() != null
         && encryptedManifestList.keyMetadata().buffer() != null) {
       Preconditions.checkArgument(
           encryptionManager instanceof StandardEncryptionManager,
-          "Encryption manager for encrypted manifest list files can currently only be an instance of "
-              + StandardEncryptionManager.class);
+          "Cannot encrypt manifest list (%s) because the encryption manager (%s) does not "
+              + "implement StandardEncryptionManager",
+          manifestList.location(),
+          encryptionManager.getClass());
       NativeEncryptionKeyMetadata keyMetadata =
           (NativeEncryptionKeyMetadata) encryptedManifestList.keyMetadata();
       ByteBuffer manifestListEncryptionKey = keyMetadata.encryptionKey();
@@ -290,8 +292,10 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
       writer.addAll(Arrays.asList(manifestFiles));
 
-      writer.close();
-      manifestListSize = writer.length();
+      if (manifestListKeyMetadata != null) {
+        writer.close();
+        manifestListSize = writer.length();
+      }
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to write manifest list file");
     }

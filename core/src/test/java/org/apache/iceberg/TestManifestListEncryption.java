@@ -33,7 +33,9 @@ import org.apache.iceberg.inmemory.InMemoryOutputFile;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
-import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.Conversions;
+import org.apache.iceberg.types.Types;
 import org.assertj.core.api.Assertions;
 import org.junit.Assert;
 import org.junit.Test;
@@ -51,8 +53,21 @@ public class TestManifestListEncryption {
   private static final long EXISTING_ROWS = 857273L;
   private static final int DELETED_FILES = 1;
   private static final long DELETED_ROWS = 22910L;
+
+  private static final ByteBuffer firstSummaryLowerBound =
+      Conversions.toByteBuffer(Types.IntegerType.get(), 10);
+  private static final ByteBuffer firstSummaryUpperBound =
+      Conversions.toByteBuffer(Types.IntegerType.get(), 100);
+  private static final ByteBuffer secondSummaryLowerBound =
+      Conversions.toByteBuffer(Types.IntegerType.get(), 20);
+  private static final ByteBuffer secondSummaryUpperBound =
+      Conversions.toByteBuffer(Types.IntegerType.get(), 200);
+
   private static final List<ManifestFile.PartitionFieldSummary> PARTITION_SUMMARIES =
-      ImmutableList.of();
+      Lists.newArrayList(
+          new GenericPartitionFieldSummary(false, firstSummaryLowerBound, firstSummaryUpperBound),
+          new GenericPartitionFieldSummary(
+              true, false, secondSummaryLowerBound, secondSummaryUpperBound));
   private static final ByteBuffer MANIFEST_KEY_METADATA = ByteBuffer.allocate(100);
 
   private static final ManifestFile TEST_MANIFEST =
@@ -78,7 +93,7 @@ public class TestManifestListEncryption {
 
   @Test
   public void testV2Write() throws IOException {
-    ManifestFile manifest = writeAndReadManifestList();
+    ManifestFile manifest = writeAndReadEncryptedManifestList();
 
     // all v2 fields should be read correctly
     Assert.assertEquals("Path", PATH, manifest.path());
@@ -97,7 +112,7 @@ public class TestManifestListEncryption {
     Assert.assertEquals("Deleted rows count", DELETED_ROWS, (long) manifest.deletedRowsCount());
   }
 
-  private ManifestFile writeAndReadManifestList() throws IOException {
+  private ManifestFile writeAndReadEncryptedManifestList() throws IOException {
     OutputFile rawOutput = new InMemoryOutputFile();
     EncryptedOutputFile encryptedOutput = ENCRYPTION_MANAGER.encrypt(rawOutput);
     EncryptionKeyMetadata keyMetadata = encryptedOutput.keyMetadata();

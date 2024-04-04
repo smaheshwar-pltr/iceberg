@@ -101,7 +101,7 @@ public class SnapshotParser {
 
     // TODO discuss: do we need to sign the size value? Or sign the whole snapshot?
     // Or rely on REST catalog? - the only option that prevents "full folder replacement" attack.
-    if (snapshot.manifestListSize() >= 0) {
+    if (snapshot.manifestListSize() > 0) {
       generator.writeNumberField(MANIFEST_LIST_SIZE, snapshot.manifestListSize());
     }
 

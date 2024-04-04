@@ -82,7 +82,7 @@ class BaseSnapshot implements Snapshot {
         summary,
         schemaId,
         manifestList,
-        -1L,
+        0L,
         null);
   }
 
@@ -106,8 +106,8 @@ class BaseSnapshot implements Snapshot {
     this.schemaId = schemaId;
     this.manifestListLocation = manifestListLocation;
     this.manifestListSize = manifestListSize;
-    this.v1ManifestLocations = null;
     this.manifestListKeyMetadata = manifestListKeyMetadata;
+    this.v1ManifestLocations = null;
   }
 
   BaseSnapshot(
@@ -127,7 +127,7 @@ class BaseSnapshot implements Snapshot {
     this.summary = summary;
     this.schemaId = schemaId;
     this.manifestListLocation = null;
-    this.manifestListSize = -1L;
+    this.manifestListSize = 0L;
     this.v1ManifestLocations = v1ManifestLocations;
     this.manifestListKeyMetadata = null;
   }
@@ -196,14 +196,17 @@ class BaseSnapshot implements Snapshot {
       if (manifestListKeyMetadata != null) { // encrypted manifest list file
         Preconditions.checkArgument(
             fileIO instanceof EncryptingFileIO,
-            "No encryption in FileIO class " + fileIO.getClass());
+            "Cannot read manifest list (%s) because it is encrypted but the configured "
+                + "FileIO (%s) does not implement EncryptingFileIO",
+            manifestListLocation,
+            fileIO.getClass());
         EncryptingFileIO encryptingFileIO = (EncryptingFileIO) fileIO;
         Preconditions.checkArgument(
             encryptingFileIO.encryptionManager() instanceof StandardEncryptionManager,
-            "Encryption manager for encrypted manifest list files can currently only be an instance of "
-                + StandardEncryptionManager.class
-                + ". Not "
-                + encryptingFileIO.encryptionManager().getClass());
+            "Cannot decrypt manifest list (%s) because the encryption manager (%s) does not "
+                + "implement StandardEncryptionManager",
+            manifestListLocation,
+            encryptingFileIO.encryptionManager().getClass());
         StandardEncryptionManager standardEncryptionManager =
             (StandardEncryptionManager) encryptingFileIO.encryptionManager();
 

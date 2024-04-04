@@ -163,8 +163,8 @@ public interface Snapshot extends Serializable {
   String manifestListLocation();
 
   /**
-   * Return the size of this snapshot's manifest list file. Must be a verified value, taken from a
-   * trusted source.
+   * In encrypted tables, return the size of this snapshot's manifest list file. Must be a verified
+   * value, taken from a trusted source. In unencrypted tables, can return 0.
    */
   default long manifestListSize() {
     throw new UnsupportedOperationException(
