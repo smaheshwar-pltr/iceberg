@@ -34,7 +34,6 @@ import static org.apache.iceberg.TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
@@ -48,9 +47,6 @@ import java.util.function.Consumer;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -250,25 +246,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     String manifestListKeyMetadata = null;
     if (encryptedManifestList.keyMetadata() != null
         && encryptedManifestList.keyMetadata().buffer() != null) {
-      Preconditions.checkArgument(
-          encryptionManager instanceof StandardEncryptionManager,
-          "Cannot encrypt manifest list (%s) because the encryption manager (%s) does not "
-              + "implement StandardEncryptionManager",
-          manifestList.location(),
-          encryptionManager.getClass());
-      NativeEncryptionKeyMetadata keyMetadata =
-          (NativeEncryptionKeyMetadata) encryptedManifestList.keyMetadata();
-      ByteBuffer manifestListEncryptionKey = keyMetadata.encryptionKey();
-      ByteBuffer wrappedEncryptionKey =
-          ((StandardEncryptionManager) encryptionManager).wrapKey(manifestListEncryptionKey);
-
-      ByteBuffer manifestListAADPrefix = keyMetadata.aadPrefix();
       manifestListKeyMetadata =
-          Base64.getEncoder()
-              .encodeToString(
-                  EncryptionUtil.createKeyMetadata(wrappedEncryptionKey, manifestListAADPrefix)
-                      .buffer()
-                      .array());
+          Base64.getEncoder().encodeToString(encryptedManifestList.keyMetadata().buffer().array());
     }
 
     try (ManifestListWriter writer =

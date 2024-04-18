@@ -95,14 +95,13 @@ public class SnapshotParser {
       generator.writeNumberField(SCHEMA_ID, snapshot.schemaId());
     }
 
-    if (snapshot.manifestListKeyMetadata() != null) {
-      generator.writeStringField(MANIFEST_LIST_KEY_METADATA, snapshot.manifestListKeyMetadata());
+    if (snapshot.manifestListFile().encodedKeyMetadata() != null) {
+      generator.writeStringField(
+          MANIFEST_LIST_KEY_METADATA, snapshot.manifestListFile().encodedKeyMetadata());
     }
 
-    // TODO discuss: do we need to sign the size value? Or sign the whole snapshot?
-    // Or rely on REST catalog? - the only option that prevents "full folder replacement" attack.
-    if (snapshot.manifestListSize() > 0) {
-      generator.writeNumberField(MANIFEST_LIST_SIZE, snapshot.manifestListSize());
+    if (snapshot.manifestListFile().size() > 0) {
+      generator.writeNumberField(MANIFEST_LIST_SIZE, snapshot.manifestListFile().size());
     }
 
     generator.writeEndObject();

@@ -26,10 +26,6 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.encryption.EncryptingFileIO;
-import org.apache.iceberg.encryption.EncryptionKeyMetadata;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
@@ -47,12 +43,11 @@ class BaseSnapshot implements Snapshot {
   private final long sequenceNumber;
   private final long timestampMillis;
   private final String manifestListLocation;
-  private final long manifestListSize;
+  private final ManifestListFile manifestListFile;
   private final String operation;
   private final Map<String, String> summary;
   private final Integer schemaId;
   private final String[] v1ManifestLocations;
-  private final String manifestListKeyMetadata;
 
   // lazily initialized
   private transient List<ManifestFile> allManifests = null;
@@ -105,8 +100,8 @@ class BaseSnapshot implements Snapshot {
     this.summary = summary;
     this.schemaId = schemaId;
     this.manifestListLocation = manifestListLocation;
-    this.manifestListSize = manifestListSize;
-    this.manifestListKeyMetadata = manifestListKeyMetadata;
+    this.manifestListFile =
+        new ManifestListFile(manifestListLocation, manifestListKeyMetadata, manifestListSize);
     this.v1ManifestLocations = null;
   }
 
@@ -127,9 +122,8 @@ class BaseSnapshot implements Snapshot {
     this.summary = summary;
     this.schemaId = schemaId;
     this.manifestListLocation = null;
-    this.manifestListSize = 0L;
+    this.manifestListFile = new ManifestListFile(null, null, 0);
     this.v1ManifestLocations = v1ManifestLocations;
-    this.manifestListKeyMetadata = null;
   }
 
   @Override
@@ -168,13 +162,8 @@ class BaseSnapshot implements Snapshot {
   }
 
   @Override
-  public String manifestListKeyMetadata() {
-    return manifestListKeyMetadata;
-  }
-
-  @Override
-  public long manifestListSize() {
-    return manifestListSize;
+  public ManifestListFile manifestListFile() {
+    return manifestListFile;
   }
 
   private void cacheManifests(FileIO fileIO) {
@@ -192,41 +181,27 @@ class BaseSnapshot implements Snapshot {
 
     if (allManifests == null) {
       // if manifests isn't set, then the snapshotFile is set and should be read to get the list
-      InputFile manifestListFile = fileIO.newInputFile(manifestListLocation);
-      if (manifestListKeyMetadata != null) { // encrypted manifest list file
+      InputFile manifestListInputFile = fileIO.newInputFile(manifestListLocation);
+
+      if (manifestListFile != null
+          && manifestListFile.encodedKeyMetadata() != null) { // encrypted manifest list file
         Preconditions.checkArgument(
             fileIO instanceof EncryptingFileIO,
             "Cannot read manifest list (%s) because it is encrypted but the configured "
                 + "FileIO (%s) does not implement EncryptingFileIO",
             manifestListLocation,
             fileIO.getClass());
+
         EncryptingFileIO encryptingFileIO = (EncryptingFileIO) fileIO;
-        Preconditions.checkArgument(
-            encryptingFileIO.encryptionManager() instanceof StandardEncryptionManager,
-            "Cannot decrypt manifest list (%s) because the encryption manager (%s) does not "
-                + "implement StandardEncryptionManager",
-            manifestListLocation,
-            encryptingFileIO.encryptionManager().getClass());
-        StandardEncryptionManager standardEncryptionManager =
-            (StandardEncryptionManager) encryptingFileIO.encryptionManager();
-
         ByteBuffer keyMetadataBytes =
-            ByteBuffer.wrap(Base64.getDecoder().decode(manifestListKeyMetadata));
+            ByteBuffer.wrap(Base64.getDecoder().decode(manifestListFile.encodedKeyMetadata()));
 
-        // Unwrap (decrypt) manifest list key
-        NativeEncryptionKeyMetadata keyMetadata = EncryptionUtil.parseKeyMetadata(keyMetadataBytes);
-        ByteBuffer unwrappedManfestListKey =
-            standardEncryptionManager.unwrapKey(keyMetadata.encryptionKey());
-
-        EncryptionKeyMetadata unwrappedKeyMetadata =
-            EncryptionUtil.createKeyMetadata(unwrappedManfestListKey, keyMetadata.aadPrefix());
-
-        manifestListFile =
+        manifestListInputFile =
             encryptingFileIO.newDecryptingInputFile(
-                manifestListLocation, manifestListSize, unwrappedKeyMetadata.buffer());
+                manifestListLocation, manifestListFile.size(), keyMetadataBytes);
       }
 
-      this.allManifests = ManifestLists.read(manifestListFile);
+      this.allManifests = ManifestLists.read(manifestListInputFile);
     }
 
     if (dataManifests == null || deleteManifests == null) {

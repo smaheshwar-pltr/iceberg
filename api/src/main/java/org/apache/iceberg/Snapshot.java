@@ -163,22 +163,13 @@ public interface Snapshot extends Serializable {
   String manifestListLocation();
 
   /**
-   * In encrypted tables, return the size of this snapshot's manifest list file. Must be a verified
-   * value, taken from a trusted source. In unencrypted tables, can return 0.
-   */
-  default long manifestListSize() {
-    throw new UnsupportedOperationException(
-        this.getClass().getName() + " doesn't implement manifestListSize");
-  }
-
-  /**
-   * Key metadata for this snapshot's manifest list.
+   * This snapshot's manifest list file info: size, encryption key metadata and location
    *
-   * @return base64-encoded key metadata for the manifest list file encryption key
+   * @return manifest list file info
    */
-  default String manifestListKeyMetadata() {
+  default ManifestListFile manifestListFile() {
     throw new UnsupportedOperationException(
-        this.getClass().getName() + " doesn't implement manifestKeyMetadata");
+        this.getClass().getName() + " doesn't implement manifestListFile method");
   }
 
   /**
