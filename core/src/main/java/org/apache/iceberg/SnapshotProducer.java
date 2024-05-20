@@ -34,8 +34,8 @@ import static org.apache.iceberg.TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -243,12 +243,10 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     EncryptedOutputFile encryptedManifestList = encryptionManager.encrypt(manifestList);
 
     long manifestListSize = 0L;
-    String manifestListKeyMetadata = null;
-    if (encryptedManifestList.keyMetadata() != null
-        && encryptedManifestList.keyMetadata().buffer() != null) {
-      manifestListKeyMetadata =
-          Base64.getEncoder().encodeToString(encryptedManifestList.keyMetadata().buffer().array());
-    }
+    ByteBuffer manifestListKeyMetadata =
+        (encryptedManifestList.keyMetadata() == null)
+            ? null
+            : encryptedManifestList.keyMetadata().buffer();
 
     try (ManifestListWriter writer =
         ManifestLists.write(
@@ -289,7 +287,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         base.currentSchemaId(),
         manifestList.location(),
         manifestListSize,
-        manifestListKeyMetadata);
+        manifestListKeyMetadata,
+        true);
   }
 
   protected abstract Map<String, String> summary();

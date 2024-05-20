@@ -21,8 +21,11 @@ package org.apache.iceberg;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.Map;
+import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
@@ -117,6 +120,10 @@ public class SnapshotParser {
   }
 
   static Snapshot fromJson(JsonNode node) {
+    return fromJson(node, null, null);
+  }
+
+  static Snapshot fromJson(JsonNode node, ByteBuffer metadataKey, ByteBuffer metadataAadPrefix) {
     Preconditions.checkArgument(
         node.isObject(), "Cannot parse table version from a non-object: %s", node);
 
@@ -159,16 +166,33 @@ public class SnapshotParser {
       // the manifest list is stored in a manifest list file
       String manifestList = JsonUtil.getString(MANIFEST_LIST, node);
 
+      ByteBuffer manifestListKeyMetadata = null;
+
       // Manifest list can be encrypted
-      String manifestListKeyMetadata = null;
       if (node.has(MANIFEST_LIST_KEY_METADATA)) {
-        manifestListKeyMetadata = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
+        // Decode and decrypt manifest list key with metadata key
+        Preconditions.checkArgument(
+            metadataKey != null, "Can't decrypt manifest list key - metadata key is not provided");
+        Preconditions.checkArgument(
+            metadataAadPrefix != null,
+            "Can't decrypt manifest list key - metadata AAD prefix is not provided");
+
+        String manifestListKeyMetadataString = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
+        byte[] decodedManifestListKeyMetadata =
+            Base64.getDecoder().decode(manifestListKeyMetadataString);
+
+        // check to suppress compilation warning
+        Preconditions.checkArgument(metadataKey.arrayOffset() == 0, "Offset must be 0");
+        Preconditions.checkArgument(metadataAadPrefix.arrayOffset() == 0, "Offset must be 0");
+        Ciphers.AesGcmDecryptor keyMetadataDecryptor =
+            new Ciphers.AesGcmDecryptor(metadataKey.array());
+        byte[] aad = Ciphers.longSuffixAAD(metadataAadPrefix.array(), snapshotId);
+        manifestListKeyMetadata =
+            ByteBuffer.wrap(keyMetadataDecryptor.decrypt(decodedManifestListKeyMetadata, aad));
       }
 
-      long manifestListSize = 0;
-      if (node.has(MANIFEST_LIST_SIZE)) {
-        manifestListSize = JsonUtil.getLong(MANIFEST_LIST_SIZE, node);
-      }
+      long manifestListSize =
+          node.has(MANIFEST_LIST_SIZE) ? JsonUtil.getLong(MANIFEST_LIST_SIZE, node) : 0L;
 
       return new BaseSnapshot(
           sequenceNumber,
@@ -180,7 +204,8 @@ public class SnapshotParser {
           schemaId,
           manifestList,
           manifestListSize,
-          manifestListKeyMetadata);
+          manifestListKeyMetadata,
+          false);
 
     } else {
       // fall back to an embedded manifest list. pass in the manifest's InputFile so length can be
@@ -197,6 +222,7 @@ public class SnapshotParser {
     }
   }
 
+  // Tests only
   public static Snapshot fromJson(String json) {
     return JsonUtil.parse(json, SnapshotParser::fromJson);
   }

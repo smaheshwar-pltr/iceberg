@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.CloseableIterable;
@@ -43,11 +44,15 @@ class BaseSnapshot implements Snapshot {
   private final long sequenceNumber;
   private final long timestampMillis;
   private final String manifestListLocation;
-  private final ManifestListFile manifestListFile;
+  private final long manifestListSize;
+  private final boolean needToEncryptManifestListKey;
   private final String operation;
   private final Map<String, String> summary;
   private final Integer schemaId;
   private final String[] v1ManifestLocations;
+
+  private ByteBuffer manifestListKeyMetadata;
+  private boolean manifestListKeyIsEncrypted = false;
 
   // lazily initialized
   private transient List<ManifestFile> allManifests = null;
@@ -78,7 +83,8 @@ class BaseSnapshot implements Snapshot {
         schemaId,
         manifestList,
         0L,
-        null);
+        null,
+        false);
   }
 
   BaseSnapshot(
@@ -91,7 +97,8 @@ class BaseSnapshot implements Snapshot {
       Integer schemaId,
       String manifestListLocation,
       long manifestListSize,
-      String manifestListKeyMetadata) {
+      ByteBuffer manifestListKeyMetadata,
+      boolean needToEncryptManifestListKey) {
     this.sequenceNumber = sequenceNumber;
     this.snapshotId = snapshotId;
     this.parentId = parentId;
@@ -100,8 +107,9 @@ class BaseSnapshot implements Snapshot {
     this.summary = summary;
     this.schemaId = schemaId;
     this.manifestListLocation = manifestListLocation;
-    this.manifestListFile =
-        new ManifestListFile(manifestListLocation, manifestListKeyMetadata, manifestListSize);
+    this.manifestListKeyMetadata = manifestListKeyMetadata;
+    this.needToEncryptManifestListKey = needToEncryptManifestListKey;
+    this.manifestListSize = manifestListSize;
     this.v1ManifestLocations = null;
   }
 
@@ -122,7 +130,9 @@ class BaseSnapshot implements Snapshot {
     this.summary = summary;
     this.schemaId = schemaId;
     this.manifestListLocation = null;
-    this.manifestListFile = new ManifestListFile(null, null, 0);
+    this.manifestListKeyMetadata = null;
+    this.needToEncryptManifestListKey = false;
+    this.manifestListSize = 0L;
     this.v1ManifestLocations = v1ManifestLocations;
   }
 
@@ -163,7 +173,31 @@ class BaseSnapshot implements Snapshot {
 
   @Override
   public ManifestListFile manifestListFile() {
-    return manifestListFile;
+    if (needToEncryptManifestListKey && !manifestListKeyIsEncrypted) {
+      throw new RuntimeException("ManifestList encryption key was not wrapped (encrypted)");
+    }
+
+    String encodedKeyMetadata = null;
+    if (manifestListKeyMetadata != null) {
+      // check to suppress compilation warning
+      Preconditions.checkState(manifestListKeyMetadata.arrayOffset() == 0, "Offset must be 0");
+      encodedKeyMetadata = Base64.getEncoder().encodeToString(manifestListKeyMetadata.array());
+    }
+
+    return new ManifestListFile(manifestListLocation, encodedKeyMetadata, manifestListSize);
+  }
+
+  @Override
+  public void encryptManifestListKeyMetadata(ByteBuffer metadataKey, ByteBuffer metadataAadPrefix) {
+    // check to suppress compilation warning
+    Preconditions.checkArgument(metadataKey.arrayOffset() == 0, "Offset must be 0");
+    Preconditions.checkArgument(metadataAadPrefix.arrayOffset() == 0, "Offset must be 0");
+    Ciphers.AesGcmEncryptor keyMetadataEncryptor = new Ciphers.AesGcmEncryptor(metadataKey.array());
+    byte[] aad = Ciphers.longSuffixAAD(metadataAadPrefix.array(), snapshotId);
+
+    manifestListKeyMetadata =
+        ByteBuffer.wrap(keyMetadataEncryptor.encrypt(manifestListKeyMetadata.array(), aad));
+    manifestListKeyIsEncrypted = true;
   }
 
   private void cacheManifests(FileIO fileIO) {
@@ -183,8 +217,7 @@ class BaseSnapshot implements Snapshot {
       // if manifests isn't set, then the snapshotFile is set and should be read to get the list
       InputFile manifestListInputFile = fileIO.newInputFile(manifestListLocation);
 
-      if (manifestListFile != null
-          && manifestListFile.encodedKeyMetadata() != null) { // encrypted manifest list file
+      if (manifestListKeyMetadata != null) { // encrypted manifest list file
         Preconditions.checkArgument(
             fileIO instanceof EncryptingFileIO,
             "Cannot read manifest list (%s) because it is encrypted but the configured "
@@ -193,12 +226,10 @@ class BaseSnapshot implements Snapshot {
             fileIO.getClass());
 
         EncryptingFileIO encryptingFileIO = (EncryptingFileIO) fileIO;
-        ByteBuffer keyMetadataBytes =
-            ByteBuffer.wrap(Base64.getDecoder().decode(manifestListFile.encodedKeyMetadata()));
 
         manifestListInputFile =
             encryptingFileIO.newDecryptingInputFile(
-                manifestListLocation, manifestListFile.size(), keyMetadataBytes);
+                manifestListLocation, manifestListSize, manifestListKeyMetadata);
       }
 
       this.allManifests = ManifestLists.read(manifestListInputFile);
