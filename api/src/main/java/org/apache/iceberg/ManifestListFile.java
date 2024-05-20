@@ -22,12 +22,12 @@ import java.io.Serializable;
 
 public class ManifestListFile implements Serializable {
   private final String location;
-  private final String encodedKeyMetadata;
+  private final String wrappedKeyMetadata;
   private final long size;
 
-  public ManifestListFile(String location, String encodedKeyMetadata, long size) {
+  public ManifestListFile(String location, String wrappedKeyMetadata, long size) {
     this.location = location;
-    this.encodedKeyMetadata = encodedKeyMetadata;
+    this.wrappedKeyMetadata = wrappedKeyMetadata;
     this.size = size;
   }
 
@@ -39,10 +39,10 @@ public class ManifestListFile implements Serializable {
   /**
    * Key metadata for manifest list in encrypted table.
    *
-   * @return base64-encoded key metadata for the manifest list file
+   * @return encrypted and base64-encoded key metadata for the manifest list file
    */
-  public String encodedKeyMetadata() {
-    return encodedKeyMetadata;
+  public String wrappedKeyMetadata() {
+    return wrappedKeyMetadata;
   }
 
   /**

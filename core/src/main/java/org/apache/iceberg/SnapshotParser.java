@@ -98,9 +98,9 @@ public class SnapshotParser {
       generator.writeNumberField(SCHEMA_ID, snapshot.schemaId());
     }
 
-    if (snapshot.manifestListFile().encodedKeyMetadata() != null) {
+    if (snapshot.manifestListFile().wrappedKeyMetadata() != null) {
       generator.writeStringField(
-          MANIFEST_LIST_KEY_METADATA, snapshot.manifestListFile().encodedKeyMetadata());
+          MANIFEST_LIST_KEY_METADATA, snapshot.manifestListFile().wrappedKeyMetadata());
     }
 
     if (snapshot.manifestListFile().size() > 0) {
@@ -205,7 +205,7 @@ public class SnapshotParser {
           manifestList,
           manifestListSize,
           manifestListKeyMetadata,
-          false);
+          false); // reader - manifest list key is already encrypted in storage
 
     } else {
       // fall back to an embedded manifest list. pass in the manifest's InputFile so length can be
