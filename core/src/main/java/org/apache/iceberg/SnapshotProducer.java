@@ -277,6 +277,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
       throw new RuntimeIOException(e, "Failed to write manifest list file");
     }
 
+    boolean needToEncryptManifestListKey = manifestListKeyMetadata != null;
+
     return new BaseSnapshot(
         sequenceNumber,
         snapshotId(),
@@ -288,7 +290,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         manifestList.location(),
         manifestListSize,
         manifestListKeyMetadata,
-        true);
+        needToEncryptManifestListKey);
   }
 
   protected abstract Map<String, String> summary();
