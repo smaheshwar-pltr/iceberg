@@ -19,7 +19,6 @@
 package org.apache.iceberg;
 
 import java.io.Serializable;
-import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.io.FileIO;
@@ -171,16 +170,6 @@ public interface Snapshot extends Serializable {
   default ManifestListFile manifestListFile() {
     throw new UnsupportedOperationException(
         this.getClass().getName() + " doesn't implement manifestListFile method");
-  }
-
-  /**
-   * Encrypt the key metadata of this snapshot's manifest list file - using the metadata key and AAD
-   * prefix.
-   */
-  default void encryptManifestListKeyMetadata(
-      ByteBuffer metadataKey, ByteBuffer metadataAadPrefix) {
-    throw new UnsupportedOperationException(
-        this.getClass().getName() + " doesn't implement encryptManifestListKeyMetadata method");
   }
 
   /**

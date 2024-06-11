@@ -216,18 +216,4 @@ public class Ciphers {
       return aad;
     }
   }
-
-  public static byte[] longSuffixAAD(byte[] aadPrefix, long suffixID) {
-    byte[] aadSuffix =
-        ByteBuffer.wrap(new byte[8]).order(ByteOrder.LITTLE_ENDIAN).putLong(suffixID).array();
-
-    if (null == aadPrefix) {
-      return aadSuffix;
-    } else {
-      byte[] aad = new byte[aadPrefix.length + 8];
-      System.arraycopy(aadPrefix, 0, aad, 0, aadPrefix.length);
-      System.arraycopy(aadSuffix, 0, aad, aadPrefix.length, 8);
-      return aad;
-    }
-  }
 }

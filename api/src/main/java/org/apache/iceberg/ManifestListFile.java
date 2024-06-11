@@ -24,11 +24,14 @@ public class ManifestListFile implements Serializable {
   private final String location;
   private final String wrappedKeyMetadata;
   private final long size;
+  private final String wrappedKeyEncryptionKey;
 
-  public ManifestListFile(String location, String wrappedKeyMetadata, long size) {
+  public ManifestListFile(
+      String location, String wrappedKeyMetadata, long size, String wrappedKeyEncryptionKey) {
     this.location = location;
     this.wrappedKeyMetadata = wrappedKeyMetadata;
     this.size = size;
+    this.wrappedKeyEncryptionKey = wrappedKeyEncryptionKey;
   }
 
   /** Location of manifest list file. */
@@ -51,5 +54,9 @@ public class ManifestListFile implements Serializable {
    */
   public long size() {
     return size;
+  }
+
+  public String wrappedKeyEncryptionKey() {
+    return wrappedKeyEncryptionKey;
   }
 }

@@ -26,6 +26,10 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.Map;
 import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
@@ -101,6 +105,12 @@ public class SnapshotParser {
     if (snapshot.manifestListFile().wrappedKeyMetadata() != null) {
       generator.writeStringField(
           MANIFEST_LIST_KEY_METADATA, snapshot.manifestListFile().wrappedKeyMetadata());
+      ByteBuffer decodedManifestListKeyMetadata =
+          ByteBuffer.wrap(
+              Base64.getDecoder().decode(snapshot.manifestListFile().wrappedKeyMetadata()));
+
+      NativeEncryptionKeyMetadata wrappedKeyMetadata =
+          EncryptionUtil.parseKeyMetadata(decodedManifestListKeyMetadata);
     }
 
     if (snapshot.manifestListFile().size() > 0) {
@@ -120,10 +130,10 @@ public class SnapshotParser {
   }
 
   static Snapshot fromJson(JsonNode node) {
-    return fromJson(node, null, null);
+    return fromJson(node, null);
   }
 
-  static Snapshot fromJson(JsonNode node, ByteBuffer metadataKey, ByteBuffer metadataAadPrefix) {
+  static Snapshot fromJson(JsonNode node, EncryptionManager encryption) {
     Preconditions.checkArgument(
         node.isObject(), "Cannot parse table version from a non-object: %s", node);
 
@@ -167,28 +177,35 @@ public class SnapshotParser {
       String manifestList = JsonUtil.getString(MANIFEST_LIST, node);
 
       ByteBuffer manifestListKeyMetadata = null;
+      ByteBuffer wrappedManifestListKeyMetadata = null;
+      String wrappedKeyEncryptionKey = null;
 
       // Manifest list can be encrypted
       if (node.has(MANIFEST_LIST_KEY_METADATA)) {
         // Decode and decrypt manifest list key with metadata key
-        Preconditions.checkArgument(
-            metadataKey != null, "Can't decrypt manifest list key - metadata key is not provided");
-        Preconditions.checkArgument(
-            metadataAadPrefix != null,
-            "Can't decrypt manifest list key - metadata AAD prefix is not provided");
-
         String manifestListKeyMetadataString = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
-        byte[] decodedManifestListKeyMetadata =
-            Base64.getDecoder().decode(manifestListKeyMetadataString);
+        wrappedManifestListKeyMetadata =
+            ByteBuffer.wrap(Base64.getDecoder().decode(manifestListKeyMetadataString));
 
-        // check to suppress compilation warning
-        Preconditions.checkArgument(metadataKey.arrayOffset() == 0, "Offset must be 0");
-        Preconditions.checkArgument(metadataAadPrefix.arrayOffset() == 0, "Offset must be 0");
-        Ciphers.AesGcmDecryptor keyMetadataDecryptor =
-            new Ciphers.AesGcmDecryptor(metadataKey.array());
-        byte[] aad = Ciphers.longSuffixAAD(metadataAadPrefix.array(), snapshotId);
+        NativeEncryptionKeyMetadata nativeWrappedKeyMetadata =
+            EncryptionUtil.parseKeyMetadata(wrappedManifestListKeyMetadata);
+        ByteBuffer wrappedManifestListKey = nativeWrappedKeyMetadata.encryptionKey();
+        Preconditions.checkState(
+            encryption instanceof StandardEncryptionManager,
+            "Can't decrypt manifest list key - encryption manager %s is not instance of StandardEncryptionManager",
+            encryption.getClass());
+        StandardEncryptionManager standardEncryptionManager =
+            (StandardEncryptionManager) encryption;
+        byte[] keyEncryptionKey = standardEncryptionManager.keyEncryptionKey();
+        Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(keyEncryptionKey);
+        Preconditions.checkState(
+            wrappedManifestListKey.arrayOffset() == 0, "Array offset must be 0");
+        ByteBuffer manifestListKey =
+            ByteBuffer.wrap(keyDecryptor.decrypt(wrappedManifestListKey.array(), null));
         manifestListKeyMetadata =
-            ByteBuffer.wrap(keyMetadataDecryptor.decrypt(decodedManifestListKeyMetadata, aad));
+            EncryptionUtil.createKeyMetadata(manifestListKey, nativeWrappedKeyMetadata.aadPrefix())
+                .buffer();
+        wrappedKeyEncryptionKey = standardEncryptionManager.wrappedKeyEncryptionKey();
       }
 
       long manifestListSize =
@@ -205,7 +222,8 @@ public class SnapshotParser {
           manifestList,
           manifestListSize,
           manifestListKeyMetadata,
-          false); // reader - manifest list key is already encrypted in storage
+          wrappedManifestListKeyMetadata,
+          wrappedKeyEncryptionKey);
 
     } else {
       // fall back to an embedded manifest list. pass in the manifest's InputFile so length can be
