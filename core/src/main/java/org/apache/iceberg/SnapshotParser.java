@@ -105,12 +105,6 @@ public class SnapshotParser {
     if (snapshot.manifestListFile().wrappedKeyMetadata() != null) {
       generator.writeStringField(
           MANIFEST_LIST_KEY_METADATA, snapshot.manifestListFile().wrappedKeyMetadata());
-      ByteBuffer decodedManifestListKeyMetadata =
-          ByteBuffer.wrap(
-              Base64.getDecoder().decode(snapshot.manifestListFile().wrappedKeyMetadata()));
-
-      NativeEncryptionKeyMetadata wrappedKeyMetadata =
-          EncryptionUtil.parseKeyMetadata(decodedManifestListKeyMetadata);
     }
 
     if (snapshot.manifestListFile().size() > 0) {
