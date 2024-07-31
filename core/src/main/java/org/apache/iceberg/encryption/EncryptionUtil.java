@@ -20,10 +20,17 @@ package org.apache.iceberg.encryption;
 
 import java.nio.ByteBuffer;
 import java.util.Map;
+import org.apache.iceberg.BaseManifestListFile;
 import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.ManifestListFile;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.common.DynConstructors;
+import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.util.ByteBuffers;
+import org.apache.iceberg.util.PropertyUtil;
 
 public class EncryptionUtil {
 
@@ -69,8 +76,26 @@ public class EncryptionUtil {
     return kmsClient;
   }
 
+  /**
+   * @deprecated will be removed in 2.0.0. use {@link #createEncryptionManager(String, int,
+   *     KeyManagementClient, long)} instead.
+   */
+  @Deprecated
   public static EncryptionManager createEncryptionManager(
-      String tableKeyId, int dekLength, KeyManagementClient kmsClient) {
+      Map<String, String> tableProperties, KeyManagementClient kmsClient) {
+    String tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
+    int dataKeyLength =
+        PropertyUtil.propertyAsInt(
+            tableProperties,
+            TableProperties.ENCRYPTION_DEK_LENGTH,
+            TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+
+    return createEncryptionManager(
+        tableKeyId, dataKeyLength, kmsClient, CatalogProperties.KEK_CACHE_TIMEOUT_MS_DEFAULT);
+  }
+
+  public static EncryptionManager createEncryptionManager(
+      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient, long kekCacheTimeout) {
     Preconditions.checkArgument(kmsClient != null, "Invalid KMS client: null");
 
     if (null == tableKeyId) {
@@ -79,26 +104,77 @@ public class EncryptionUtil {
     }
 
     Preconditions.checkState(
-        dekLength == 16 || dekLength == 24 || dekLength == 32,
+        dataKeyLength == 16 || dataKeyLength == 24 || dataKeyLength == 32,
         "Invalid data key length: %s (must be 16, 24, or 32)",
-        dekLength);
+        dataKeyLength);
 
-    return new StandardEncryptionManager(tableKeyId, dekLength, kmsClient);
+    return new StandardEncryptionManager(tableKeyId, dataKeyLength, kmsClient, kekCacheTimeout);
   }
 
   public static EncryptedOutputFile plainAsEncryptedOutput(OutputFile encryptingOutputFile) {
     return new BaseEncryptedOutputFile(encryptingOutputFile, EncryptionKeyMetadata.empty());
   }
 
-  public static EncryptionKeyMetadata createKeyMetadata(ByteBuffer key, ByteBuffer aadPrefix) {
+  public static EncryptionKeyMetadata setFileLength(
+      EncryptionKeyMetadata encryptionKeyMetadata, long manifestListLength) {
     Preconditions.checkState(
-        key.arrayOffset() == 0, "Invalid key array offset {}", key.arrayOffset());
-    Preconditions.checkState(
-        aadPrefix.arrayOffset() == 0, "Invalid aad array offset {}", aadPrefix.arrayOffset());
-    return new StandardKeyMetadata(key.array(), aadPrefix.array());
+        encryptionKeyMetadata instanceof StandardKeyMetadata,
+        "Cant set file length in %s",
+        encryptionKeyMetadata.getClass());
+    ((StandardKeyMetadata) encryptionKeyMetadata).setFileLength(manifestListLength);
+    return encryptionKeyMetadata;
   }
 
-  public static NativeEncryptionKeyMetadata parseKeyMetadata(ByteBuffer keyMetadataBytes) {
-    return StandardKeyMetadata.parse(keyMetadataBytes);
+  private static long parseFileLength(ByteBuffer keyMetadataBuffer) {
+    StandardKeyMetadata standardKeyMetadata = StandardKeyMetadata.parse(keyMetadataBuffer);
+    return standardKeyMetadata.fileLength();
+  }
+
+  public static void getKekCacheFromMetadata(FileIO io, Map<String, KeyEncryptionKey> kekCache) {
+    Preconditions.checkState(
+        io instanceof EncryptingFileIO,
+        "Can't set KEK cache - IO %s is not instance of EncryptingFileIO",
+        io.getClass());
+    EncryptionManager encryption = ((EncryptingFileIO) io).encryptionManager();
+    Preconditions.checkState(
+        encryption instanceof StandardEncryptionManager,
+        "Can't set KEK cache - encryption manager %s is not instance of StandardEncryptionManager",
+        encryption.getClass());
+    ((StandardEncryptionManager) encryption).addKekCache(kekCache);
+  }
+
+  public static InputFile decryptManifestListFile(
+      ManifestListFile manifestListFile, FileIO fileIO) {
+    Preconditions.checkArgument(
+        fileIO instanceof EncryptingFileIO,
+        "Cannot read manifest list (%s) because it is encrypted but the configured "
+            + "FileIO (%s) does not implement EncryptingFileIO",
+        manifestListFile.location(),
+        fileIO.getClass());
+    EncryptingFileIO encryptingFileIO = (EncryptingFileIO) fileIO;
+
+    Preconditions.checkArgument(
+        encryptingFileIO.encryptionManager() instanceof StandardEncryptionManager,
+        "Cannot read manifest list (%s) because it is encrypted but the "
+            + "encryption manager (%s) is not StandardEncryptionManager",
+        manifestListFile.location(),
+        encryptingFileIO.encryptionManager().getClass());
+    StandardEncryptionManager standardEncryptionManager =
+        (StandardEncryptionManager) encryptingFileIO.encryptionManager();
+
+    KeyEncryptionKey keyEncryptionKey =
+        standardEncryptionManager.keyEncryptionKey(manifestListFile.metadataEncryptionKeyID());
+
+    Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(keyEncryptionKey.key());
+    ByteBuffer manifestListKeyMetadata =
+        ByteBuffer.wrap(
+            keyDecryptor.decrypt(
+                ByteBuffers.toByteArray(manifestListFile.encryptedKeyMetadata()), null));
+    ((BaseManifestListFile) manifestListFile).setDecryptedKeyMetadata(manifestListKeyMetadata);
+
+    long manifestFileListLength = parseFileLength(manifestListKeyMetadata);
+
+    return encryptingFileIO.newDecryptingInputFile(
+        manifestListFile.location(), manifestFileListLength, manifestListFile.keyMetadata());
   }
 }

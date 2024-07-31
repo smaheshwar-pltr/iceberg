@@ -34,7 +34,6 @@ import static org.apache.iceberg.TableProperties.SNAPSHOT_ID_INHERITANCE_ENABLED
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -44,13 +43,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
-import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -110,7 +105,6 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private ExecutorService workerPool = ThreadPools.getWorkerPool();
   private String targetBranch = SnapshotRef.MAIN_BRANCH;
   private CommitMetrics commitMetrics;
-  private Ciphers.AesGcmEncryptor manifestListKeyEncryptor = null;
 
   protected SnapshotProducer(TableOperations ops) {
     this.ops = ops;
@@ -247,19 +241,15 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     EncryptionManager encryptionManager = ops.encryption();
     EncryptedOutputFile encryptedManifestList = encryptionManager.encrypt(manifestList);
 
-    long manifestListSize = 0L;
-    ByteBuffer manifestListKeyMetadata =
-        (encryptedManifestList.keyMetadata() == null)
-            ? null
-            : encryptedManifestList.keyMetadata().buffer();
-
-    try (ManifestListWriter writer =
-        ManifestLists.write(
-            ops.current().formatVersion(),
-            encryptedManifestList.encryptingOutputFile(),
-            snapshotId(),
-            parentSnapshotId,
-            sequenceNumber)) {
+    ManifestListWriter writer = null;
+    try {
+      writer =
+          ManifestLists.write(
+              ops.current().formatVersion(),
+              encryptedManifestList.encryptingOutputFile(),
+              snapshotId(),
+              parentSnapshotId,
+              sequenceNumber);
 
       // keep track of the manifest lists created
       manifestLists.add(manifestList.location());
@@ -274,46 +264,22 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
       writer.addAll(Arrays.asList(manifestFiles));
 
-      if (manifestListKeyMetadata != null) {
-        writer.close();
-        manifestListSize = writer.length();
+    } finally {
+      if (writer != null) {
+        try {
+          writer.close(); // togo gg must close before getting file length
+        } catch (IOException e) {
+          throw new RuntimeIOException(e, "Failed to close manifest list file writer");
+        }
       }
-    } catch (IOException e) {
-      throw new RuntimeIOException(e, "Failed to write manifest list file");
     }
 
-    ByteBuffer wrappedManifestListKeyMetadata = null;
-    String wrappedKeyEncryptionKey = null;
-    // Wrap manifest list key
-    if (manifestListKeyMetadata != null) {
-      Preconditions.checkState(
-          encryptionManager instanceof StandardEncryptionManager,
-          "Can't get key encryption key for manifest lists - encryption manager %s is not instance of StandardEncryptionManager",
-          encryptionManager.getClass());
-      StandardEncryptionManager standardEncryptionManager =
-          (StandardEncryptionManager) encryptionManager;
-
-      Preconditions.checkState(
-          encryptedManifestList.keyMetadata() instanceof NativeEncryptionKeyMetadata,
-          "Can't get manifest list key - key metadata class %s is not instance of NativeEncryptionKeyMetadata",
-          encryptedManifestList.keyMetadata().getClass());
-      NativeEncryptionKeyMetadata nativeKeyMetadata =
-          (NativeEncryptionKeyMetadata) encryptedManifestList.keyMetadata();
-
-      if (manifestListKeyEncryptor == null) {
-        byte[] keyEncryptionKey = standardEncryptionManager.keyEncryptionKey();
-        manifestListKeyEncryptor = new Ciphers.AesGcmEncryptor(keyEncryptionKey);
-      }
-
-      ByteBuffer wrappedManifestListKey =
-          ByteBuffer.wrap(
-              manifestListKeyEncryptor.encrypt(nativeKeyMetadata.encryptionKey().array(), null));
-
-      wrappedManifestListKeyMetadata =
-          EncryptionUtil.createKeyMetadata(wrappedManifestListKey, nativeKeyMetadata.aadPrefix())
-              .buffer();
-      wrappedKeyEncryptionKey = standardEncryptionManager.wrappedKeyEncryptionKey();
-    }
+    ManifestListFile manifestListFile =
+        BaseManifestListFile.create(
+            manifestList.location(),
+            encryptionManager,
+            encryptedManifestList.keyMetadata(),
+            writer.length());
 
     return new BaseSnapshot(
         sequenceNumber,
@@ -323,11 +289,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         operation(),
         summary(base),
         base.currentSchemaId(),
-        manifestList.location(),
-        manifestListSize,
-        manifestListKeyMetadata,
-        wrappedManifestListKeyMetadata,
-        wrappedKeyEncryptionKey);
+        manifestListFile);
   }
 
   protected abstract Map<String, String> summary();

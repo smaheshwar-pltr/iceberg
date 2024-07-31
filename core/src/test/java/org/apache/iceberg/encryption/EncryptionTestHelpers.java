@@ -35,6 +35,7 @@ public class EncryptionTestHelpers {
     return EncryptionUtil.createEncryptionManager(
         UnitestKMS.MASTER_KEY_NAME1,
         TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT,
-        EncryptionUtil.createKmsClient(catalogProperties));
+        EncryptionUtil.createKmsClient(catalogProperties),
+        CatalogProperties.KEK_CACHE_TIMEOUT_MS_DEFAULT);
   }
 }

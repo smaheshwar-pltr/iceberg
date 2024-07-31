@@ -20,12 +20,10 @@ package org.apache.iceberg;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
@@ -42,14 +40,11 @@ class BaseSnapshot implements Snapshot {
   private final Long parentId;
   private final long sequenceNumber;
   private final long timestampMillis;
-  private final String manifestListLocation;
-  private final long manifestListSize;
-  private final ByteBuffer manifestListKeyMetadata;
-  private final ManifestListFile manifestListFile;
   private final String operation;
   private final Map<String, String> summary;
   private final Integer schemaId;
   private final String[] v1ManifestLocations;
+  private ManifestListFile manifestListFile;
 
   // lazily initialized
   private transient List<ManifestFile> allManifests = null;
@@ -78,11 +73,7 @@ class BaseSnapshot implements Snapshot {
         operation,
         summary,
         schemaId,
-        manifestList,
-        0L,
-        null,
-        null,
-        null);
+        new BaseManifestListFile(manifestList, null, null, null));
   }
 
   BaseSnapshot(
@@ -93,11 +84,7 @@ class BaseSnapshot implements Snapshot {
       String operation,
       Map<String, String> summary,
       Integer schemaId,
-      String manifestListLocation,
-      long manifestListSize,
-      ByteBuffer manifestListKeyMetadata,
-      ByteBuffer wrappedManifestListKeyMetadata,
-      String wrappedKeyEncryptionKey) {
+      ManifestListFile manifestListFile) {
     this.sequenceNumber = sequenceNumber;
     this.snapshotId = snapshotId;
     this.parentId = parentId;
@@ -105,21 +92,7 @@ class BaseSnapshot implements Snapshot {
     this.operation = operation;
     this.summary = summary;
     this.schemaId = schemaId;
-    this.manifestListLocation = manifestListLocation;
-    this.manifestListSize = manifestListSize;
-    this.manifestListKeyMetadata = manifestListKeyMetadata;
-    if (wrappedManifestListKeyMetadata != null) {
-      Preconditions.checkArgument(
-          wrappedManifestListKeyMetadata.arrayOffset() == 0, "Offset must be 0");
-      String encodedKeyMetadata =
-          Base64.getEncoder().encodeToString(wrappedManifestListKeyMetadata.array());
-      this.manifestListFile =
-          new ManifestListFile(
-              manifestListLocation, encodedKeyMetadata, manifestListSize, wrappedKeyEncryptionKey);
-    } else {
-      this.manifestListFile = new ManifestListFile(manifestListLocation, null, 0, null);
-    }
-
+    this.manifestListFile = manifestListFile;
     this.v1ManifestLocations = null;
   }
 
@@ -139,10 +112,7 @@ class BaseSnapshot implements Snapshot {
     this.operation = operation;
     this.summary = summary;
     this.schemaId = schemaId;
-    this.manifestListLocation = null;
-    this.manifestListKeyMetadata = null;
-    this.manifestListFile = new ManifestListFile(null, null, 0, null);
-    this.manifestListSize = 0L;
+    this.manifestListFile = new BaseManifestListFile(null, null, null, null);
     this.v1ManifestLocations = v1ManifestLocations;
   }
 
@@ -201,21 +171,10 @@ class BaseSnapshot implements Snapshot {
 
     if (allManifests == null) {
       // if manifests isn't set, then the snapshotFile is set and should be read to get the list
-      InputFile manifestListInputFile = fileIO.newInputFile(manifestListLocation);
+      InputFile manifestListInputFile = fileIO.newInputFile(manifestListFile.location());
 
-      if (manifestListKeyMetadata != null) { // encrypted manifest list file
-        Preconditions.checkArgument(
-            fileIO instanceof EncryptingFileIO,
-            "Cannot read manifest list (%s) because it is encrypted but the configured "
-                + "FileIO (%s) does not implement EncryptingFileIO",
-            manifestListLocation,
-            fileIO.getClass());
-
-        EncryptingFileIO encryptingFileIO = (EncryptingFileIO) fileIO;
-
-        manifestListInputFile =
-            encryptingFileIO.newDecryptingInputFile(
-                manifestListLocation, manifestListSize, manifestListKeyMetadata);
+      if (manifestListFile.encryptedKeyMetadata() != null) { // encrypted manifest list file
+        manifestListInputFile = EncryptionUtil.decryptManifestListFile(manifestListFile, fileIO);
       }
 
       this.allManifests = ManifestLists.read(manifestListInputFile);
@@ -291,7 +250,7 @@ class BaseSnapshot implements Snapshot {
 
   @Override
   public String manifestListLocation() {
-    return manifestListLocation;
+    return manifestListFile.location();
   }
 
   private void cacheDeleteFileChanges(FileIO fileIO) {
@@ -392,7 +351,7 @@ class BaseSnapshot implements Snapshot {
         .add("timestamp_ms", timestampMillis)
         .add("operation", operation)
         .add("summary", summary)
-        .add("manifest-list", manifestListLocation)
+        .add("manifest-list", manifestListFile.location())
         .add("schema-id", schemaId)
         .toString();
   }

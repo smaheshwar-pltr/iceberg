@@ -16,27 +16,36 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.iceberg;
+package org.apache.iceberg.encryption;
 
-import java.nio.ByteBuffer;
+import java.io.Serializable;
 
-public interface ManifestListFile {
+public class KeyEncryptionKey implements Serializable {
+  private final String keyID;
+  private final String wrappedKey;
+  private final byte[] key;
+  private final long timestamp;
 
-  /** Location of manifest list file. */
-  String location();
+  public KeyEncryptionKey(String kekID, byte[] newKek, String wrappedNewKek, long timestamp) {
+    this.keyID = kekID;
+    this.key = newKek;
+    this.wrappedKey = wrappedNewKek;
+    this.timestamp = timestamp;
+  }
 
-  /**
-   * In encrypted tables, the manifest lists are encrypted. Returns key metadata of the encrypted
-   * manifest list file.
-   */
-  ByteBuffer keyMetadata();
+  public String id() {
+    return keyID;
+  }
 
-  /**
-   * The manifest list key metadata is encrypted with a "key encryption key" (KEK). Returns the KEK
-   * ID for this manifest file.
-   */
-  String metadataEncryptionKeyID();
+  public byte[] key() {
+    return key;
+  }
 
-  /** Returns the manifest list key metadata, encrypted with its KEK. */
-  ByteBuffer encryptedKeyMetadata();
+  public String wrappedKey() {
+    return wrappedKey;
+  }
+
+  public long timestamp() {
+    return timestamp;
+  }
 }

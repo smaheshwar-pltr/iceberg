@@ -21,29 +21,45 @@ package org.apache.iceberg.encryption;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.Map;
+import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
 
 public class StandardEncryptionManager implements EncryptionManager {
+  public static final int KEK_ID_LENGTH = 16;
+
   private final transient KeyManagementClient kmsClient;
   private final String tableKeyId;
   private final int dataKeyLength;
-  private String wrappedKeyEncryptionKey;
-  private byte[] keyEncryptionKey;
+  private final long kekCacheTimeout;
+  private Map<String, KeyEncryptionKey> kekCache;
   private transient volatile SecureRandom lazyRNG = null;
+
+  /**
+   * @deprecated will be removed in 2.0.0. use {@link #StandardEncryptionManager(String, int,
+   *     KeyManagementClient, long)} instead.
+   */
+  @Deprecated
+  public StandardEncryptionManager(
+      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient) {
+    this(tableKeyId, dataKeyLength, kmsClient, CatalogProperties.KEK_CACHE_TIMEOUT_MS_DEFAULT);
+  }
 
   /**
    * @param tableKeyId table encryption key id
    * @param dataKeyLength length of data encryption key (16/24/32 bytes)
    * @param kmsClient Client of KMS used to wrap/unwrap keys in envelope encryption
+   * @param kekCacheTimeout timeout of kek (key encryption key) cache entries
    */
   public StandardEncryptionManager(
-      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient) {
+      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient, long kekCacheTimeout) {
     Preconditions.checkNotNull(tableKeyId, "Invalid encryption key ID: null");
     Preconditions.checkArgument(
         dataKeyLength == 16 || dataKeyLength == 24 || dataKeyLength == 32,
@@ -53,6 +69,8 @@ public class StandardEncryptionManager implements EncryptionManager {
     this.tableKeyId = tableKeyId;
     this.kmsClient = kmsClient;
     this.dataKeyLength = dataKeyLength;
+    this.kekCacheTimeout = kekCacheTimeout;
+    this.kekCache = Maps.newHashMap();
   }
 
   @Override
@@ -100,37 +118,90 @@ public class StandardEncryptionManager implements EncryptionManager {
     return kmsClient.unwrapKey(wrappedSecretKey, tableKeyId);
   }
 
-  public String wrappedKeyEncryptionKey() {
-    return wrappedKeyEncryptionKey;
+  public void addKekCache(Map<String, KeyEncryptionKey> wrappedKekCache) {
+    for (Map.Entry<String, KeyEncryptionKey> entry : wrappedKekCache.entrySet()) {
+      KeyEncryptionKey wrappedKek = entry.getValue();
+      KeyEncryptionKey cachedKek = kekCache.get(entry.getKey());
+
+      if (cachedKek != null) {
+        Preconditions.checkState(
+            cachedKek.wrappedKey().equals(wrappedKek.wrappedKey()),
+            "Cached kek wrap differs from newly added for %s",
+            entry.getKey());
+      } else {
+        ByteBuffer encryptedKEK =
+            ByteBuffer.wrap(Base64.getDecoder().decode(wrappedKek.wrappedKey()));
+        // Unwrap the key in KMS
+        byte[] kekBytes = unwrapKey(encryptedKEK).array();
+
+        kekCache.put(
+            entry.getKey(),
+            new KeyEncryptionKey(
+                wrappedKek.id(), kekBytes, wrappedKek.wrappedKey(), wrappedKek.timestamp()));
+      }
+    }
   }
 
-  public void setWrappedKeyEncryptionKey(String wrappedKeyEncryptionKey) {
-    if (this.wrappedKeyEncryptionKey != null) {
-      Preconditions.checkArgument(
-          this.wrappedKeyEncryptionKey.equals(wrappedKeyEncryptionKey),
-          "Wrapped KEK must be the same for all snapshots");
-    } else if (keyEncryptionKey != null) {
-      throw new IllegalStateException(
-          "Key encryption key is set, while its wrapped version is not");
+  public KeyEncryptionKey currentKEK() {
+    if (kekCache.isEmpty()) {
+      KeyEncryptionKey keyEncryptionKey = generateNewKEK();
+      kekCache.put(keyEncryptionKey.id(), keyEncryptionKey);
+
+      return keyEncryptionKey;
     }
 
-    this.wrappedKeyEncryptionKey = wrappedKeyEncryptionKey;
-    if (keyEncryptionKey == null) {
-      ByteBuffer encryptedKEK =
-          ByteBuffer.wrap(Base64.getDecoder().decode(wrappedKeyEncryptionKey));
-      keyEncryptionKey = unwrapKey(encryptedKEK).array();
+    KeyEncryptionKey lastKek = lastKek();
+    long timeNow = System.currentTimeMillis();
+    if (timeNow - lastKek.timestamp() > kekCacheTimeout) {
+      KeyEncryptionKey keyEncryptionKey = generateNewKEK();
+      kekCache.put(keyEncryptionKey.id(), keyEncryptionKey);
+
+      return keyEncryptionKey;
     }
+
+    return lastKek;
   }
 
-  public byte[] keyEncryptionKey() {
-    if (keyEncryptionKey == null) {
-      keyEncryptionKey = new byte[dataKeyLength];
-      workerRNG().nextBytes(keyEncryptionKey);
-      wrappedKeyEncryptionKey =
-          Base64.getEncoder().encodeToString(wrapKey(ByteBuffer.wrap(keyEncryptionKey)).array());
+  private KeyEncryptionKey lastKek() {
+    int counter = 0;
+    KeyEncryptionKey result = null;
+    for (Map.Entry<String, KeyEncryptionKey> entry : kekCache.entrySet()) {
+      if (counter == 0) {
+        result = entry.getValue();
+      } else {
+        if (entry.getValue().timestamp() > result.timestamp()) {
+          result = entry.getValue();
+        }
+      }
+
+      counter++;
     }
 
-    return keyEncryptionKey;
+    return result;
+  }
+
+  private KeyEncryptionKey generateNewKEK() {
+    byte[] newKek = new byte[dataKeyLength];
+    workerRNG().nextBytes(newKek);
+    String wrappedNewKek =
+        Base64.getEncoder().encodeToString(wrapKey(ByteBuffer.wrap(newKek)).array());
+
+    byte[] idBytes = new byte[KEK_ID_LENGTH];
+    workerRNG().nextBytes(idBytes);
+    String kekID = Base64.getEncoder().encodeToString(idBytes);
+
+    return new KeyEncryptionKey(kekID, newKek, wrappedNewKek, System.currentTimeMillis());
+  }
+
+  public KeyEncryptionKey keyEncryptionKey(String kekID) {
+    KeyEncryptionKey result = kekCache.get(kekID);
+    Preconditions.checkState(result != null, "Key encryption key %s not found", kekID);
+
+    return result;
+  }
+
+  public Map<String, KeyEncryptionKey> kekCache() {
+    return kekCache;
   }
 
   private class StandardEncryptedOutputFile implements NativeEncryptionOutputFile {

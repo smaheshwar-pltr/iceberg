@@ -25,11 +25,6 @@ import java.nio.ByteBuffer;
 import java.util.Base64;
 import java.util.Iterator;
 import java.util.Map;
-import org.apache.iceberg.encryption.Ciphers;
-import org.apache.iceberg.encryption.EncryptionManager;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
@@ -37,6 +32,7 @@ import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.util.ByteBuffers;
 import org.apache.iceberg.util.JsonUtil;
 
 public class SnapshotParser {
@@ -56,7 +52,7 @@ public class SnapshotParser {
   private static final String MANIFEST_LIST = "manifest-list";
   private static final String SCHEMA_ID = "schema-id";
   private static final String MANIFEST_LIST_KEY_METADATA = "manifest-list-key-metadata";
-  private static final String MANIFEST_LIST_SIZE = "manifest-list-size";
+  private static final String KEY_METADATA_KEK_ID = "key-metadata-kek-id";
 
   static void toJson(Snapshot snapshot, JsonGenerator generator) throws IOException {
     generator.writeStartObject();
@@ -102,13 +98,14 @@ public class SnapshotParser {
       generator.writeNumberField(SCHEMA_ID, snapshot.schemaId());
     }
 
-    if (snapshot.manifestListFile().wrappedKeyMetadata() != null) {
+    if (snapshot.manifestListFile().encryptedKeyMetadata() != null) {
+      String encodedKeyMetadata =
+          Base64.getEncoder()
+              .encodeToString(
+                  ByteBuffers.toByteArray(snapshot.manifestListFile().encryptedKeyMetadata()));
+      generator.writeStringField(MANIFEST_LIST_KEY_METADATA, encodedKeyMetadata);
       generator.writeStringField(
-          MANIFEST_LIST_KEY_METADATA, snapshot.manifestListFile().wrappedKeyMetadata());
-    }
-
-    if (snapshot.manifestListFile().size() > 0) {
-      generator.writeNumberField(MANIFEST_LIST_SIZE, snapshot.manifestListFile().size());
+          KEY_METADATA_KEK_ID, snapshot.manifestListFile().metadataEncryptionKeyID());
     }
 
     generator.writeEndObject();
@@ -124,10 +121,6 @@ public class SnapshotParser {
   }
 
   static Snapshot fromJson(JsonNode node) {
-    return fromJson(node, null);
-  }
-
-  static Snapshot fromJson(JsonNode node, EncryptionManager encryption) {
     Preconditions.checkArgument(
         node.isObject(), "Cannot parse table version from a non-object: %s", node);
 
@@ -170,40 +163,23 @@ public class SnapshotParser {
       // the manifest list is stored in a manifest list file
       String manifestList = JsonUtil.getString(MANIFEST_LIST, node);
 
-      ByteBuffer manifestListKeyMetadata = null;
-      ByteBuffer wrappedManifestListKeyMetadata = null;
-      String wrappedKeyEncryptionKey = null;
-
       // Manifest list can be encrypted
+      ByteBuffer encryptedManifestListKeyMetadata = null;
+      String metadataEncryptionKeyID = null;
       if (node.has(MANIFEST_LIST_KEY_METADATA)) {
-        // Decode and decrypt manifest list key with metadata key
         String manifestListKeyMetadataString = JsonUtil.getString(MANIFEST_LIST_KEY_METADATA, node);
-        wrappedManifestListKeyMetadata =
-            ByteBuffer.wrap(Base64.getDecoder().decode(manifestListKeyMetadataString));
+        byte[] encryptedManifestListKeyMetadataByteArray =
+            Base64.getDecoder().decode(manifestListKeyMetadataString);
+        encryptedManifestListKeyMetadata =
+            ByteBuffer.wrap(encryptedManifestListKeyMetadataByteArray);
 
-        NativeEncryptionKeyMetadata nativeWrappedKeyMetadata =
-            EncryptionUtil.parseKeyMetadata(wrappedManifestListKeyMetadata);
-        ByteBuffer wrappedManifestListKey = nativeWrappedKeyMetadata.encryptionKey();
-        Preconditions.checkState(
-            encryption instanceof StandardEncryptionManager,
-            "Can't decrypt manifest list key - encryption manager %s is not instance of StandardEncryptionManager",
-            encryption.getClass());
-        StandardEncryptionManager standardEncryptionManager =
-            (StandardEncryptionManager) encryption;
-        byte[] keyEncryptionKey = standardEncryptionManager.keyEncryptionKey();
-        Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(keyEncryptionKey);
-        Preconditions.checkState(
-            wrappedManifestListKey.arrayOffset() == 0, "Array offset must be 0");
-        ByteBuffer manifestListKey =
-            ByteBuffer.wrap(keyDecryptor.decrypt(wrappedManifestListKey.array(), null));
-        manifestListKeyMetadata =
-            EncryptionUtil.createKeyMetadata(manifestListKey, nativeWrappedKeyMetadata.aadPrefix())
-                .buffer();
-        wrappedKeyEncryptionKey = standardEncryptionManager.wrappedKeyEncryptionKey();
+        metadataEncryptionKeyID = JsonUtil.getString(KEY_METADATA_KEK_ID, node);
       }
 
-      long manifestListSize =
-          node.has(MANIFEST_LIST_SIZE) ? JsonUtil.getLong(MANIFEST_LIST_SIZE, node) : 0L;
+      // key_metadata will be decrypted later
+      ManifestListFile manifestListFile =
+          new BaseManifestListFile(
+              manifestList, null, metadataEncryptionKeyID, encryptedManifestListKeyMetadata);
 
       return new BaseSnapshot(
           sequenceNumber,
@@ -213,11 +189,7 @@ public class SnapshotParser {
           operation,
           summary,
           schemaId,
-          manifestList,
-          manifestListSize,
-          manifestListKeyMetadata,
-          wrappedManifestListKeyMetadata,
-          wrappedKeyEncryptionKey);
+          manifestListFile);
 
     } else {
       // fall back to an embedded manifest list. pass in the manifest's InputFile so length can be
@@ -234,7 +206,6 @@ public class SnapshotParser {
     }
   }
 
-  // Tests only
   public static Snapshot fromJson(String json) {
     return JsonUtil.parse(json, SnapshotParser::fromJson);
   }
