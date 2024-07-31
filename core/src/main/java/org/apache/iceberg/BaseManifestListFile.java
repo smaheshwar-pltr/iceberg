@@ -66,8 +66,8 @@ public class BaseManifestListFile implements ManifestListFile, Serializable {
     return encryptedKeyMetadata;
   }
 
-  public void setDecryptedKeyMetadata(ByteBuffer openKeyMetadata) {
-    this.keyMetadata = openKeyMetadata;
+  public void setDecryptedKeyMetadata(ByteBuffer decryptedKeyMetadata) {
+    this.keyMetadata = decryptedKeyMetadata;
   }
 
   static ManifestListFile create(
