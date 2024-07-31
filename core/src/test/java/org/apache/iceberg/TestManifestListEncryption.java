@@ -18,6 +18,9 @@
  */
 package org.apache.iceberg;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -36,9 +39,7 @@ import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
-import org.assertj.core.api.Assertions;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class TestManifestListEncryption {
   private static final String PATH = "s3://bucket/table/m1.avro";
@@ -54,20 +55,21 @@ public class TestManifestListEncryption {
   private static final int DELETED_FILES = 1;
   private static final long DELETED_ROWS = 22910L;
 
-  private static final ByteBuffer firstSummaryLowerBound =
+  private static final ByteBuffer FIRST_SUMMARY_LOWER_BOUND =
       Conversions.toByteBuffer(Types.IntegerType.get(), 10);
-  private static final ByteBuffer firstSummaryUpperBound =
+  private static final ByteBuffer FIRST_SUMMARY_UPPER_BOUND =
       Conversions.toByteBuffer(Types.IntegerType.get(), 100);
-  private static final ByteBuffer secondSummaryLowerBound =
+  private static final ByteBuffer SECOND_SUMMARY_LOWER_BOUND =
       Conversions.toByteBuffer(Types.IntegerType.get(), 20);
-  private static final ByteBuffer secondSummaryUpperBound =
+  private static final ByteBuffer SECOND_SUMMARY_UPPER_BOUND =
       Conversions.toByteBuffer(Types.IntegerType.get(), 200);
 
   private static final List<ManifestFile.PartitionFieldSummary> PARTITION_SUMMARIES =
       Lists.newArrayList(
-          new GenericPartitionFieldSummary(false, firstSummaryLowerBound, firstSummaryUpperBound),
           new GenericPartitionFieldSummary(
-              true, false, secondSummaryLowerBound, secondSummaryUpperBound));
+              false, FIRST_SUMMARY_LOWER_BOUND, FIRST_SUMMARY_UPPER_BOUND),
+          new GenericPartitionFieldSummary(
+              true, false, SECOND_SUMMARY_LOWER_BOUND, SECOND_SUMMARY_UPPER_BOUND));
   private static final ByteBuffer MANIFEST_KEY_METADATA = ByteBuffer.allocate(100);
 
   private static final ManifestFile TEST_MANIFEST =
@@ -95,21 +97,20 @@ public class TestManifestListEncryption {
   public void testV2Write() throws IOException {
     ManifestFile manifest = writeAndReadEncryptedManifestList();
 
-    // all v2 fields should be read correctly
-    Assert.assertEquals("Path", PATH, manifest.path());
-    Assert.assertEquals("Length", LENGTH, manifest.length());
-    Assert.assertEquals("Spec id", SPEC_ID, manifest.partitionSpecId());
-    Assert.assertEquals("Content", ManifestContent.DATA, manifest.content());
-    Assert.assertEquals("Sequence number", SEQ_NUM, manifest.sequenceNumber());
-    Assert.assertEquals("Min sequence number", MIN_SEQ_NUM, manifest.minSequenceNumber());
-    Assert.assertEquals("Snapshot id", SNAPSHOT_ID, (long) manifest.snapshotId());
-    Assert.assertEquals("Added files count", ADDED_FILES, (int) manifest.addedFilesCount());
-    Assert.assertEquals("Added rows count", ADDED_ROWS, (long) manifest.addedRowsCount());
-    Assert.assertEquals(
-        "Existing files count", EXISTING_FILES, (int) manifest.existingFilesCount());
-    Assert.assertEquals("Existing rows count", EXISTING_ROWS, (long) manifest.existingRowsCount());
-    Assert.assertEquals("Deleted files count", DELETED_FILES, (int) manifest.deletedFilesCount());
-    Assert.assertEquals("Deleted rows count", DELETED_ROWS, (long) manifest.deletedRowsCount());
+    assertThat(manifest.path()).isEqualTo(PATH);
+    assertThat(manifest.length()).isEqualTo(LENGTH);
+    assertThat(manifest.partitionSpecId()).isEqualTo(SPEC_ID);
+    assertThat(manifest.content()).isEqualTo(ManifestContent.DATA);
+    assertThat(manifest.sequenceNumber()).isEqualTo(SEQ_NUM);
+    assertThat(manifest.minSequenceNumber()).isEqualTo(MIN_SEQ_NUM);
+    assertThat((long) manifest.snapshotId()).isEqualTo(SNAPSHOT_ID);
+    assertThat((int) manifest.addedFilesCount()).isEqualTo(ADDED_FILES);
+    assertThat((long) manifest.addedRowsCount()).isEqualTo(ADDED_ROWS);
+    assertThat((int) manifest.existingFilesCount()).isEqualTo(EXISTING_FILES);
+    assertThat((long) manifest.existingRowsCount()).isEqualTo(EXISTING_ROWS);
+    assertThat((int) manifest.deletedFilesCount()).isEqualTo(DELETED_FILES);
+    assertThat((long) manifest.deletedRowsCount()).isEqualTo(DELETED_ROWS);
+    assertThat(manifest.content()).isEqualTo(ManifestContent.DATA);
   }
 
   private ManifestFile writeAndReadEncryptedManifestList() throws IOException {
@@ -126,7 +127,7 @@ public class TestManifestListEncryption {
     InputFile rawInput = rawOutput.toInputFile();
 
     // First try to read without decryption
-    Assertions.assertThatThrownBy(() -> ManifestLists.read(rawInput))
+    assertThatThrownBy(() -> ManifestLists.read(rawInput))
         .isInstanceOf(RuntimeIOException.class)
         .hasMessageContaining("Failed to open file")
         .hasCauseInstanceOf(InvalidAvroMagicException.class);
@@ -136,7 +137,7 @@ public class TestManifestListEncryption {
     InputFile manifestListInput = ENCRYPTION_MANAGER.decrypt(encryptedManifestListInput);
 
     List<ManifestFile> manifests = ManifestLists.read(manifestListInput);
-    Assert.assertEquals("Should contain one manifest", 1, manifests.size());
+    assertThat(manifests.size()).isEqualTo(1);
     return manifests.get(0);
   }
 }
