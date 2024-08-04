@@ -20,14 +20,6 @@ package org.apache.iceberg;
 
 import java.io.Serializable;
 import java.nio.ByteBuffer;
-import org.apache.iceberg.encryption.Ciphers;
-import org.apache.iceberg.encryption.EncryptionKeyMetadata;
-import org.apache.iceberg.encryption.EncryptionManager;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.KeyEncryptionKey;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
-import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
-import org.apache.iceberg.util.ByteBuffers;
 
 public class BaseManifestListFile implements ManifestListFile, Serializable {
   private final String location;
@@ -64,37 +56,5 @@ public class BaseManifestListFile implements ManifestListFile, Serializable {
   @Override
   public ByteBuffer encryptedKeyMetadata() {
     return encryptedKeyMetadata;
-  }
-
-  public void setDecryptedKeyMetadata(ByteBuffer decryptedKeyMetadata) {
-    this.keyMetadata = decryptedKeyMetadata;
-  }
-
-  static ManifestListFile create(
-      String location, EncryptionManager em, EncryptionKeyMetadata keyMetadata, long length) {
-    ByteBuffer manifestListKeyMetadata = null;
-    String keyEncryptionKeyID = null;
-    ByteBuffer encryptedManifestListKeyMetadata = null;
-
-    // Encrypted manifest list
-    if (keyMetadata != null && keyMetadata.buffer() != null) {
-      manifestListKeyMetadata = EncryptionUtil.setFileLength(keyMetadata, length).buffer();
-
-      Preconditions.checkState(
-          em instanceof StandardEncryptionManager,
-          "Can't get key encryption key for manifest lists - encryption manager %s is not instance of StandardEncryptionManager",
-          em.getClass());
-      KeyEncryptionKey kek = ((StandardEncryptionManager) em).currentKEK();
-      Ciphers.AesGcmEncryptor manifestListMDEncryptor = new Ciphers.AesGcmEncryptor(kek.key());
-
-      encryptedManifestListKeyMetadata =
-          ByteBuffer.wrap(
-              manifestListMDEncryptor.encrypt(
-                  ByteBuffers.toByteArray(manifestListKeyMetadata), null));
-      keyEncryptionKeyID = kek.id();
-    }
-
-    return new BaseManifestListFile(
-        location, manifestListKeyMetadata, keyEncryptionKeyID, encryptedManifestListKeyMetadata);
   }
 }

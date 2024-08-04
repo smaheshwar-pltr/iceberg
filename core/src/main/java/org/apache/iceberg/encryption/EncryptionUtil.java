@@ -91,11 +91,11 @@ public class EncryptionUtil {
             TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
 
     return createEncryptionManager(
-        tableKeyId, dataKeyLength, kmsClient, CatalogProperties.KEK_CACHE_TIMEOUT_MS_DEFAULT);
+        tableKeyId, dataKeyLength, kmsClient, CatalogProperties.WRITER_KEK_TIMEOUT_MS_DEFAULT);
   }
 
   public static EncryptionManager createEncryptionManager(
-      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient, long kekCacheTimeout) {
+      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient, long writerKekTimeout) {
     Preconditions.checkArgument(kmsClient != null, "Invalid KMS client: null");
 
     if (null == tableKeyId) {
@@ -108,7 +108,7 @@ public class EncryptionUtil {
         "Invalid data key length: %s (must be 16, 24, or 32)",
         dataKeyLength);
 
-    return new StandardEncryptionManager(tableKeyId, dataKeyLength, kmsClient, kekCacheTimeout);
+    return new StandardEncryptionManager(tableKeyId, dataKeyLength, kmsClient, writerKekTimeout);
   }
 
   public static EncryptedOutputFile plainAsEncryptedOutput(OutputFile encryptingOutputFile) {
@@ -170,11 +170,49 @@ public class EncryptionUtil {
         ByteBuffer.wrap(
             keyDecryptor.decrypt(
                 ByteBuffers.toByteArray(manifestListFile.encryptedKeyMetadata()), null));
-    ((BaseManifestListFile) manifestListFile).setDecryptedKeyMetadata(manifestListKeyMetadata);
 
     long manifestFileListLength = parseFileLength(manifestListKeyMetadata);
 
     return encryptingFileIO.newDecryptingInputFile(
-        manifestListFile.location(), manifestFileListLength, manifestListFile.keyMetadata());
+        manifestListFile.location(), manifestFileListLength, manifestListKeyMetadata);
+  }
+
+  public static ManifestListFile createManifestListFile(
+      String location,
+      EncryptionManager encryptionManager,
+      EncryptionKeyMetadata keyMetadata,
+      long length) {
+    ByteBuffer manifestListKeyMetadata = null;
+    String keyEncryptionKeyID = null;
+    ByteBuffer encryptedManifestListKeyMetadata = null;
+
+    // Encrypted manifest list
+    if (keyMetadata != null && keyMetadata.buffer() != null) {
+      manifestListKeyMetadata = EncryptionUtil.setFileLength(keyMetadata, length).buffer();
+
+      Preconditions.checkState(
+          encryptionManager instanceof StandardEncryptionManager,
+          "Can't get key encryption key for manifest lists - encryption manager %s is not instance of StandardEncryptionManager",
+          encryptionManager.getClass());
+      KeyEncryptionKey kek = ((StandardEncryptionManager) encryptionManager).currentKEK();
+      Ciphers.AesGcmEncryptor manifestListMDEncryptor = new Ciphers.AesGcmEncryptor(kek.key());
+
+      encryptedManifestListKeyMetadata =
+          ByteBuffer.wrap(
+              manifestListMDEncryptor.encrypt(
+                  ByteBuffers.toByteArray(manifestListKeyMetadata), null));
+      keyEncryptionKeyID = kek.id();
+    }
+
+    return new BaseManifestListFile(
+        location, manifestListKeyMetadata, keyEncryptionKeyID, encryptedManifestListKeyMetadata);
+  }
+
+  public static Map<String, KeyEncryptionKey> kekCache(EncryptionManager encryptionManager) {
+    Preconditions.checkState(
+        encryptionManager instanceof StandardEncryptionManager,
+        "Can't get table KEK cache - encryption manager %s is not instance of StandardEncryptionManager",
+        encryptionManager.getClass());
+    return ((StandardEncryptionManager) encryptionManager).kekCache();
   }
 }

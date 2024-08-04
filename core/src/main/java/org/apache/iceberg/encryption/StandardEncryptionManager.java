@@ -38,7 +38,7 @@ public class StandardEncryptionManager implements EncryptionManager {
   private final transient KeyManagementClient kmsClient;
   private final String tableKeyId;
   private final int dataKeyLength;
-  private final long kekCacheTimeout;
+  private final long writerKekTimeout;
   private Map<String, KeyEncryptionKey> kekCache;
   private transient volatile SecureRandom lazyRNG = null;
 
@@ -49,17 +49,17 @@ public class StandardEncryptionManager implements EncryptionManager {
   @Deprecated
   public StandardEncryptionManager(
       String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient) {
-    this(tableKeyId, dataKeyLength, kmsClient, CatalogProperties.KEK_CACHE_TIMEOUT_MS_DEFAULT);
+    this(tableKeyId, dataKeyLength, kmsClient, CatalogProperties.WRITER_KEK_TIMEOUT_MS_DEFAULT);
   }
 
   /**
    * @param tableKeyId table encryption key id
    * @param dataKeyLength length of data encryption key (16/24/32 bytes)
    * @param kmsClient Client of KMS used to wrap/unwrap keys in envelope encryption
-   * @param kekCacheTimeout timeout of kek (key encryption key) cache entries
+   * @param writerKekTimeout timeout of kek (key encryption key) cache entries
    */
   public StandardEncryptionManager(
-      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient, long kekCacheTimeout) {
+      String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient, long writerKekTimeout) {
     Preconditions.checkNotNull(tableKeyId, "Invalid encryption key ID: null");
     Preconditions.checkArgument(
         dataKeyLength == 16 || dataKeyLength == 24 || dataKeyLength == 32,
@@ -69,7 +69,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     this.tableKeyId = tableKeyId;
     this.kmsClient = kmsClient;
     this.dataKeyLength = dataKeyLength;
-    this.kekCacheTimeout = kekCacheTimeout;
+    this.writerKekTimeout = writerKekTimeout;
     this.kekCache = Maps.newHashMap();
   }
 
@@ -118,7 +118,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return kmsClient.unwrapKey(wrappedSecretKey, tableKeyId);
   }
 
-  public void addKekCache(Map<String, KeyEncryptionKey> wrappedKekCache) {
+  void addKekCache(Map<String, KeyEncryptionKey> wrappedKekCache) {
     for (Map.Entry<String, KeyEncryptionKey> entry : wrappedKekCache.entrySet()) {
       KeyEncryptionKey wrappedKek = entry.getValue();
       KeyEncryptionKey cachedKek = kekCache.get(entry.getKey());
@@ -142,7 +142,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     }
   }
 
-  public KeyEncryptionKey currentKEK() {
+  KeyEncryptionKey currentKEK() {
     if (kekCache.isEmpty()) {
       KeyEncryptionKey keyEncryptionKey = generateNewKEK();
       kekCache.put(keyEncryptionKey.id(), keyEncryptionKey);
@@ -152,7 +152,7 @@ public class StandardEncryptionManager implements EncryptionManager {
 
     KeyEncryptionKey lastKek = lastKek();
     long timeNow = System.currentTimeMillis();
-    if (timeNow - lastKek.timestamp() > kekCacheTimeout) {
+    if (timeNow - lastKek.timestamp() > writerKekTimeout) {
       KeyEncryptionKey keyEncryptionKey = generateNewKEK();
       kekCache.put(keyEncryptionKey.id(), keyEncryptionKey);
 
@@ -193,14 +193,14 @@ public class StandardEncryptionManager implements EncryptionManager {
     return new KeyEncryptionKey(kekID, newKek, wrappedNewKek, System.currentTimeMillis());
   }
 
-  public KeyEncryptionKey keyEncryptionKey(String kekID) {
+  KeyEncryptionKey keyEncryptionKey(String kekID) {
     KeyEncryptionKey result = kekCache.get(kekID);
     Preconditions.checkState(result != null, "Key encryption key %s not found", kekID);
 
     return result;
   }
 
-  public Map<String, KeyEncryptionKey> kekCache() {
+  Map<String, KeyEncryptionKey> kekCache() {
     return kekCache;
   }
 

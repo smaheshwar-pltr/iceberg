@@ -46,6 +46,7 @@ import java.util.function.Consumer;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -267,7 +268,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     } finally {
       if (writer != null) {
         try {
-          writer.close(); // togo gg must close before getting file length
+          writer.close(); // must close before getting file length
         } catch (IOException e) {
           throw new RuntimeIOException(e, "Failed to close manifest list file writer");
         }
@@ -275,7 +276,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     }
 
     ManifestListFile manifestListFile =
-        BaseManifestListFile.create(
+        EncryptionUtil.createManifestListFile(
             manifestList.location(),
             encryptionManager,
             encryptedManifestList.keyMetadata(),
