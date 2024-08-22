@@ -172,9 +172,11 @@ class BaseSnapshot implements Snapshot {
 
     if (allManifests == null) {
       // if manifests isn't set, then the snapshotFile is set and should be read to get the list
-      InputFile manifestListInputFile = fileIO.newInputFile(manifestListFile.location());
+      InputFile manifestListInputFile;
 
-      if (manifestListFile.encryptedKeyMetadata() != null) { // encrypted manifest list file
+      if (manifestListFile.encryptedKeyMetadata() == null) {
+        manifestListInputFile = fileIO.newInputFile(manifestListFile.location());
+      } else { // encrypted manifest list file
         manifestListInputFile = EncryptionUtil.decryptManifestListFile(manifestListFile, fileIO);
       }
 

@@ -91,7 +91,7 @@ public class EncryptionUtil {
             TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
 
     return createEncryptionManager(
-        tableKeyId, dataKeyLength, kmsClient, CatalogProperties.WRITER_KEK_TIMEOUT_MS_DEFAULT);
+        tableKeyId, dataKeyLength, kmsClient, CatalogProperties.WRITER_KEK_TIMEOUT_SEC_DEFAULT);
   }
 
   public static EncryptionManager createEncryptionManager(

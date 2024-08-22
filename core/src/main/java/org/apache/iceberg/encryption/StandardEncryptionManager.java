@@ -49,7 +49,7 @@ public class StandardEncryptionManager implements EncryptionManager {
   @Deprecated
   public StandardEncryptionManager(
       String tableKeyId, int dataKeyLength, KeyManagementClient kmsClient) {
-    this(tableKeyId, dataKeyLength, kmsClient, CatalogProperties.WRITER_KEK_TIMEOUT_MS_DEFAULT);
+    this(tableKeyId, dataKeyLength, kmsClient, CatalogProperties.WRITER_KEK_TIMEOUT_SEC_DEFAULT);
   }
 
   /**
