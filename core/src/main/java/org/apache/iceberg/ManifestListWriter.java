@@ -63,7 +63,19 @@ abstract class ManifestListWriter implements FileAppender<ManifestFile> {
   protected abstract ManifestFile prepare(ManifestFile manifest);
 
   protected abstract FileAppender<ManifestFile> newAppender(
-      OutputFile file, Map<String, String> meta);
+      OutputFile outputFile, Map<String, String> meta);
+
+  public ManifestListFile toManifestListFile() {
+    if (em != null) {
+      String keyId = em.currentSnapshotKeyId();
+      ByteBuffer encryptedKeyMetadata =
+          EncryptionUtil.encryptSnapshotKeyMetadata(
+              em.unwrapKey(keyId), snapshotId, keyMetadata.copyWithLength(writer.length()));
+      return new BaseManifestListFile(file.location(), snapshotId, keyId, encryptedKeyMetadata);
+    } else {
+      return new BaseManifestListFile(file.location(), snapshotId, null, null);
+    }
+  }
 
   @Override
   public void add(ManifestFile manifest) {
@@ -95,13 +107,19 @@ abstract class ManifestListWriter implements FileAppender<ManifestFile> {
     return writer.length();
   }
 
-<<<<<<< HEAD
   static class V3Writer extends ManifestListWriter {
     private final V3Metadata.IndexedManifestFile wrapper;
 
-    V3Writer(OutputFile snapshotFile, long snapshotId, Long parentSnapshotId, long sequenceNumber) {
+    V3Writer(
+        OutputFile snapshotFile,
+        EncryptionManager encryptionManager,
+        long snapshotId,
+        Long parentSnapshotId,
+        long sequenceNumber) {
       super(
           snapshotFile,
+          encryptionManager,
+          snapshotId,
           ImmutableMap.of(
               "snapshot-id", String.valueOf(snapshotId),
               "parent-snapshot-id", String.valueOf(parentSnapshotId),
@@ -128,17 +146,6 @@ abstract class ManifestListWriter implements FileAppender<ManifestFile> {
       } catch (IOException e) {
         throw new RuntimeIOException(e, "Failed to create snapshot list writer for path: %s", file);
       }
-=======
-  public ManifestListFile toManifestListFile() {
-    if (em != null) {
-      String keyId = em.currentSnapshotKeyId();
-      ByteBuffer encryptedKeyMetadata =
-          EncryptionUtil.encryptSnapshotKeyMetadata(
-              em.unwrapKey(keyId), snapshotId, keyMetadata.copyWithLength(writer.length()));
-      return new BaseManifestListFile(file.location(), snapshotId, keyId, encryptedKeyMetadata);
-    } else {
-      return new BaseManifestListFile(file.location(), snapshotId, null, null);
->>>>>>> 684e5e3f3 (draft commit)
     }
   }
 
