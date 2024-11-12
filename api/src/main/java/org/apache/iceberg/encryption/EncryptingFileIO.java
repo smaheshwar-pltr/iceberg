@@ -50,10 +50,14 @@ public class EncryptingFileIO implements FileIO, Serializable {
   }
 
   private final FileIO io;
-  private final EncryptionManager em;
+  private EncryptionManager em;
 
   EncryptingFileIO(FileIO io, EncryptionManager em) {
     this.io = io;
+    this.em = em;
+  }
+
+  public void setEncryptionManager(EncryptionManager em) {
     this.em = em;
   }
 

@@ -117,7 +117,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   private EncryptionManager encryptionManager;
   private EncryptingFileIO encryptingFileIO;
-  private boolean encryptedTable;
   private String encryptionKeyId;
   private int encryptionDekLength;
 
@@ -154,7 +153,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             HIVE_ICEBERG_METADATA_REFRESH_MAX_RETRIES_DEFAULT);
     this.maxHiveTablePropertySize =
         conf.getLong(HIVE_TABLE_PROPERTY_MAX_SIZE, HIVE_TABLE_PROPERTY_MAX_SIZE_DEFAULT);
-    this.encryptedTable = false;
   }
 
   @Override
@@ -163,26 +161,21 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   @Override
-  public FileIO io() {
-    if (encryptionManager == null) {
-      encryptionManager = encryption();
-    }
-
-    if (!encryptedTable) {
-      return fileIO;
-    }
+  public FileIO io() { // TODO: Now this always returns an EncryptingFileIO.
+    encryptionManager = encryption();
 
     if (encryptingFileIO != null) {
-      return encryptingFileIO;
+      encryptingFileIO.setEncryptionManager(encryptionManager);
+    } else {
+      encryptingFileIO = EncryptingFileIO.combine(fileIO, encryptionManager);
     }
 
-    encryptingFileIO = EncryptingFileIO.combine(fileIO, encryptionManager);
     return encryptingFileIO;
   }
 
   @Override
   public EncryptionManager encryption() {
-    if (encryptionManager != null) {
+    if (encryptionManager != null && (encryptionManager instanceof StandardEncryptionManager)) {
       return encryptionManager;
     }
 
@@ -196,7 +189,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
                 "Cant create encryption manager, because key management client is not set");
       }
 
-      encryptedTable = true;
       encryptionManager =
               EncryptionUtil.createEncryptionManager(
                       encryptionKeyId, encryptionDekLength, keyManagementClient);

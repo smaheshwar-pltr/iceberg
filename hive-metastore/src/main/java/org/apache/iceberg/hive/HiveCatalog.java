@@ -638,6 +638,7 @@ public class HiveCatalog extends BaseMetastoreViewCatalog
     String tableName = tableIdentifier.name();
     HiveTableOperations ops =
         new HiveTableOperations(conf, clients, fileIO, keyManagementClient, name, dbName, tableName);
+    // TODO: this is the problem: It calls ops.io().
     fileIOTracker.track(ops);
     return ops;
   }
