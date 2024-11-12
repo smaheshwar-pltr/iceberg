@@ -180,7 +180,7 @@ public class TestTableEncryption extends CatalogTestBase {
     // Find manifest list and metadata files; check their encryption
     File[] listOfMetadataFiles = new File(metadataFolderPath).listFiles();
     boolean foundManifestListFile = false;
-    boolean foundMetadataJson = false;
+    boolean foundMetadataJson = false; // TODO: Is this ok?
 
     for (File metadataFile : listOfMetadataFiles) {
       if (metadataFile.getName().startsWith("snap-")) {
