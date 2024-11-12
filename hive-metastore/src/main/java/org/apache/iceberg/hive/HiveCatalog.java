@@ -21,6 +21,7 @@ package org.apache.iceberg.hive;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
@@ -117,11 +118,7 @@ public class HiveCatalog extends BaseMetastoreCatalog implements SupportsNamespa
 
     if (catalogProperties.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
       this.keyManagementClient = EncryptionUtil.createKmsClient(properties);
-      this.writerKekTimeout =
-          PropertyUtil.propertyAsLong(
-              properties,
-              CatalogProperties.WRITER_KEK_TIMEOUT_MS,
-              CatalogProperties.WRITER_KEK_TIMEOUT_MS_DEFAULT);
+      this.writerKekTimeout = TimeUnit.DAYS.toMillis(7);
     }
 
     this.clients = new CachedClientPool(conf, properties);
