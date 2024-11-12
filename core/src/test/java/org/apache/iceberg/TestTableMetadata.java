@@ -1679,7 +1679,8 @@ public class TestTableMetadata {
                       unsupportedFormatVersion))
           .isInstanceOf(IllegalStateException.class)
           .hasMessage(
-              "Invalid type in v%s schema: struct.ts_nanos timestamptz_ns is not supported until v3",
+              "Invalid schema for v%s:\n"
+                  + "- Invalid type for struct.ts_nanos: timestamptz_ns is not supported until v3",
               unsupportedFormatVersion);
     }
 
@@ -1691,5 +1692,39 @@ public class TestTableMetadata {
         TEST_LOCATION,
         ImmutableMap.of(),
         3);
+  }
+
+  @Test
+  public void onlyMetadataLocationIsUpdatedWithoutTimestampAndMetadataLogEntry() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(TEST_SCHEMA, 3)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("original-metadata-location")
+            .build();
+
+    assertThat(metadata.previousFiles()).isEmpty();
+    assertThat(metadata.metadataFileLocation()).isEqualTo("original-metadata-location");
+
+    // this will only update the metadata location without writing a new metadata log entry or
+    // updating lastUpdatedMillis
+    TableMetadata newMetadata =
+        TableMetadata.buildFrom(metadata).withMetadataLocation("new-metadata-location").build();
+    assertThat(newMetadata.lastUpdatedMillis()).isEqualTo(metadata.lastUpdatedMillis());
+    assertThat(newMetadata.metadataFileLocation()).isEqualTo("new-metadata-location");
+    assertThat(newMetadata.previousFiles()).isEmpty();
+
+    TableMetadata updatedMetadata =
+        TableMetadata.buildFrom(newMetadata)
+            .withMetadataLocation("updated-metadata-location")
+            .build();
+    assertThat(updatedMetadata.lastUpdatedMillis()).isEqualTo(newMetadata.lastUpdatedMillis());
+    assertThat(updatedMetadata.metadataFileLocation()).isEqualTo("updated-metadata-location");
+    assertThat(updatedMetadata.previousFiles()).isEmpty();
   }
 }

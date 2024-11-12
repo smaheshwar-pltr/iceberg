@@ -19,14 +19,25 @@
 package org.apache.iceberg.flink.maintenance.operator;
 
 public class TableMaintenanceMetrics {
-  public static final String GROUP_KEY = "maintenanceTask";
-  public static final String GROUP_VALUE_DEFAULT = "maintenanceTask";
+  public static final String GROUP_KEY = "maintenance";
+  public static final String TASK_NAME_KEY = "taskName";
+  public static final String TASK_INDEX_KEY = "taskIndex";
+  public static final String TABLE_NAME_KEY = "tableName";
 
   // TriggerManager metrics
   public static final String RATE_LIMITER_TRIGGERED = "rateLimiterTriggered";
   public static final String CONCURRENT_RUN_THROTTLED = "concurrentRunThrottled";
   public static final String TRIGGERED = "triggered";
   public static final String NOTHING_TO_TRIGGER = "nothingToTrigger";
+
+  // LockRemover metrics
+  public static final String SUCCEEDED_TASK_COUNTER = "succeededTasks";
+  public static final String FAILED_TASK_COUNTER = "failedTasks";
+  public static final String LAST_RUN_DURATION_MS = "lastRunDurationMs";
+
+  // DeleteFiles metrics
+  public static final String DELETE_FILE_FAILED_COUNTER = "deleteFailed";
+  public static final String DELETE_FILE_SUCCEEDED_COUNTER = "deleteSucceeded";
 
   private TableMaintenanceMetrics() {
     // do not instantiate
