@@ -191,6 +191,26 @@ public class StandardEncryptionManager implements EncryptionManager {
     return Base64.getEncoder().encodeToString(idBytes);
   }
 
+  public Map<String, WrappedEncryptionKey> kekCache() { // TODO: Changed.
+    return transientState.encryptionKeys;
+  }
+
+  void addKekCache(Map<String, WrappedEncryptionKey> wrappedKekCache) {
+    for (Map.Entry<String, WrappedEncryptionKey> entry : wrappedKekCache.entrySet()) {
+      WrappedEncryptionKey wrappedKek = entry.getValue();
+      WrappedEncryptionKey cachedKek = transientState.encryptionKeys.get(entry.getKey());
+
+      if (cachedKek != null) {
+        Preconditions.checkState(
+                cachedKek.wrappedKey().equals(wrappedKek.wrappedKey()),
+                "Cached kek wrap differs from newly added for %s",
+                entry.getKey());
+      } else {
+        transientState.encryptionKeys.put(entry.getKey(), wrappedKek); // TODO: Changed.
+      }
+    }
+  }
+
   private void createNewEncryptionKey() {
     if (transientState == null) {
       throw new IllegalStateException("Cannot create encryption keys after serialization");

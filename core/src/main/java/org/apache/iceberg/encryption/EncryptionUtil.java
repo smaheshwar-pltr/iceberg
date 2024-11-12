@@ -25,6 +25,7 @@ import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ManifestListFile;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.common.DynConstructors;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
@@ -111,6 +112,20 @@ public class EncryptionUtil {
 
   public static EncryptedOutputFile plainAsEncryptedOutput(OutputFile encryptingOutputFile) {
     return new BaseEncryptedOutputFile(encryptingOutputFile, EncryptionKeyMetadata.empty());
+  }
+
+  // TODO: Should maybe remove as rdblue did?
+  public static void getKekCacheFromMetadata(FileIO io, Map<String, WrappedEncryptionKey> kekCache) {
+    Preconditions.checkState(
+            io instanceof EncryptingFileIO,
+            "Can't set KEK cache - IO %s is not instance of EncryptingFileIO",
+            io.getClass());
+    EncryptionManager encryption = ((EncryptingFileIO) io).encryptionManager();
+    Preconditions.checkState(
+            encryption instanceof StandardEncryptionManager,
+            "Can't set KEK cache - encryption manager %s is not instance of StandardEncryptionManager",
+            encryption.getClass());
+    ((StandardEncryptionManager) encryption).addKekCache(kekCache);
   }
 
   /**

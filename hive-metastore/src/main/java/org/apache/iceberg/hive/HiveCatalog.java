@@ -46,6 +46,7 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
@@ -71,6 +72,7 @@ import org.apache.iceberg.view.ViewOperations;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.iceberg.encryption.KeyManagementClient;
 
 public class HiveCatalog extends BaseMetastoreViewCatalog
     implements SupportsNamespaces, Configurable {
@@ -89,6 +91,7 @@ public class HiveCatalog extends BaseMetastoreViewCatalog
   private String name;
   private Configuration conf;
   private FileIO fileIO;
+  private KeyManagementClient keyManagementClient;
   private ClientPool<IMetaStoreClient, TException> clients;
   private boolean listAllTables = false;
   private Map<String, String> catalogProperties;
@@ -123,6 +126,10 @@ public class HiveCatalog extends BaseMetastoreViewCatalog
         fileIOImpl == null
             ? new HadoopFileIO(conf)
             : CatalogUtil.loadFileIO(fileIOImpl, properties, conf);
+
+    if (catalogProperties.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
+      this.keyManagementClient = EncryptionUtil.createKmsClient(properties);
+    }
 
     this.clients = new CachedClientPool(conf, properties);
     this.fileIOTracker = new FileIOTracker();
@@ -630,7 +637,7 @@ public class HiveCatalog extends BaseMetastoreViewCatalog
     String dbName = tableIdentifier.namespace().level(0);
     String tableName = tableIdentifier.name();
     HiveTableOperations ops =
-        new HiveTableOperations(conf, clients, fileIO, name, dbName, tableName);
+        new HiveTableOperations(conf, clients, fileIO, keyManagementClient, name, dbName, tableName);
     fileIOTracker.track(ops);
     return ops;
   }

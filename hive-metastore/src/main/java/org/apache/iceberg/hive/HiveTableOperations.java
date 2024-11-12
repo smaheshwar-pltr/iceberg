@@ -45,6 +45,12 @@ import org.apache.iceberg.SnapshotSummary;
 import org.apache.iceberg.SortOrderParser;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.KeyManagementClient;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -106,18 +112,38 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final long maxHiveTablePropertySize;
   private final int metadataRefreshMaxRetries;
   private final FileIO fileIO;
+  private final KeyManagementClient keyManagementClient;
   private final ClientPool<IMetaStoreClient, TException> metaClients;
+
+  private EncryptionManager encryptionManager;
+  private EncryptingFileIO encryptingFileIO;
+  private boolean encryptedTable;
+  private String encryptionKeyId;
+  private int encryptionDekLength;
+
+  @VisibleForTesting
+  protected HiveTableOperations(
+          Configuration conf,
+          ClientPool<IMetaStoreClient, TException> metaClients,
+          FileIO fileIO,
+          String catalogName,
+          String database,
+          String table) {
+    this(conf, metaClients, fileIO, null, catalogName, database, table);
+  }
 
   protected HiveTableOperations(
       Configuration conf,
       ClientPool<IMetaStoreClient, TException> metaClients,
       FileIO fileIO,
+      KeyManagementClient keyManagementClient,
       String catalogName,
       String database,
       String table) {
     this.conf = conf;
     this.metaClients = metaClients;
     this.fileIO = fileIO;
+    this.keyManagementClient = keyManagementClient;
     this.fullName = catalogName + "." + database + "." + table;
     this.catalogName = catalogName;
     this.database = database;
@@ -128,6 +154,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             HIVE_ICEBERG_METADATA_REFRESH_MAX_RETRIES_DEFAULT);
     this.maxHiveTablePropertySize =
         conf.getLong(HIVE_TABLE_PROPERTY_MAX_SIZE, HIVE_TABLE_PROPERTY_MAX_SIZE_DEFAULT);
+    this.encryptedTable = false;
   }
 
   @Override
@@ -137,7 +164,47 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   @Override
   public FileIO io() {
-    return fileIO;
+    if (encryptionManager == null) {
+      encryptionManager = encryption();
+    }
+
+    if (!encryptedTable) {
+      return fileIO;
+    }
+
+    if (encryptingFileIO != null) {
+      return encryptingFileIO;
+    }
+
+    encryptingFileIO = EncryptingFileIO.combine(fileIO, encryptionManager);
+    return encryptingFileIO;
+  }
+
+  @Override
+  public EncryptionManager encryption() {
+    if (encryptionManager != null) {
+      return encryptionManager;
+    }
+
+    if (encryptionKeyId == null) {
+      encryptionPropsFromHms();
+    }
+
+    if (encryptionKeyId != null) {
+      if (keyManagementClient == null) {
+        throw new RuntimeException(
+                "Cant create encryption manager, because key management client is not set");
+      }
+
+      encryptedTable = true;
+      encryptionManager =
+              EncryptionUtil.createEncryptionManager(
+                      encryptionKeyId, encryptionDekLength, keyManagementClient);
+    } else {
+      encryptionManager = PlaintextEncryptionManager.instance();
+    }
+
+    return encryptionManager;
   }
 
   @Override
@@ -171,6 +238,13 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
+
+    encryptionPropsFromMetadata(metadata.properties());
+
+    if (encryption() instanceof StandardEncryptionManager) { // TODO: changed.
+      metadata.setKekCache(((StandardEncryptionManager) encryptionManager).kekCache());
+    }
+
     String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);
     boolean hiveEngineEnabled = hiveEngineEnabled(metadata, conf);
     boolean keepHiveStats = conf.getBoolean(ConfigProperties.KEEP_HIVE_STATS, false);
@@ -228,6 +302,10 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             base.properties().keySet().stream()
                 .filter(key -> !metadata.properties().containsKey(key))
                 .collect(Collectors.toSet());
+      }
+
+      if (removedProps.contains(TableProperties.ENCRYPTION_TABLE_KEY)) {
+        throw new RuntimeException("Cannot remove key in encrypted table");
       }
 
       Map<String, String> summary =
@@ -321,6 +399,45 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
     LOG.info(
         "Committed to table {} with the new metadata location {}", fullName, newMetadataLocation);
+  }
+
+  private void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
+    if (encryptionKeyId == null) {
+      encryptionKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
+    }
+
+    if (encryptionKeyId != null && encryptionDekLength <= 0) {
+      String dekLength = tableProperties.get(TableProperties.ENCRYPTION_DEK_LENGTH);
+      encryptionDekLength =
+              (dekLength == null)
+                      ? TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT
+                      : Integer.valueOf(dekLength);
+    }
+  }
+
+  private void encryptionPropsFromHms() {
+    try {
+      Table table = loadHmsTable();
+      if (table == null) {
+        return;
+      }
+
+      encryptionKeyId = table.getParameters().get(TableProperties.ENCRYPTION_TABLE_KEY);
+      if (encryptionKeyId != null) {
+        String dekLength = table.getParameters().get(TableProperties.ENCRYPTION_DEK_LENGTH);
+        encryptionDekLength =
+                (dekLength == null)
+                        ? TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT
+                        : Integer.valueOf(dekLength);
+      }
+    } catch (TException e) {
+      String errMsg =
+              String.format("Failed to get table info from metastore %s.%s", database, tableName);
+      throw new RuntimeException(errMsg, e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException("Interrupted during encryption key id retrieval", e);
+    }
   }
 
   private void setHmsTableParameters(
