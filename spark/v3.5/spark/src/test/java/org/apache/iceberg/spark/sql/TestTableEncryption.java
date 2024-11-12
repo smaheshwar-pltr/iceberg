@@ -26,9 +26,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.hadoop.shaded.org.apache.avro.data.Json;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
@@ -178,14 +181,34 @@ public class TestTableEncryption extends CatalogTestBase {
     boolean foundMetadataJson = false;
 
     for (File metadataFile : listOfMetadataFiles) {
+//      System.out.println("---------------HERE-------------");
+//      System.out.println(metadataFile.getAbsolutePath());
+
       if (metadataFile.getName().startsWith("snap-")) {
         foundManifestListFile = true;
         checkMetadataFileEncryption(localInput(metadataFile));
+      } else if (metadataFile.getAbsolutePath().endsWith("metadata.json")) {
+        foundMetadataJson = true;
+//        checkMetadataFileEncryption(localInput(metadataFile));
+
+        try {
+          System.out.println("---------------HERE-------------");
+          // Read all bytes from the file
+          String content = new String(Files.readAllBytes(Paths.get(metadataFile.getAbsolutePath())));
+          // Print the file content
+          System.out.println(content);
+        } catch (IOException e) {
+          System.err.println("Error reading the file: " + e.getMessage());
+        }
       }
     }
 
     if (!foundManifestListFile) {
       throw new RuntimeException("No manifest list files found for table " + tableName);
+    }
+
+    if (!foundMetadataJson) {
+      throw new RuntimeException("No metadata.json file found for table " + tableName);
     }
   }
 
