@@ -18,6 +18,8 @@
  */
 package org.apache.iceberg.jdbc;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.sql.DataTruncation;
 import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
@@ -31,12 +33,19 @@ import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.KeyManagementClient;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.util.PropertyUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,10 +55,12 @@ class JdbcTableOperations extends BaseMetastoreTableOperations {
   private static final Logger LOG = LoggerFactory.getLogger(JdbcTableOperations.class);
   private final String catalogName;
   private final TableIdentifier tableIdentifier;
-  private final FileIO fileIO;
   private final JdbcClientPool connections;
   private final Map<String, String> catalogProperties;
   private final JdbcUtil.SchemaVersion schemaVersion;
+
+  private final EncryptionManager encryptionManager;
+  private final EncryptingFileIO encryptingFileIO;
 
   protected JdbcTableOperations(
       JdbcClientPool dbConnPool,
@@ -60,10 +71,12 @@ class JdbcTableOperations extends BaseMetastoreTableOperations {
       JdbcUtil.SchemaVersion schemaVersion) {
     this.catalogName = catalogName;
     this.tableIdentifier = tableIdentifier;
-    this.fileIO = fileIO;
     this.connections = dbConnPool;
     this.catalogProperties = catalogProperties;
     this.schemaVersion = schemaVersion;
+
+    this.encryptionManager = EncryptionUtil.createEncryptionManager("keyA", 16, DummyKeyManagementClient.INSTANCE);
+    this.encryptingFileIO = EncryptingFileIO.combine(fileIO, encryptionManager);
   }
 
   @Override
@@ -102,6 +115,10 @@ class JdbcTableOperations extends BaseMetastoreTableOperations {
 
   @Override
   public void doCommit(TableMetadata base, TableMetadata metadata) {
+    if (encryption() instanceof StandardEncryptionManager) { // TODO: changed.
+      metadata.setKekCache(((StandardEncryptionManager) encryptionManager).kekCache());
+    }
+
     boolean newTable = base == null;
     String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);
     try {
@@ -216,11 +233,56 @@ class JdbcTableOperations extends BaseMetastoreTableOperations {
 
   @Override
   public FileIO io() {
-    return fileIO;
+    return encryptingFileIO;
+  }
+
+  @Override
+  public EncryptionManager encryption() {
+    return encryptionManager;
   }
 
   @Override
   protected String tableName() {
     return tableIdentifier.toString();
+  }
+
+  private enum DummyKeyManagementClient implements KeyManagementClient {
+    INSTANCE;
+
+    public static final String MASTER_KEY_NAME1 = "keyA";
+    public static final byte[] MASTER_KEY1 = "0123456789012345".getBytes(StandardCharsets.UTF_8);
+    public static final String MASTER_KEY_NAME2 = "keyB";
+    public static final byte[] MASTER_KEY2 = "1123456789012345".getBytes(StandardCharsets.UTF_8);
+
+    private static final Map<String, byte[]> masterKeys = ImmutableMap.of(
+            MASTER_KEY_NAME1, MASTER_KEY1,
+            MASTER_KEY_NAME2, MASTER_KEY2);
+
+    @Override
+    @SuppressWarnings("ByteBufferBackingArray")
+    public ByteBuffer wrapKey(ByteBuffer key, String wrappingKeyId) {
+      byte[] wrappingKey = masterKeys.get(wrappingKeyId);
+      if (null == wrappingKey) {
+        throw new RuntimeException("Cannot wrap, because wrapping key " + wrappingKeyId + " is not found");
+      }
+      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(wrappingKey);
+      byte[] encryptedKey = keyEncryptor.encrypt(key.array(), null);
+      return ByteBuffer.wrap(encryptedKey);
+    }
+
+    @Override
+    @SuppressWarnings("ByteBufferBackingArray")
+    public ByteBuffer unwrapKey(ByteBuffer wrappedKey, String wrappingKeyId) {
+      byte[] wrappingKey = masterKeys.get(wrappingKeyId);
+      if (null == wrappingKey) {
+        throw new RuntimeException("Cannot unwrap, because wrapping key " + wrappingKeyId + " is not found");
+      }
+      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(wrappingKey);
+      byte[] key = keyDecryptor.decrypt(wrappedKey.array(), null);
+      return ByteBuffer.wrap(key);
+    }
+
+    @Override
+    public void initialize(Map<String, String> _properties) {}
   }
 }
