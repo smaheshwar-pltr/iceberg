@@ -249,37 +249,14 @@ class JdbcTableOperations extends BaseMetastoreTableOperations {
   private enum DummyKeyManagementClient implements KeyManagementClient {
     INSTANCE;
 
-    public static final String MASTER_KEY_NAME1 = "keyA";
-    public static final byte[] MASTER_KEY1 = "0123456789012345".getBytes(StandardCharsets.UTF_8);
-    public static final String MASTER_KEY_NAME2 = "keyB";
-    public static final byte[] MASTER_KEY2 = "1123456789012345".getBytes(StandardCharsets.UTF_8);
-
-    private static final Map<String, byte[]> masterKeys = ImmutableMap.of(
-            MASTER_KEY_NAME1, MASTER_KEY1,
-            MASTER_KEY_NAME2, MASTER_KEY2);
-
     @Override
-    @SuppressWarnings("ByteBufferBackingArray")
     public ByteBuffer wrapKey(ByteBuffer key, String wrappingKeyId) {
-      byte[] wrappingKey = masterKeys.get(wrappingKeyId);
-      if (null == wrappingKey) {
-        throw new RuntimeException("Cannot wrap, because wrapping key " + wrappingKeyId + " is not found");
-      }
-      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(wrappingKey);
-      byte[] encryptedKey = keyEncryptor.encrypt(key.array(), null);
-      return ByteBuffer.wrap(encryptedKey);
+      throw new IllegalStateException("yoo");
     }
 
     @Override
-    @SuppressWarnings("ByteBufferBackingArray")
     public ByteBuffer unwrapKey(ByteBuffer wrappedKey, String wrappingKeyId) {
-      byte[] wrappingKey = masterKeys.get(wrappingKeyId);
-      if (null == wrappingKey) {
-        throw new RuntimeException("Cannot unwrap, because wrapping key " + wrappingKeyId + " is not found");
-      }
-      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(wrappingKey);
-      byte[] key = keyDecryptor.decrypt(wrappedKey.array(), null);
-      return ByteBuffer.wrap(key);
+      throw new IllegalStateException("yoo");
     }
 
     @Override
