@@ -31,7 +31,12 @@ import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateRequirement;
 import org.apache.iceberg.UpdateRequirements;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.KeyManagementClient;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -54,21 +59,24 @@ class RESTTableOperations implements TableOperations {
   private final RESTClient client;
   private final String path;
   private final Supplier<Map<String, String>> headers;
-  private final FileIO io;
   private final List<MetadataUpdate> createChanges;
   private final TableMetadata replaceBase;
   private final Set<Endpoint> endpoints;
   private UpdateType updateType;
   private TableMetadata current;
 
+  private final EncryptionManager encryptionManager;
+  private final EncryptingFileIO encryptingFileIO;
+
   RESTTableOperations(
       RESTClient client,
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
+      KeyManagementClient keyManagementClient,
       TableMetadata current,
       Set<Endpoint> endpoints) {
-    this(client, path, headers, io, UpdateType.SIMPLE, Lists.newArrayList(), current, endpoints);
+    this(client, path, headers, io, keyManagementClient, UpdateType.SIMPLE, Lists.newArrayList(), current, endpoints);
   }
 
   RESTTableOperations(
@@ -76,6 +84,7 @@ class RESTTableOperations implements TableOperations {
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
+      KeyManagementClient keyManagementClient,
       UpdateType updateType,
       List<MetadataUpdate> createChanges,
       TableMetadata current,
@@ -83,7 +92,6 @@ class RESTTableOperations implements TableOperations {
     this.client = client;
     this.path = path;
     this.headers = headers;
-    this.io = io;
     this.updateType = updateType;
     this.createChanges = createChanges;
     this.replaceBase = current;
@@ -93,6 +101,16 @@ class RESTTableOperations implements TableOperations {
       this.current = current;
     }
     this.endpoints = endpoints;
+    this.encryptionManager = EncryptionUtil.createEncryptionManager("keyA", 16, keyManagementClient);
+    this.encryptingFileIO = EncryptingFileIO.combine(io, encryptionManager);
+    if (encryptionManager instanceof StandardEncryptionManager && current != null && current.kekCache() != null) {
+        EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, current.kekCache());
+    }
+  }
+
+  @Override
+  public EncryptionManager encryption() {
+    return encryptionManager;
   }
 
   @Override
@@ -109,6 +127,12 @@ class RESTTableOperations implements TableOperations {
 
   @Override
   public void commit(TableMetadata base, TableMetadata metadata) {
+    if (metadata.kekCache() != null && encryption() instanceof StandardEncryptionManager) {
+      EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, metadata.kekCache());
+    } else if (metadata.kekCache() == null && encryption() instanceof StandardEncryptionManager) {
+        metadata.setKekCache(((StandardEncryptionManager) encryption()).kekCache());
+    }
+
     Endpoint.check(endpoints, Endpoint.V1_UPDATE_TABLE);
     Consumer<ErrorResponse> errorHandler;
     List<UpdateRequirement> requirements;
@@ -166,7 +190,7 @@ class RESTTableOperations implements TableOperations {
 
   @Override
   public FileIO io() {
-    return io;
+    return encryptingFileIO;
   }
 
   private TableMetadata updateCurrentMetadata(LoadTableResponse response) {
