@@ -18,8 +18,6 @@
  */
 package org.apache.iceberg;
 
-import org.apache.iceberg.encryption.EncryptingFileIO;
-import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
@@ -38,6 +36,7 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import org.apache.iceberg.TableMetadata.MetadataLogEntry;
 import org.apache.iceberg.TableMetadata.SnapshotLogEntry;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.exceptions.RuntimeIOException;
@@ -48,6 +47,7 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
 import org.apache.iceberg.util.JsonUtil;
 
@@ -273,12 +273,16 @@ public class TableMetadataParser {
     generator.writeEndObject();
   }
 
-  public static void writeKekCache(Map<String, WrappedEncryptionKey> kekCache, JsonGenerator generator) throws IOException {
+  public static void writeKekCache(
+      Map<String, WrappedEncryptionKey> kekCache, JsonGenerator generator) throws IOException {
     generator.writeArrayFieldStart(KEK_CACHE);
     for (Map.Entry<String, WrappedEncryptionKey> entry : kekCache.entrySet()) {
       generator.writeStartObject();
       generator.writeStringField(KEK_ID, entry.getKey());
-      generator.writeStringField(KEK_WRAP, Base64.getEncoder().encodeToString(ByteBuffers.toByteArray(entry.getValue().wrappedKey())));
+      generator.writeStringField(
+          KEK_WRAP,
+          Base64.getEncoder()
+              .encodeToString(ByteBuffers.toByteArray(entry.getValue().wrappedKey())));
       generator.writeNumberField(TIMESTAMP_MS, entry.getValue().timestamp());
       generator.writeEndObject();
     }
@@ -302,8 +306,9 @@ public class TableMetadataParser {
   public static TableMetadata read(FileIO io, InputFile file) {
     Codec codec = Codec.fromFileName(file.location());
     try (InputStream is = file.newStream();
-      InputStream gis = codec == Codec.GZIP ? new GZIPInputStream(is) : is) {
-      TableMetadata tableMetadata = fromJson(file, JsonUtil.mapper().readValue(gis, JsonNode.class));
+        InputStream gis = codec == Codec.GZIP ? new GZIPInputStream(is) : is) {
+      TableMetadata tableMetadata =
+          fromJson(file, JsonUtil.mapper().readValue(gis, JsonNode.class));
       if (tableMetadata.kekCache() != null && (io instanceof EncryptingFileIO)) {
         EncryptionUtil.getKekCacheFromMetadata(io, tableMetadata.kekCache());
       }
@@ -554,31 +559,32 @@ public class TableMetadataParser {
       }
     }
 
-    TableMetadata result = new TableMetadata(
-        metadataLocation,
-        formatVersion,
-        uuid,
-        location,
-        lastSequenceNumber,
-        lastUpdatedMillis,
-        lastAssignedColumnId,
-        currentSchemaId,
-        schemas,
-        defaultSpecId,
-        specs,
-        lastAssignedPartitionId,
-        defaultSortOrderId,
-        sortOrders,
-        properties,
-        currentSnapshotId,
-        snapshots,
-        null,
-        entries.build(),
-        metadataEntries.build(),
-        refs,
-        statisticsFiles,
-        partitionStatisticsFiles,
-        ImmutableList.of() /* no changes from the file */);
+    TableMetadata result =
+        new TableMetadata(
+            metadataLocation,
+            formatVersion,
+            uuid,
+            location,
+            lastSequenceNumber,
+            lastUpdatedMillis,
+            lastAssignedColumnId,
+            currentSchemaId,
+            schemas,
+            defaultSpecId,
+            specs,
+            lastAssignedPartitionId,
+            defaultSortOrderId,
+            sortOrders,
+            properties,
+            currentSnapshotId,
+            snapshots,
+            null,
+            entries.build(),
+            metadataEntries.build(),
+            refs,
+            statisticsFiles,
+            partitionStatisticsFiles,
+            ImmutableList.of() /* no changes from the file */);
 
     if (kekCache != null) {
       result.setKekCache(kekCache);
@@ -589,7 +595,8 @@ public class TableMetadataParser {
 
   public static Map<String, WrappedEncryptionKey> readKekCache(JsonNode node) {
     if (!node.has(KEK_CACHE)) {
-      throw new IllegalArgumentException("Cannot parse kek cache from node without kek cache: " + node);
+      throw new IllegalArgumentException(
+          "Cannot parse kek cache from node without kek cache: " + node);
     }
     Map<String, WrappedEncryptionKey> kekCache = Maps.newHashMap();
     Iterator<JsonNode> cacheIterator = node.get(KEK_CACHE).elements();
@@ -597,11 +604,11 @@ public class TableMetadataParser {
       JsonNode entryNode = cacheIterator.next();
       String kekID = JsonUtil.getString(KEK_ID, entryNode);
       kekCache.put(
+          kekID,
+          new WrappedEncryptionKey(
               kekID,
-              new WrappedEncryptionKey(
-                      kekID,
-                      ByteBuffer.wrap(Base64.getDecoder().decode(JsonUtil.getString(KEK_WRAP, entryNode))),
-                      JsonUtil.getLong(TIMESTAMP_MS, entryNode)));
+              ByteBuffer.wrap(Base64.getDecoder().decode(JsonUtil.getString(KEK_WRAP, entryNode))),
+              JsonUtil.getLong(TIMESTAMP_MS, entryNode)));
     }
     return kekCache;
   }

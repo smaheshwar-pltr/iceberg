@@ -31,7 +31,6 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import org.apache.hadoop.shaded.org.apache.avro.data.Json;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
@@ -135,14 +134,15 @@ public class TestTableEncryption extends CatalogTestBase {
     Schema schema = new Schema(optional(0, "id", Types.IntegerType.get()));
     for (String filePath : dataFiles) {
       // TODO: Changed.
-      assertThrows(ParquetCryptoRuntimeException.class,
-              () ->
-                      Parquet.read(localInput(filePath))
-                              .project(schema)
-                              .callInit()
-                              .build()
-                              .iterator()
-                              .next());
+      assertThrows(
+          ParquetCryptoRuntimeException.class,
+          () ->
+              Parquet.read(localInput(filePath))
+                  .project(schema)
+                  .callInit()
+                  .build()
+                  .iterator()
+                  .next());
     }
   }
 
@@ -181,20 +181,21 @@ public class TestTableEncryption extends CatalogTestBase {
     boolean foundMetadataJson = false;
 
     for (File metadataFile : listOfMetadataFiles) {
-//      System.out.println("---------------HERE-------------");
-//      System.out.println(metadataFile.getAbsolutePath());
+      //      System.out.println("---------------HERE-------------");
+      //      System.out.println(metadataFile.getAbsolutePath());
 
       if (metadataFile.getName().startsWith("snap-")) {
         foundManifestListFile = true;
         checkMetadataFileEncryption(localInput(metadataFile));
       } else if (metadataFile.getAbsolutePath().endsWith("metadata.json")) {
         foundMetadataJson = true;
-//        checkMetadataFileEncryption(localInput(metadataFile));
+        //        checkMetadataFileEncryption(localInput(metadataFile));
 
         try {
           System.out.println("---------------HERE-------------");
           // Read all bytes from the file
-          String content = new String(Files.readAllBytes(Paths.get(metadataFile.getAbsolutePath())));
+          String content =
+              new String(Files.readAllBytes(Paths.get(metadataFile.getAbsolutePath())));
           // Print the file content
           System.out.println(content);
         } catch (IOException e) {
@@ -217,7 +218,6 @@ public class TestTableEncryption extends CatalogTestBase {
     byte[] magic = new byte[4];
     stream.read(magic);
     stream.close();
-    assertArrayEquals(
-        magic, Ciphers.GCM_STREAM_MAGIC_STRING.getBytes(StandardCharsets.UTF_8));
+    assertArrayEquals(magic, Ciphers.GCM_STREAM_MAGIC_STRING.getBytes(StandardCharsets.UTF_8));
   }
 }

@@ -47,6 +47,7 @@ import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
@@ -72,7 +73,6 @@ import org.apache.iceberg.view.ViewOperations;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.iceberg.encryption.KeyManagementClient;
 
 public class HiveCatalog extends BaseMetastoreViewCatalog
     implements SupportsNamespaces, Configurable {
@@ -637,7 +637,8 @@ public class HiveCatalog extends BaseMetastoreViewCatalog
     String dbName = tableIdentifier.namespace().level(0);
     String tableName = tableIdentifier.name();
     HiveTableOperations ops =
-        new HiveTableOperations(conf, clients, fileIO, keyManagementClient, name, dbName, tableName);
+        new HiveTableOperations(
+            conf, clients, fileIO, keyManagementClient, name, dbName, tableName);
     // TODO: this is the problem: It calls ops.io().
     fileIOTracker.track(ops);
     return ops;

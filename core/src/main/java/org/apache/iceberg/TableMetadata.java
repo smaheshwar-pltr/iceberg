@@ -1495,33 +1495,34 @@ public class TableMetadata implements Serializable {
       List<HistoryEntry> newSnapshotLog =
           updateSnapshotLog(snapshotLog, snapshotsById, currentSnapshotId, changes);
 
-      TableMetadata result = new TableMetadata(
-          metadataLocation,
-          formatVersion,
-          uuid,
-          location,
-          lastSequenceNumber,
-          lastUpdatedMillis,
-          lastColumnId,
-          currentSchemaId,
-          ImmutableList.copyOf(schemas),
-          defaultSpecId,
-          ImmutableList.copyOf(specs),
-          lastAssignedPartitionId,
-          defaultSortOrderId,
-          ImmutableList.copyOf(sortOrders),
-          ImmutableMap.copyOf(properties),
-          currentSnapshotId,
-          ImmutableList.copyOf(snapshots),
-          snapshotsSupplier,
-          ImmutableList.copyOf(newSnapshotLog),
-          ImmutableList.copyOf(metadataHistory),
-          ImmutableMap.copyOf(refs),
-          statisticsFiles.values().stream().flatMap(List::stream).collect(Collectors.toList()),
-          partitionStatisticsFiles.values().stream()
-              .flatMap(List::stream)
-              .collect(Collectors.toList()),
-          discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes));
+      TableMetadata result =
+          new TableMetadata(
+              metadataLocation,
+              formatVersion,
+              uuid,
+              location,
+              lastSequenceNumber,
+              lastUpdatedMillis,
+              lastColumnId,
+              currentSchemaId,
+              ImmutableList.copyOf(schemas),
+              defaultSpecId,
+              ImmutableList.copyOf(specs),
+              lastAssignedPartitionId,
+              defaultSortOrderId,
+              ImmutableList.copyOf(sortOrders),
+              ImmutableMap.copyOf(properties),
+              currentSnapshotId,
+              ImmutableList.copyOf(snapshots),
+              snapshotsSupplier,
+              ImmutableList.copyOf(newSnapshotLog),
+              ImmutableList.copyOf(metadataHistory),
+              ImmutableMap.copyOf(refs),
+              statisticsFiles.values().stream().flatMap(List::stream).collect(Collectors.toList()),
+              partitionStatisticsFiles.values().stream()
+                  .flatMap(List::stream)
+                  .collect(Collectors.toList()),
+              discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes));
 
       result.setKekCache(kekCache);
 

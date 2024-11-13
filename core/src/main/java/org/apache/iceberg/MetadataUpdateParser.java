@@ -21,18 +21,13 @@ package org.apache.iceberg;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.Base64;
-import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
-import org.apache.iceberg.util.ByteBuffers;
 import org.apache.iceberg.util.JsonUtil;
 import org.apache.iceberg.view.ViewVersionParser;
 
@@ -155,7 +150,7 @@ public class MetadataUpdateParser {
           .put(MetadataUpdate.SetLocation.class, SET_LOCATION)
           .put(MetadataUpdate.AddViewVersion.class, ADD_VIEW_VERSION)
           .put(MetadataUpdate.SetCurrentViewVersion.class, SET_CURRENT_VIEW_VERSION)
-              .put(MetadataUpdate.SetKekCache.class, SET_KEK_CACHE)
+          .put(MetadataUpdate.SetKekCache.class, SET_KEK_CACHE)
           .buildOrThrow();
 
   public static String toJson(MetadataUpdate metadataUpdate) {
@@ -459,8 +454,8 @@ public class MetadataUpdateParser {
     gen.writeNumberField(VIEW_VERSION_ID, metadataUpdate.versionId());
   }
 
-  private static void writeSetKekCache(
-      MetadataUpdate.SetKekCache metadataUpdate, JsonGenerator gen) throws IOException {
+  private static void writeSetKekCache(MetadataUpdate.SetKekCache metadataUpdate, JsonGenerator gen)
+      throws IOException {
     TableMetadataParser.writeKekCache(metadataUpdate.kekCache(), gen);
   }
 

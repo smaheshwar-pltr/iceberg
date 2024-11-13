@@ -115,16 +115,17 @@ public class EncryptionUtil {
   }
 
   // TODO: Should maybe remove as rdblue did?
-  public static void getKekCacheFromMetadata(FileIO io, Map<String, WrappedEncryptionKey> kekCache) {
+  public static void getKekCacheFromMetadata(
+      FileIO io, Map<String, WrappedEncryptionKey> kekCache) {
     Preconditions.checkState(
-            io instanceof EncryptingFileIO,
-            "Can't set KEK cache - IO %s is not instance of EncryptingFileIO",
-            io.getClass());
+        io instanceof EncryptingFileIO,
+        "Can't set KEK cache - IO %s is not instance of EncryptingFileIO",
+        io.getClass());
     EncryptionManager encryption = ((EncryptingFileIO) io).encryptionManager();
     Preconditions.checkState(
-            encryption instanceof StandardEncryptionManager,
-            "Can't set KEK cache - encryption manager %s is not instance of StandardEncryptionManager",
-            encryption.getClass());
+        encryption instanceof StandardEncryptionManager,
+        "Can't set KEK cache - encryption manager %s is not instance of StandardEncryptionManager",
+        encryption.getClass());
     ((StandardEncryptionManager) encryption).addKekCache(kekCache);
   }
 

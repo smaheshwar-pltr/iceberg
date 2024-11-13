@@ -122,12 +122,12 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   @VisibleForTesting
   protected HiveTableOperations(
-          Configuration conf,
-          ClientPool<IMetaStoreClient, TException> metaClients,
-          FileIO fileIO,
-          String catalogName,
-          String database,
-          String table) {
+      Configuration conf,
+      ClientPool<IMetaStoreClient, TException> metaClients,
+      FileIO fileIO,
+      String catalogName,
+      String database,
+      String table) {
     this(conf, metaClients, fileIO, null, catalogName, database, table);
   }
 
@@ -186,12 +186,12 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (encryptionKeyId != null) {
       if (keyManagementClient == null) {
         throw new RuntimeException(
-                "Cant create encryption manager, because key management client is not set");
+            "Cant create encryption manager, because key management client is not set");
       }
 
       encryptionManager =
-              EncryptionUtil.createEncryptionManager(
-                      encryptionKeyId, encryptionDekLength, keyManagementClient);
+          EncryptionUtil.createEncryptionManager(
+              encryptionKeyId, encryptionDekLength, keyManagementClient);
     } else {
       encryptionManager = PlaintextEncryptionManager.instance();
     }
@@ -401,9 +401,9 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (encryptionKeyId != null && encryptionDekLength <= 0) {
       String dekLength = tableProperties.get(TableProperties.ENCRYPTION_DEK_LENGTH);
       encryptionDekLength =
-              (dekLength == null)
-                      ? TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT
-                      : Integer.valueOf(dekLength);
+          (dekLength == null)
+              ? TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT
+              : Integer.valueOf(dekLength);
     }
   }
 
@@ -418,13 +418,13 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       if (encryptionKeyId != null) {
         String dekLength = table.getParameters().get(TableProperties.ENCRYPTION_DEK_LENGTH);
         encryptionDekLength =
-                (dekLength == null)
-                        ? TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT
-                        : Integer.valueOf(dekLength);
+            (dekLength == null)
+                ? TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT
+                : Integer.valueOf(dekLength);
       }
     } catch (TException e) {
       String errMsg =
-              String.format("Failed to get table info from metastore %s.%s", database, tableName);
+          String.format("Failed to get table info from metastore %s.%s", database, tableName);
       throw new RuntimeException(errMsg, e);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();

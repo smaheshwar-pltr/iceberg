@@ -513,7 +513,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             paths.table(finalIdentifier),
             session::headers,
             tableFileIO(context, response.config()),
-                keyManagementClient,
+            keyManagementClient,
             tableMetadata,
             endpoints);
 
@@ -589,7 +589,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             paths.table(ident),
             session::headers,
             tableFileIO(context, response.config()),
-                keyManagementClient,
+            keyManagementClient,
             response.tableMetadata(),
             endpoints);
 
@@ -823,7 +823,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
-                  keyManagementClient,
+              keyManagementClient,
               response.tableMetadata(),
               endpoints);
 
@@ -848,7 +848,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
-                  keyManagementClient,
+              keyManagementClient,
               RESTTableOperations.UpdateType.CREATE,
               createChanges(meta),
               meta,
@@ -908,7 +908,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
-                  keyManagementClient,
+              keyManagementClient,
               RESTTableOperations.UpdateType.REPLACE,
               changes.build(),
               base,

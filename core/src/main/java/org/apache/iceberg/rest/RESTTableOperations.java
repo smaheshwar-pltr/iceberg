@@ -35,7 +35,6 @@ import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
-import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.io.FileIO;
@@ -77,7 +76,16 @@ class RESTTableOperations implements TableOperations {
       KeyManagementClient keyManagementClient,
       TableMetadata current,
       Set<Endpoint> endpoints) {
-    this(client, path, headers, io, keyManagementClient, UpdateType.SIMPLE, Lists.newArrayList(), current, endpoints);
+    this(
+        client,
+        path,
+        headers,
+        io,
+        keyManagementClient,
+        UpdateType.SIMPLE,
+        Lists.newArrayList(),
+        current,
+        endpoints);
   }
 
   RESTTableOperations(
@@ -102,10 +110,13 @@ class RESTTableOperations implements TableOperations {
       this.current = current;
     }
     this.endpoints = endpoints;
-    this.encryptionManager = EncryptionUtil.createEncryptionManager("keyA", 16, keyManagementClient);
+    this.encryptionManager =
+        EncryptionUtil.createEncryptionManager("keyA", 16, keyManagementClient);
     this.encryptingFileIO = EncryptingFileIO.combine(io, encryptionManager);
-    if (encryptionManager instanceof StandardEncryptionManager && current != null && current.kekCache() != null) {
-        EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, current.kekCache());
+    if (encryptionManager instanceof StandardEncryptionManager
+        && current != null
+        && current.kekCache() != null) {
+      EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, current.kekCache());
     }
   }
 
@@ -170,12 +181,14 @@ class RESTTableOperations implements TableOperations {
     }
 
     if (encryption() instanceof StandardEncryptionManager) {
-      Map<String, WrappedEncryptionKey> cache = ((StandardEncryptionManager) encryption()).kekCache();
+      Map<String, WrappedEncryptionKey> cache =
+          ((StandardEncryptionManager) encryption()).kekCache();
       if (cache != null && !cache.isEmpty()) {
-        updates = ImmutableList.<MetadataUpdate>builder()
-            .addAll(updates)
-            .add(new MetadataUpdate.SetKekCache(cache))
-            .build();
+        updates =
+            ImmutableList.<MetadataUpdate>builder()
+                .addAll(updates)
+                .add(new MetadataUpdate.SetKekCache(cache))
+                .build();
       }
     }
 
