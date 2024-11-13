@@ -218,6 +218,9 @@ class RESTTableOperations implements TableOperations {
     if (current == null
         || !Objects.equals(current.metadataFileLocation(), response.metadataLocation())) {
       this.current = response.tableMetadata();
+      if (current.kekCache() != null) {
+        EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, current.kekCache());
+      }
     }
 
     return current;
