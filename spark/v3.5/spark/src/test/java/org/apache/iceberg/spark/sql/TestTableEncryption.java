@@ -39,6 +39,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Streams;
 import org.apache.iceberg.spark.CatalogTestBase;
@@ -65,6 +66,15 @@ public class TestTableEncryption extends CatalogTestBase {
         SparkCatalogConfig.HIVE.catalogName(),
         SparkCatalogConfig.HIVE.implementation(),
         appendCatalogEncryptionProperties(SparkCatalogConfig.HIVE.properties())
+      },
+      {
+        SparkCatalogConfig.REST.catalogName(),
+        SparkCatalogConfig.REST.implementation(),
+        appendCatalogEncryptionProperties(
+            ImmutableMap.<String, String>builder()
+                .putAll(SparkCatalogConfig.REST.properties())
+                .put(CatalogProperties.URI, restCatalog.properties().get(CatalogProperties.URI))
+                .build())
       }
     };
   }
