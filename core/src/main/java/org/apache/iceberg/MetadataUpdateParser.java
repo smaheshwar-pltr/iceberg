@@ -21,13 +21,18 @@ package org.apache.iceberg;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Base64;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.util.ByteBuffers;
 import org.apache.iceberg.util.JsonUtil;
 import org.apache.iceberg.view.ViewVersionParser;
 
@@ -59,6 +64,7 @@ public class MetadataUpdateParser {
   static final String SET_CURRENT_VIEW_VERSION = "set-current-view-version";
   static final String SET_PARTITION_STATISTICS = "set-partition-statistics";
   static final String REMOVE_PARTITION_STATISTICS = "remove-partition-statistics";
+  static final String SET_KEK_CACHE = "set-kek-cache";
 
   // AssignUUID
   private static final String UUID = "uuid";
@@ -149,6 +155,7 @@ public class MetadataUpdateParser {
           .put(MetadataUpdate.SetLocation.class, SET_LOCATION)
           .put(MetadataUpdate.AddViewVersion.class, ADD_VIEW_VERSION)
           .put(MetadataUpdate.SetCurrentViewVersion.class, SET_CURRENT_VIEW_VERSION)
+              .put(MetadataUpdate.SetKekCache.class, SET_KEK_CACHE)
           .buildOrThrow();
 
   public static String toJson(MetadataUpdate metadataUpdate) {
@@ -241,6 +248,9 @@ public class MetadataUpdateParser {
         writeSetCurrentViewVersionId(
             (MetadataUpdate.SetCurrentViewVersion) metadataUpdate, generator);
         break;
+      case SET_KEK_CACHE:
+        writeSetKekCache((MetadataUpdate.SetKekCache) metadataUpdate, generator);
+        break;
       default:
         throw new IllegalArgumentException(
             String.format(
@@ -312,6 +322,8 @@ public class MetadataUpdateParser {
         return readAddViewVersion(jsonNode);
       case SET_CURRENT_VIEW_VERSION:
         return readCurrentViewVersionId(jsonNode);
+      case SET_KEK_CACHE:
+        return readSetKekCache(jsonNode);
       default:
         throw new UnsupportedOperationException(
             String.format("Cannot convert metadata update action to json: %s", action));
@@ -445,6 +457,11 @@ public class MetadataUpdateParser {
   private static void writeSetCurrentViewVersionId(
       MetadataUpdate.SetCurrentViewVersion metadataUpdate, JsonGenerator gen) throws IOException {
     gen.writeNumberField(VIEW_VERSION_ID, metadataUpdate.versionId());
+  }
+
+  private static void writeSetKekCache(
+      MetadataUpdate.SetKekCache metadataUpdate, JsonGenerator gen) throws IOException {
+    TableMetadataParser.writeKekCache(metadataUpdate.kekCache(), gen);
   }
 
   private static MetadataUpdate readAssignUUID(JsonNode node) {
@@ -595,5 +612,9 @@ public class MetadataUpdateParser {
 
   private static MetadataUpdate readCurrentViewVersionId(JsonNode node) {
     return new MetadataUpdate.SetCurrentViewVersion(JsonUtil.getInt(VIEW_VERSION_ID, node));
+  }
+
+  private static MetadataUpdate readSetKekCache(JsonNode node) {
+    return new MetadataUpdate.SetKekCache(TableMetadataParser.readKekCache(node));
   }
 }

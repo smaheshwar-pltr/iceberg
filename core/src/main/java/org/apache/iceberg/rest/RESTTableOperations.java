@@ -37,6 +37,7 @@ import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.encryption.StandardEncryptionManager;
+import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -127,12 +128,6 @@ class RESTTableOperations implements TableOperations {
 
   @Override
   public void commit(TableMetadata base, TableMetadata metadata) {
-    if (metadata.kekCache() != null && encryption() instanceof StandardEncryptionManager) {
-      EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, metadata.kekCache());
-    } else if (metadata.kekCache() == null && encryption() instanceof StandardEncryptionManager) {
-        metadata.setKekCache(((StandardEncryptionManager) encryption()).kekCache());
-    }
-
     Endpoint.check(endpoints, Endpoint.V1_UPDATE_TABLE);
     Consumer<ErrorResponse> errorHandler;
     List<UpdateRequirement> requirements;
@@ -172,6 +167,16 @@ class RESTTableOperations implements TableOperations {
       default:
         throw new UnsupportedOperationException(
             String.format("Update type %s is not supported", updateType));
+    }
+
+    if (encryption() instanceof StandardEncryptionManager) {
+      Map<String, WrappedEncryptionKey> cache = ((StandardEncryptionManager) encryption()).kekCache();
+      if (cache != null && !cache.isEmpty()) {
+        updates = ImmutableList.<MetadataUpdate>builder()
+            .addAll(updates)
+            .add(new MetadataUpdate.SetKekCache(cache))
+            .build();
+      }
     }
 
     UpdateTableRequest request = new UpdateTableRequest(requirements, updates);
