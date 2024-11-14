@@ -77,14 +77,21 @@ class RCKUtils {
   }
 
   static RESTCatalog initCatalogClient() {
+    return initCatalogClient(Maps.newHashMap());
+  }
+
+  static RESTCatalog initCatalogClient(Map<String, String> properties) {
     Map<String, String> catalogProperties = Maps.newHashMap();
     catalogProperties.putAll(RCKUtils.environmentCatalogConfig());
     catalogProperties.putAll(Maps.fromProperties(System.getProperties()));
+    catalogProperties.putAll(properties);
 
     // Set defaults
+    String port =
+        catalogProperties.getOrDefault(
+            RESTCatalogServer.REST_PORT, String.valueOf(RESTCatalogServer.REST_PORT_DEFAULT));
     catalogProperties.putIfAbsent(
-        CatalogProperties.URI,
-        String.format("http://localhost:%s/", RESTCatalogServer.REST_PORT_DEFAULT));
+        CatalogProperties.URI, String.format("http://localhost:%s/", port));
     catalogProperties.putIfAbsent(CatalogProperties.WAREHOUSE_LOCATION, "rck_warehouse");
 
     RESTCatalog catalog = new RESTCatalog();
