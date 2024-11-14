@@ -63,11 +63,11 @@ public class TestTableEncryption extends CatalogTestBase {
   @Parameters(name = "catalogName = {0}, implementation = {1}, config = {2}")
   protected static Object[][] parameters() {
     return new Object[][] {
-//      {
-//        SparkCatalogConfig.HIVE.catalogName(),
-//        SparkCatalogConfig.HIVE.implementation(),
-//        appendCatalogEncryptionProperties(SparkCatalogConfig.HIVE.properties())
-//      },
+      {
+        SparkCatalogConfig.HIVE.catalogName(),
+        SparkCatalogConfig.HIVE.implementation(),
+        appendCatalogEncryptionProperties(SparkCatalogConfig.HIVE.properties())
+      },
       {
         SparkCatalogConfig.REST.catalogName(),
         SparkCatalogConfig.REST.implementation(),
@@ -140,21 +140,21 @@ public class TestTableEncryption extends CatalogTestBase {
     sql("INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN'))", tableName);
 
     List<Object[]> dataFileTable =
-            sql("SELECT file_path FROM %s.%s", tableName, MetadataTableType.ALL_DATA_FILES);
+        sql("SELECT file_path FROM %s.%s", tableName, MetadataTableType.ALL_DATA_FILES);
     List<String> dataFiles =
-            Streams.concat(dataFileTable.stream())
-                    .map(row -> (String) row[0])
-                    .collect(Collectors.toList());
+        Streams.concat(dataFileTable.stream())
+            .map(row -> (String) row[0])
+            .collect(Collectors.toList());
     Schema schema = new Schema(optional(0, "id", Types.IntegerType.get()));
     for (String filePath : dataFiles) {
       assertDoesNotThrow(
-              () ->
-                      Parquet.read(localInput(filePath))
-                              .project(schema)
-                              .callInit()
-                              .build()
-                              .iterator()
-                              .next());
+          () ->
+              Parquet.read(localInput(filePath))
+                  .project(schema)
+                  .callInit()
+                  .build()
+                  .iterator()
+                  .next());
     }
   }
 
@@ -225,6 +225,22 @@ public class TestTableEncryption extends CatalogTestBase {
     if (!foundManifestListFile) {
       throw new RuntimeException("No manifest list files found for table " + tableName);
     }
+  }
+
+  @TestTemplate
+  public void testUnrecognisedEncryptionKeyId() {
+    String tableName = this.tableName + "_unrecognised";
+    sql(
+        "CREATE TABLE %s (id bigint, data string, float float) USING iceberg "
+            + "TBLPROPERTIES ( "
+            + "'encryption.key-id'='keyC')",
+        tableName);
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            sql(
+                "INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN'))",
+                tableName));
   }
 
   private void checkMetadataFileEncryption(InputFile file) throws IOException {

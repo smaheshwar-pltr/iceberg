@@ -35,6 +35,7 @@ import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.io.FileIO;
@@ -46,6 +47,7 @@ import org.apache.iceberg.rest.requests.UpdateTableRequest;
 import org.apache.iceberg.rest.responses.ErrorResponse;
 import org.apache.iceberg.rest.responses.LoadTableResponse;
 import org.apache.iceberg.util.LocationUtil;
+import org.apache.iceberg.util.PropertyUtil;
 
 class RESTTableOperations implements TableOperations {
   private static final String METADATA_FOLDER_NAME = "metadata";
@@ -66,7 +68,7 @@ class RESTTableOperations implements TableOperations {
   private TableMetadata current;
 
   private final EncryptionManager encryptionManager;
-  private final EncryptingFileIO encryptingFileIO;
+  private final FileIO io;
 
   RESTTableOperations(
       RESTClient client,
@@ -110,13 +112,30 @@ class RESTTableOperations implements TableOperations {
       this.current = current;
     }
     this.endpoints = endpoints;
-    this.encryptionManager =
-        EncryptionUtil.createEncryptionManager("keyA", 16, keyManagementClient);
-    this.encryptingFileIO = EncryptingFileIO.combine(io, encryptionManager);
-    if (encryptionManager instanceof StandardEncryptionManager
-        && current != null
-        && current.kekCache() != null) {
-      EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, current.kekCache());
+
+    Map<String, String> props = this.current != null ? this.current.properties() : null;
+    if (props != null && props.containsKey(TableProperties.ENCRYPTION_TABLE_KEY)) {
+      if (keyManagementClient == null) {
+        throw new RuntimeException(
+            "Cant create encryption manager, because key management client is not set");
+      }
+
+      this.encryptionManager =
+          EncryptionUtil.createEncryptionManager(
+              props.get(TableProperties.ENCRYPTION_TABLE_KEY),
+              PropertyUtil.propertyAsInt(
+                  props,
+                  TableProperties.ENCRYPTION_DEK_LENGTH,
+                  TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT),
+              keyManagementClient);
+      this.io = EncryptingFileIO.combine(io, encryptionManager);
+
+      if (this.current.kekCache() != null) {
+        EncryptionUtil.getKekCacheFromMetadata(this.io, this.current.kekCache());
+      }
+    } else {
+      this.encryptionManager = PlaintextEncryptionManager.instance();
+      this.io = io;
     }
   }
 
@@ -180,6 +199,8 @@ class RESTTableOperations implements TableOperations {
             String.format("Update type %s is not supported", updateType));
     }
 
+    // TODO: Do we need to check updates for a removed encryption-id property?
+
     if (encryption() instanceof StandardEncryptionManager) {
       Map<String, WrappedEncryptionKey> cache =
           ((StandardEncryptionManager) encryption()).kekCache();
@@ -208,7 +229,7 @@ class RESTTableOperations implements TableOperations {
 
   @Override
   public FileIO io() {
-    return encryptingFileIO;
+    return io;
   }
 
   private TableMetadata updateCurrentMetadata(LoadTableResponse response) {
@@ -218,9 +239,7 @@ class RESTTableOperations implements TableOperations {
     if (current == null
         || !Objects.equals(current.metadataFileLocation(), response.metadataLocation())) {
       this.current = response.tableMetadata();
-      if (current.kekCache() != null) {
-        EncryptionUtil.getKekCacheFromMetadata(encryptingFileIO, current.kekCache());
-      }
+      // TODO: Do we need to update the EncryptionManager's KEK cache with current's?
     }
 
     return current;
