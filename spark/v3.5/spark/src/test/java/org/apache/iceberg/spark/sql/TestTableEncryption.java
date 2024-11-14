@@ -132,14 +132,15 @@ public class TestTableEncryption extends CatalogTestBase {
     Schema schema = new Schema(optional(0, "id", Types.IntegerType.get()));
     for (String filePath : dataFiles) {
       // TODO: Changed.
-      assertThrows(ParquetCryptoRuntimeException.class,
-              () ->
-                      Parquet.read(localInput(filePath))
-                              .project(schema)
-                              .callInit()
-                              .build()
-                              .iterator()
-                              .next());
+      assertThrows(
+          ParquetCryptoRuntimeException.class,
+          () ->
+              Parquet.read(localInput(filePath))
+                  .project(schema)
+                  .callInit()
+                  .build()
+                  .iterator()
+                  .next());
     }
   }
 
@@ -194,7 +195,6 @@ public class TestTableEncryption extends CatalogTestBase {
     byte[] magic = new byte[4];
     stream.read(magic);
     stream.close();
-    assertArrayEquals(
-        magic, Ciphers.GCM_STREAM_MAGIC_STRING.getBytes(StandardCharsets.UTF_8));
+    assertArrayEquals(magic, Ciphers.GCM_STREAM_MAGIC_STRING.getBytes(StandardCharsets.UTF_8));
   }
 }

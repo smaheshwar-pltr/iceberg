@@ -202,9 +202,9 @@ public class StandardEncryptionManager implements EncryptionManager {
 
       if (cachedKek != null) {
         Preconditions.checkState(
-                cachedKek.wrappedKey().equals(wrappedKek.wrappedKey()),
-                "Cached kek wrap differs from newly added for %s",
-                entry.getKey());
+            cachedKek.wrappedKey().equals(wrappedKek.wrappedKey()),
+            "Cached kek wrap differs from newly added for %s",
+            entry.getKey());
       } else {
         transientState.encryptionKeys.put(entry.getKey(), wrappedKek); // TODO: Changed.
       }
