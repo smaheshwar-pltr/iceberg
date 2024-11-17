@@ -31,13 +31,7 @@ import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateRequirement;
 import org.apache.iceberg.UpdateRequirements;
-import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.KeyManagementClient;
-import org.apache.iceberg.encryption.PlaintextEncryptionManager;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
-import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -47,7 +41,6 @@ import org.apache.iceberg.rest.requests.UpdateTableRequest;
 import org.apache.iceberg.rest.responses.ErrorResponse;
 import org.apache.iceberg.rest.responses.LoadTableResponse;
 import org.apache.iceberg.util.LocationUtil;
-import org.apache.iceberg.util.PropertyUtil;
 
 class RESTTableOperations implements TableOperations {
   private static final String METADATA_FOLDER_NAME = "metadata";
@@ -61,33 +54,23 @@ class RESTTableOperations implements TableOperations {
   private final RESTClient client;
   private final String path;
   private final Supplier<Map<String, String>> headers;
+  private final FileIO io;
+  private final EncryptionManager encryptionManager;
   private final List<MetadataUpdate> createChanges;
   private final TableMetadata replaceBase;
   private final Set<Endpoint> endpoints;
   private UpdateType updateType;
   private TableMetadata current;
 
-  private final EncryptionManager encryptionManager;
-  private final FileIO io;
-
   RESTTableOperations(
       RESTClient client,
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
-      KeyManagementClient keyManagementClient,
+      EncryptionManager encryptionManager,
       TableMetadata current,
       Set<Endpoint> endpoints) {
-    this(
-        client,
-        path,
-        headers,
-        io,
-        keyManagementClient,
-        UpdateType.SIMPLE,
-        Lists.newArrayList(),
-        current,
-        endpoints);
+    this(client, path, headers, io, encryptionManager, UpdateType.SIMPLE, Lists.newArrayList(), current, endpoints);
   }
 
   RESTTableOperations(
@@ -95,7 +78,7 @@ class RESTTableOperations implements TableOperations {
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
-      KeyManagementClient keyManagementClient,
+      EncryptionManager encryptionManager,
       UpdateType updateType,
       List<MetadataUpdate> createChanges,
       TableMetadata current,
@@ -103,6 +86,8 @@ class RESTTableOperations implements TableOperations {
     this.client = client;
     this.path = path;
     this.headers = headers;
+    this.io = io;
+    this.encryptionManager = encryptionManager;
     this.updateType = updateType;
     this.createChanges = createChanges;
     this.replaceBase = current;
@@ -112,36 +97,6 @@ class RESTTableOperations implements TableOperations {
       this.current = current;
     }
     this.endpoints = endpoints;
-
-    Map<String, String> props = this.current != null ? this.current.properties() : null;
-    if (props != null && props.containsKey(TableProperties.ENCRYPTION_TABLE_KEY)) {
-      if (keyManagementClient == null) {
-        throw new RuntimeException(
-            "Cant create encryption manager, because key management client is not set");
-      }
-
-      this.encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              props.get(TableProperties.ENCRYPTION_TABLE_KEY),
-              PropertyUtil.propertyAsInt(
-                  props,
-                  TableProperties.ENCRYPTION_DEK_LENGTH,
-                  TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT),
-              keyManagementClient);
-      this.io = EncryptingFileIO.combine(io, encryptionManager);
-
-      if (this.current.kekCache() != null) {
-        EncryptionUtil.getKekCacheFromMetadata(this.io, this.current.kekCache());
-      }
-    } else {
-      this.encryptionManager = PlaintextEncryptionManager.instance();
-      this.io = io;
-    }
-  }
-
-  @Override
-  public EncryptionManager encryption() {
-    return encryptionManager;
   }
 
   @Override
@@ -199,20 +154,6 @@ class RESTTableOperations implements TableOperations {
             String.format("Update type %s is not supported", updateType));
     }
 
-    // TODO: Do we need to check updates for a removed encryption-id property?
-
-    if (encryption() instanceof StandardEncryptionManager) {
-      Map<String, WrappedEncryptionKey> cache =
-          ((StandardEncryptionManager) encryption()).kekCache();
-      if (cache != null && !cache.isEmpty()) {
-        updates =
-            ImmutableList.<MetadataUpdate>builder()
-                .addAll(updates)
-                .add(new MetadataUpdate.SetKekCache(cache))
-                .build();
-      }
-    }
-
     UpdateTableRequest request = new UpdateTableRequest(requirements, updates);
 
     // the error handler will throw necessary exceptions like CommitFailedException and
@@ -232,6 +173,11 @@ class RESTTableOperations implements TableOperations {
     return io;
   }
 
+  @Override
+  public EncryptionManager encryption() {
+    return encryptionManager;
+  }
+
   private TableMetadata updateCurrentMetadata(LoadTableResponse response) {
     // LoadTableResponse is used to deserialize the response, but config is not allowed by the REST
     // spec so it can be
@@ -239,7 +185,6 @@ class RESTTableOperations implements TableOperations {
     if (current == null
         || !Objects.equals(current.metadataFileLocation(), response.metadataLocation())) {
       this.current = response.tableMetadata();
-      // TODO: Do we need to update the EncryptionManager's KEK cache with current's?
     }
 
     return current;

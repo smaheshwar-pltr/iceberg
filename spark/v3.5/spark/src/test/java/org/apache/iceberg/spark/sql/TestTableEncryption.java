@@ -57,6 +57,8 @@ public class TestTableEncryption extends CatalogTestBase {
     Map<String, String> newProps = Maps.newHashMap();
     newProps.putAll(props);
     newProps.put(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getCanonicalName());
+    // Add encryption manager implementation:
+    newProps.put(CatalogProperties.ENCRYPTION_MANAGER_IMPL, )
     return newProps;
   }
 

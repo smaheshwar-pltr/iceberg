@@ -31,6 +31,8 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.common.DynClasses;
 import org.apache.iceberg.common.DynConstructors;
 import org.apache.iceberg.common.DynMethods;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.hadoop.Configurable;
@@ -446,6 +448,52 @@ public class CatalogUtil {
 
     setConf.invoke(conf);
   }
+
+  /**
+   * Load a custom {@link EncryptionManager} implementation.
+   *
+   * <p>The implementation must have a no-arg constructor.
+   *
+   * @param properties catalog properties which contains class name of a custom {@link
+   *    EncryptionManager} implementation
+   * @return An initialized {@link EncryptionManager}.
+   * @throws IllegalArgumentException if class path not found or right constructor not found or the
+   */
+    public static EncryptionManager loadEncryptionManager(
+        Map<String, String> properties) {
+      String impl = properties.get(CatalogProperties.ENCRYPTION_MANAGER_IMPL);
+      if (impl == null) {
+        return PlaintextEncryptionManager.instance();
+      }
+
+      LOG.info("Loading custom EncryptionManager implementation: {}", impl);
+      DynConstructors.Ctor<EncryptionManager> ctor;
+      try {
+        ctor =
+                DynConstructors.builder(EncryptionManager.class)
+                        .loader(CatalogUtil.class.getClassLoader())
+                        .impl(impl)
+                        .buildChecked();
+      } catch (NoSuchMethodException e) {
+        throw new IllegalArgumentException(
+                String.format(
+                        "Cannot initialize EncryptionManager, missing no-arg constructor: %s", impl),
+                e);
+      }
+
+      EncryptionManager encryptionManager;
+      try {
+        encryptionManager = ctor.newInstance();
+      } catch (ClassCastException e) {
+        throw new IllegalArgumentException(
+                String.format(
+                        "Cannot initialize EncryptionManager, %s does not implement EncryptionManager.",
+                        impl),
+                e);
+      }
+
+      return encryptionManager;
+    }
 
   /**
    * Load a custom {@link MetricsReporter} implementation.

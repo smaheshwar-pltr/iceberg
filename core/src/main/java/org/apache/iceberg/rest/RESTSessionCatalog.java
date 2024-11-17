@@ -54,8 +54,7 @@ import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableCommit;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.encryption.EncryptionUtil;
-import org.apache.iceberg.encryption.KeyManagementClient;
+import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
@@ -175,12 +174,12 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
   private SnapshotMode snapshotMode = null;
   private Object conf = null;
   private FileIO io = null;
+  private EncryptionManager encryptionManager = null;
   private MetricsReporter reporter = null;
   private boolean reportingViaRestEnabled;
   private Integer pageSize = null;
   private CloseableGroup closeables = null;
   private Set<Endpoint> endpoints;
-  private KeyManagementClient keyManagementClient = null;
 
   // a lazy thread pool for token refresh
   private volatile ScheduledExecutorService refreshExecutor = null;
@@ -313,6 +312,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
     }
 
     this.io = newFileIO(SessionContext.createEmpty(), mergedProps);
+    this.encryptionManager = CatalogUtil.loadEncryptionManager(mergedProps); // TODO: Initialise via config instead?
 
     this.fileIOTracker = new FileIOTracker();
     this.closeables = new CloseableGroup();
@@ -331,9 +331,6 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
 
     this.reportingViaRestEnabled =
         PropertyUtil.propertyAsBoolean(mergedProps, REST_METRICS_REPORTING_ENABLED, true);
-    if (mergedProps.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
-      this.keyManagementClient = EncryptionUtil.createKmsClient(mergedProps);
-    }
     super.initialize(name, mergedProps);
   }
 
@@ -513,7 +510,6 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             paths.table(finalIdentifier),
             session::headers,
             tableFileIO(context, response.config()),
-            keyManagementClient,
             tableMetadata,
             endpoints);
 
@@ -589,7 +585,6 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             paths.table(ident),
             session::headers,
             tableFileIO(context, response.config()),
-            keyManagementClient,
             response.tableMetadata(),
             endpoints);
 
@@ -823,7 +818,6 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
-              keyManagementClient,
               response.tableMetadata(),
               endpoints);
 
@@ -848,7 +842,6 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
-              keyManagementClient,
               RESTTableOperations.UpdateType.CREATE,
               createChanges(meta),
               meta,
@@ -908,7 +901,6 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
-              keyManagementClient,
               RESTTableOperations.UpdateType.REPLACE,
               changes.build(),
               base,
