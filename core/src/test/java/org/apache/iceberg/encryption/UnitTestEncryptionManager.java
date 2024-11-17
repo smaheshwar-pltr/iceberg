@@ -79,22 +79,20 @@ public class UnitTestEncryptionManager implements EncryptionManager {
       return lazyKeyMetadata;
     }
 
-    /**
-     * Before writing key metadata, wrap it with a key service.
-     */
+    /** Before writing key metadata, wrap it with a key service. */
     @Override
     public EncryptionKeyMetadata keyMetadataToWrite() {
-     return UnitTestKeyMetadataWrapper.INSTANCE.wrap(keyMetadata(), plainOutputFile.location());
+      return UnitTestKeyMetadataWrapper.INSTANCE.wrap(keyMetadata(), plainOutputFile.location());
     }
 
     @Override
     public OutputFile encryptingOutputFile() {
       if (lazyEncryptingOutputFile == null) {
         this.lazyEncryptingOutputFile =
-                new AesGcmOutputFile(
-                        plainOutputFile(),
-                        ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
-                        ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
+            new AesGcmOutputFile(
+                plainOutputFile(),
+                ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
+                ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
       }
 
       return lazyEncryptingOutputFile;
@@ -113,7 +111,8 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     private StandardKeyMetadata lazyKeyMetadata = null;
     private AesGcmInputFile lazyDecryptedInputFile = null;
 
-    private StandardDecryptedInputFile(EncryptedInputFile encryptedInputFile, boolean shouldUnwrap) {
+    private StandardDecryptedInputFile(
+        EncryptedInputFile encryptedInputFile, boolean shouldUnwrap) {
       this.encryptedInputFile = encryptedInputFile;
       this.shouldUnwrap = shouldUnwrap;
     }
@@ -126,8 +125,13 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     @Override
     public StandardKeyMetadata keyMetadata() {
       if (null == lazyKeyMetadata) {
-        StandardKeyMetadata wrappedMetadata = StandardKeyMetadata.castOrParse(encryptedInputFile.keyMetadata());
-        this.lazyKeyMetadata = shouldUnwrap ? UnitTestKeyMetadataWrapper.INSTANCE.unwrap(wrappedMetadata, encryptedInputFile.encryptedInputFile().location()) : wrappedMetadata;
+        StandardKeyMetadata wrappedMetadata =
+            StandardKeyMetadata.castOrParse(encryptedInputFile.keyMetadata());
+        this.lazyKeyMetadata =
+            shouldUnwrap
+                ? UnitTestKeyMetadataWrapper.INSTANCE.unwrap(
+                    wrappedMetadata, encryptedInputFile.encryptedInputFile().location())
+                : wrappedMetadata;
       }
 
       return lazyKeyMetadata;
@@ -136,10 +140,10 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     private AesGcmInputFile decrypted() {
       if (lazyDecryptedInputFile == null) {
         this.lazyDecryptedInputFile =
-                new AesGcmInputFile(
-                        encryptedInputFile(),
-                        ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
-                        ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
+            new AesGcmInputFile(
+                encryptedInputFile(),
+                ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
+                ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
       }
 
       return lazyDecryptedInputFile;
@@ -181,26 +185,28 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     @Override
     public StandardKeyMetadata wrap(StandardKeyMetadata keyMetadata, String location) {
       return new StandardKeyMetadata(
-              wrap(keyMetadata.encryptionKey(), location),
-              wrap(keyMetadata.aadPrefix(), location),
-              keyMetadata.fileLength());
+          wrap(keyMetadata.encryptionKey(), location),
+          wrap(keyMetadata.aadPrefix(), location),
+          keyMetadata.fileLength());
     }
 
     @Override
     public StandardKeyMetadata unwrap(StandardKeyMetadata wrappedKeyMetadata, String location) {
-        return new StandardKeyMetadata(
-                unwrap(wrappedKeyMetadata.encryptionKey(), location),
-                unwrap(wrappedKeyMetadata.aadPrefix(), location),
-                wrappedKeyMetadata.fileLength());
+      return new StandardKeyMetadata(
+          unwrap(wrappedKeyMetadata.encryptionKey(), location),
+          unwrap(wrappedKeyMetadata.aadPrefix(), location),
+          wrappedKeyMetadata.fileLength());
     }
 
     private static byte[] wrap(ByteBuffer key, String location) {
-      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(getKekFromLocation(location));
+      Ciphers.AesGcmEncryptor keyEncryptor =
+          new Ciphers.AesGcmEncryptor(getKekFromLocation(location));
       return keyEncryptor.encrypt(ByteBuffers.toByteArray(key), null);
     }
 
     public static byte[] unwrap(ByteBuffer wrappedKey, String location) {
-      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(getKekFromLocation(location));
+      Ciphers.AesGcmDecryptor keyDecryptor =
+          new Ciphers.AesGcmDecryptor(getKekFromLocation(location));
       return keyDecryptor.decrypt(ByteBuffers.toByteArray(wrappedKey), null);
     }
 
@@ -211,6 +217,7 @@ public class UnitTestEncryptionManager implements EncryptionManager {
 
   // TODO: Fix this.
   private static boolean isManifestFile(EncryptedInputFile encrypted) {
-    return Objects.equals(FileFormat.fromFileName(encrypted.encryptedInputFile().location()), FileFormat.AVRO);
+    return Objects.equals(
+        FileFormat.fromFileName(encrypted.encryptedInputFile().location()), FileFormat.AVRO);
   }
 }

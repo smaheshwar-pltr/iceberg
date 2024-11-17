@@ -68,11 +68,11 @@ public class TestTableEncryption extends CatalogTestBase {
   @Parameters(name = "catalogName = {0}, implementation = {1}, config = {2}")
   protected static Object[][] parameters() {
     return new Object[][] {
-//      {
-//        SparkCatalogConfig.HIVE.catalogName(),
-//        SparkCatalogConfig.HIVE.implementation(),
-//        appendCatalogEncryptionProperties(SparkCatalogConfig.HIVE.properties())
-//      },
+      //      {
+      //        SparkCatalogConfig.HIVE.catalogName(),
+      //        SparkCatalogConfig.HIVE.implementation(),
+      //        appendCatalogEncryptionProperties(SparkCatalogConfig.HIVE.properties())
+      //      },
       {
         SparkCatalogConfig.REST.catalogName(),
         SparkCatalogConfig.REST.implementation(),
@@ -221,12 +221,12 @@ public class TestTableEncryption extends CatalogTestBase {
   @TestTemplate
   public void testManifestListEncryption() throws IOException {
     List<Object[]> manifestFileTable =
-            sql("SELECT path FROM %s.%s", tableName, MetadataTableType.MANIFESTS);
+        sql("SELECT path FROM %s.%s", tableName, MetadataTableType.MANIFESTS);
 
     List<String> manifestFiles =
-            Streams.concat(manifestFileTable.stream())
-                    .map(row -> (String) row[0])
-                    .collect(Collectors.toList());
+        Streams.concat(manifestFileTable.stream())
+            .map(row -> (String) row[0])
+            .collect(Collectors.toList());
 
     if (!(manifestFiles.size() > 0)) {
       throw new RuntimeException("No manifest files found for table " + tableName);
