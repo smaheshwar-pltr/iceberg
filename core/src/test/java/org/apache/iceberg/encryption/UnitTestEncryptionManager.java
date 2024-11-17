@@ -18,21 +18,21 @@
  */
 package org.apache.iceberg.encryption;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.Objects;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.util.ByteBuffers;
 
-// Extension is required since Iceberg `instanceof` checks `EncryptionManager`s with
-// `StandardEncryptionManager`.
 public class UnitTestEncryptionManager implements EncryptionManager {
 
   private transient volatile SecureRandom lazyRNG = null;
-
-  @SuppressWarnings("unused")
-  public UnitTestEncryptionManager() {}
 
   @Override
   public NativeEncryptionOutputFile encrypt(OutputFile plainOutput) {
@@ -41,7 +41,8 @@ public class UnitTestEncryptionManager implements EncryptionManager {
 
   @Override
   public NativeEncryptionInputFile decrypt(EncryptedInputFile encrypted) {
-    return new StandardDecryptedInputFile(encrypted);
+    // Unwrap only for manifest files.
+    return new StandardDecryptedInputFile(encrypted, isManifestFile(encrypted));
   }
 
   private SecureRandom workerRNG() {
@@ -65,7 +66,6 @@ public class UnitTestEncryptionManager implements EncryptionManager {
 
     @Override
     public StandardKeyMetadata keyMetadata() {
-      // TODO: Is it really fine for this to differ from what was used in encryptingOutputFile?
       if (null == lazyKeyMetadata) {
         byte[] fileDek = new byte[dataKeyLength];
         workerRNG().nextBytes(fileDek);
@@ -79,9 +79,12 @@ public class UnitTestEncryptionManager implements EncryptionManager {
       return lazyKeyMetadata;
     }
 
+    /**
+     * Before writing key metadata, wrap it with a key service.
+     */
     @Override
     public EncryptionKeyMetadata keyMetadataToWrite() {
-      
+     return UnitTestKeyMetadataWrapper.INSTANCE.wrap(keyMetadata(), plainOutputFile.location());
     }
 
     @Override
@@ -105,11 +108,14 @@ public class UnitTestEncryptionManager implements EncryptionManager {
 
   private static class StandardDecryptedInputFile implements NativeEncryptionInputFile {
     private final EncryptedInputFile encryptedInputFile;
+    private final boolean shouldUnwrap;
+
     private StandardKeyMetadata lazyKeyMetadata = null;
     private AesGcmInputFile lazyDecryptedInputFile = null;
 
-    private StandardDecryptedInputFile(EncryptedInputFile encryptedInputFile) {
+    private StandardDecryptedInputFile(EncryptedInputFile encryptedInputFile, boolean shouldUnwrap) {
       this.encryptedInputFile = encryptedInputFile;
+      this.shouldUnwrap = shouldUnwrap;
     }
 
     @Override
@@ -119,9 +125,9 @@ public class UnitTestEncryptionManager implements EncryptionManager {
 
     @Override
     public StandardKeyMetadata keyMetadata() {
-      // TODO: Is it really fine for this to differ from what was used in decrypted?
       if (null == lazyKeyMetadata) {
-        this.lazyKeyMetadata = StandardKeyMetadata.castOrParse(encryptedInputFile.keyMetadata());
+        StandardKeyMetadata wrappedMetadata = StandardKeyMetadata.castOrParse(encryptedInputFile.keyMetadata());
+        this.lazyKeyMetadata = shouldUnwrap ? UnitTestKeyMetadataWrapper.INSTANCE.unwrap(wrappedMetadata, encryptedInputFile.encryptedInputFile().location()) : wrappedMetadata;
       }
 
       return lazyKeyMetadata;
@@ -158,5 +164,53 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     public boolean exists() {
       return decrypted().exists();
     }
+  }
+
+  interface KeyMetadataWrapper {
+    StandardKeyMetadata wrap(StandardKeyMetadata keyMetadata, String location);
+
+    StandardKeyMetadata unwrap(StandardKeyMetadata wrappedKeyMetadata, String location);
+  }
+
+  // NB: Not for production use. Uses file's location to encrypt/decrypt.
+  private enum UnitTestKeyMetadataWrapper implements KeyMetadataWrapper {
+    INSTANCE;
+
+    private static final int KEK_LENGTH = 16;
+
+    @Override
+    public StandardKeyMetadata wrap(StandardKeyMetadata keyMetadata, String location) {
+      return new StandardKeyMetadata(
+              wrap(keyMetadata.encryptionKey(), location),
+              wrap(keyMetadata.aadPrefix(), location),
+              keyMetadata.fileLength());
+    }
+
+    @Override
+    public StandardKeyMetadata unwrap(StandardKeyMetadata wrappedKeyMetadata, String location) {
+        return new StandardKeyMetadata(
+                unwrap(wrappedKeyMetadata.encryptionKey(), location),
+                unwrap(wrappedKeyMetadata.aadPrefix(), location),
+                wrappedKeyMetadata.fileLength());
+    }
+
+    private static byte[] wrap(ByteBuffer key, String location) {
+      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(getKekFromLocation(location));
+      return keyEncryptor.encrypt(ByteBuffers.toByteArray(key), null);
+    }
+
+    public static byte[] unwrap(ByteBuffer wrappedKey, String location) {
+      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(getKekFromLocation(location));
+      return keyDecryptor.decrypt(ByteBuffers.toByteArray(wrappedKey), null);
+    }
+
+    private static byte[] getKekFromLocation(String location) {
+      return Arrays.copyOf(location.getBytes(StandardCharsets.UTF_8), KEK_LENGTH);
+    }
+  }
+
+  // TODO: Fix this.
+  private static boolean isManifestFile(EncryptedInputFile encrypted) {
+    return Objects.equals(FileFormat.fromFileName(encrypted.encryptedInputFile().location()), FileFormat.AVRO);
   }
 }
