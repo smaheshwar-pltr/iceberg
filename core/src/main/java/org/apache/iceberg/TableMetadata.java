@@ -907,7 +907,6 @@ public class TableMetadata implements Serializable {
     private Integer lastAddedSchemaId = null;
     private Integer lastAddedSpecId = null;
     private Integer lastAddedOrderId = null;
-    private Map<String, WrappedEncryptionKey> kekCache = null;
 
     // handled in build
     private final List<HistoryEntry> snapshotLog;
@@ -979,17 +978,6 @@ public class TableMetadata implements Serializable {
       this.schemasById = Maps.newHashMap(base.schemasById);
       this.specsById = Maps.newHashMap(base.specsById);
       this.sortOrdersById = Maps.newHashMap(base.sortOrdersById);
-      if (base.kekCache != null) {
-        this.kekCache = Maps.newHashMap(base.kekCache);
-      }
-    }
-
-    public Builder withKekCache(Map<String, WrappedEncryptionKey> kekCache) {
-      if (null == kekCache) {
-        return this;
-      }
-      this.kekCache = Maps.newHashMap(kekCache);
-      return this;
     }
 
     public Builder withMetadataLocation(String newMetadataLocation) {
@@ -1495,38 +1483,33 @@ public class TableMetadata implements Serializable {
       List<HistoryEntry> newSnapshotLog =
           updateSnapshotLog(snapshotLog, snapshotsById, currentSnapshotId, changes);
 
-      TableMetadata result =
-          new TableMetadata(
-              metadataLocation,
-              formatVersion,
-              uuid,
-              location,
-              lastSequenceNumber,
-              lastUpdatedMillis,
-              lastColumnId,
-              currentSchemaId,
-              ImmutableList.copyOf(schemas),
-              defaultSpecId,
-              ImmutableList.copyOf(specs),
-              lastAssignedPartitionId,
-              defaultSortOrderId,
-              ImmutableList.copyOf(sortOrders),
-              ImmutableMap.copyOf(properties),
-              currentSnapshotId,
-              ImmutableList.copyOf(snapshots),
-              snapshotsSupplier,
-              ImmutableList.copyOf(newSnapshotLog),
-              ImmutableList.copyOf(metadataHistory),
-              ImmutableMap.copyOf(refs),
-              statisticsFiles.values().stream().flatMap(List::stream).collect(Collectors.toList()),
-              partitionStatisticsFiles.values().stream()
-                  .flatMap(List::stream)
-                  .collect(Collectors.toList()),
-              discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes));
-
-      result.setKekCache(kekCache);
-
-      return result;
+      return new TableMetadata(
+          metadataLocation,
+          formatVersion,
+          uuid,
+          location,
+          lastSequenceNumber,
+          lastUpdatedMillis,
+          lastColumnId,
+          currentSchemaId,
+          ImmutableList.copyOf(schemas),
+          defaultSpecId,
+          ImmutableList.copyOf(specs),
+          lastAssignedPartitionId,
+          defaultSortOrderId,
+          ImmutableList.copyOf(sortOrders),
+          ImmutableMap.copyOf(properties),
+          currentSnapshotId,
+          ImmutableList.copyOf(snapshots),
+          snapshotsSupplier,
+          ImmutableList.copyOf(newSnapshotLog),
+          ImmutableList.copyOf(metadataHistory),
+          ImmutableMap.copyOf(refs),
+          statisticsFiles.values().stream().flatMap(List::stream).collect(Collectors.toList()),
+          partitionStatisticsFiles.values().stream()
+              .flatMap(List::stream)
+              .collect(Collectors.toList()),
+          discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes));
     }
 
     private int addSchemaInternal(Schema schema, int newLastColumnId) {

@@ -36,7 +36,6 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import org.apache.iceberg.TableMetadata.MetadataLogEntry;
 import org.apache.iceberg.TableMetadata.SnapshotLogEntry;
-import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.exceptions.RuntimeIOException;
@@ -231,7 +230,18 @@ public class TableMetadataParser {
     toJson(metadata.refs(), generator);
 
     if (metadata.kekCache() != null && !metadata.kekCache().isEmpty()) {
-      writeKekCache(metadata.kekCache(), generator);
+      generator.writeArrayFieldStart(KEK_CACHE);
+      for (Map.Entry<String, WrappedEncryptionKey> entry : metadata.kekCache().entrySet()) {
+        generator.writeStartObject();
+        generator.writeStringField(KEK_ID, entry.getKey());
+        generator.writeStringField(
+            KEK_WRAP,
+            Base64.getEncoder()
+                .encodeToString(ByteBuffers.toByteArray(entry.getValue().wrappedKey())));
+        generator.writeNumberField(TIMESTAMP_MS, entry.getValue().timestamp());
+        generator.writeEndObject();
+      }
+      generator.writeEndArray();
     }
 
     generator.writeArrayFieldStart(SNAPSHOTS);
@@ -273,22 +283,6 @@ public class TableMetadataParser {
     generator.writeEndObject();
   }
 
-  public static void writeKekCache(
-      Map<String, WrappedEncryptionKey> kekCache, JsonGenerator generator) throws IOException {
-    generator.writeArrayFieldStart(KEK_CACHE);
-    for (Map.Entry<String, WrappedEncryptionKey> entry : kekCache.entrySet()) {
-      generator.writeStartObject();
-      generator.writeStringField(KEK_ID, entry.getKey());
-      generator.writeStringField(
-          KEK_WRAP,
-          Base64.getEncoder()
-              .encodeToString(ByteBuffers.toByteArray(entry.getValue().wrappedKey())));
-      generator.writeNumberField(TIMESTAMP_MS, entry.getValue().timestamp());
-      generator.writeEndObject();
-    }
-    generator.writeEndArray();
-  }
-
   private static void toJson(Map<String, SnapshotRef> refs, JsonGenerator generator)
       throws IOException {
     generator.writeObjectFieldStart(REFS);
@@ -309,7 +303,7 @@ public class TableMetadataParser {
         InputStream gis = codec == Codec.GZIP ? new GZIPInputStream(is) : is) {
       TableMetadata tableMetadata =
           fromJson(file, JsonUtil.mapper().readValue(gis, JsonNode.class));
-      if (tableMetadata.kekCache() != null && (io instanceof EncryptingFileIO)) {
+      if (tableMetadata.kekCache() != null) {
         EncryptionUtil.getKekCacheFromMetadata(io, tableMetadata.kekCache());
       }
       return tableMetadata;
@@ -503,7 +497,19 @@ public class TableMetadataParser {
 
     Map<String, WrappedEncryptionKey> kekCache = null;
     if (node.has(KEK_CACHE)) {
-      kekCache = readKekCache(node);
+      kekCache = Maps.newHashMap();
+      Iterator<JsonNode> cacheIterator = node.get(KEK_CACHE).elements();
+      while (cacheIterator.hasNext()) {
+        JsonNode entryNode = cacheIterator.next();
+        String kekID = JsonUtil.getString(KEK_ID, entryNode);
+        kekCache.put(
+            kekID,
+            new WrappedEncryptionKey(
+                kekID,
+                ByteBuffer.wrap(
+                    Base64.getDecoder().decode(JsonUtil.getString(KEK_WRAP, entryNode))),
+                JsonUtil.getLong(TIMESTAMP_MS, entryNode)));
+      }
     }
 
     List<Snapshot> snapshots;
@@ -591,26 +597,6 @@ public class TableMetadataParser {
     }
 
     return result;
-  }
-
-  public static Map<String, WrappedEncryptionKey> readKekCache(JsonNode node) {
-    if (!node.has(KEK_CACHE)) {
-      throw new IllegalArgumentException(
-          "Cannot parse kek cache from node without kek cache: " + node);
-    }
-    Map<String, WrappedEncryptionKey> kekCache = Maps.newHashMap();
-    Iterator<JsonNode> cacheIterator = node.get(KEK_CACHE).elements();
-    while (cacheIterator.hasNext()) {
-      JsonNode entryNode = cacheIterator.next();
-      String kekID = JsonUtil.getString(KEK_ID, entryNode);
-      kekCache.put(
-          kekID,
-          new WrappedEncryptionKey(
-              kekID,
-              ByteBuffer.wrap(Base64.getDecoder().decode(JsonUtil.getString(KEK_WRAP, entryNode))),
-              JsonUtil.getLong(TIMESTAMP_MS, entryNode)));
-    }
-    return kekCache;
   }
 
   private static Map<String, SnapshotRef> refsFromJson(JsonNode refMap) {
