@@ -31,6 +31,7 @@ import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateRequirement;
 import org.apache.iceberg.UpdateRequirements;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
@@ -55,6 +56,7 @@ class RESTTableOperations implements TableOperations {
   private final String path;
   private final Supplier<Map<String, String>> headers;
   private final FileIO io;
+  private final EncryptionManager encryptionManager;
   private final List<MetadataUpdate> createChanges;
   private final TableMetadata replaceBase;
   private final Set<Endpoint> endpoints;
@@ -66,9 +68,19 @@ class RESTTableOperations implements TableOperations {
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
+      EncryptionManager encryptionManager,
       TableMetadata current,
       Set<Endpoint> endpoints) {
-    this(client, path, headers, io, UpdateType.SIMPLE, Lists.newArrayList(), current, endpoints);
+    this(
+        client,
+        path,
+        headers,
+        io,
+        encryptionManager,
+        UpdateType.SIMPLE,
+        Lists.newArrayList(),
+        current,
+        endpoints);
   }
 
   RESTTableOperations(
@@ -76,6 +88,7 @@ class RESTTableOperations implements TableOperations {
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
+      EncryptionManager encryptionManager,
       UpdateType updateType,
       List<MetadataUpdate> createChanges,
       TableMetadata current,
@@ -83,7 +96,8 @@ class RESTTableOperations implements TableOperations {
     this.client = client;
     this.path = path;
     this.headers = headers;
-    this.io = io;
+    this.io = EncryptingFileIO.combine(io, encryptionManager);
+    this.encryptionManager = encryptionManager;
     this.updateType = updateType;
     this.createChanges = createChanges;
     this.replaceBase = current;
@@ -167,6 +181,11 @@ class RESTTableOperations implements TableOperations {
   @Override
   public FileIO io() {
     return io;
+  }
+
+  @Override
+  public EncryptionManager encryption() {
+    return encryptionManager;
   }
 
   private TableMetadata updateCurrentMetadata(LoadTableResponse response) {
