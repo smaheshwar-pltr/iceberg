@@ -35,6 +35,7 @@ import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.UnitTestEncryptionManager;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
@@ -58,7 +59,9 @@ public class TestTableEncryption extends CatalogTestBase {
     newProps.putAll(props);
     newProps.put(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getCanonicalName());
     // Add encryption manager implementation:
-    newProps.put(CatalogProperties.ENCRYPTION_MANAGER_IMPL, )
+    newProps.put(
+        CatalogProperties.ENCRYPTION_MANAGER_IMPL,
+        UnitTestEncryptionManager.class.getCanonicalName());
     return newProps;
   }
 

@@ -312,7 +312,8 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
     }
 
     this.io = newFileIO(SessionContext.createEmpty(), mergedProps);
-    this.encryptionManager = CatalogUtil.loadEncryptionManager(mergedProps); // TODO: Initialise via config instead?
+    this.encryptionManager =
+        CatalogUtil.loadEncryptionManager(mergedProps); // TODO: Initialise via config instead?
 
     this.fileIOTracker = new FileIOTracker();
     this.closeables = new CloseableGroup();
@@ -510,6 +511,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             paths.table(finalIdentifier),
             session::headers,
             tableFileIO(context, response.config()),
+            encryptionManager,
             tableMetadata,
             endpoints);
 
@@ -585,6 +587,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             paths.table(ident),
             session::headers,
             tableFileIO(context, response.config()),
+            encryptionManager,
             response.tableMetadata(),
             endpoints);
 
@@ -818,6 +821,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
+              encryptionManager,
               response.tableMetadata(),
               endpoints);
 
@@ -842,6 +846,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
+              encryptionManager,
               RESTTableOperations.UpdateType.CREATE,
               createChanges(meta),
               meta,
@@ -901,6 +906,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
               paths.table(ident),
               session::headers,
               tableFileIO(context, response.config()),
+              encryptionManager,
               RESTTableOperations.UpdateType.REPLACE,
               changes.build(),
               base,

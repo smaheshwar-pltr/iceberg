@@ -31,6 +31,7 @@ import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateRequirement;
 import org.apache.iceberg.UpdateRequirements;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
@@ -70,7 +71,16 @@ class RESTTableOperations implements TableOperations {
       EncryptionManager encryptionManager,
       TableMetadata current,
       Set<Endpoint> endpoints) {
-    this(client, path, headers, io, encryptionManager, UpdateType.SIMPLE, Lists.newArrayList(), current, endpoints);
+    this(
+        client,
+        path,
+        headers,
+        io,
+        encryptionManager,
+        UpdateType.SIMPLE,
+        Lists.newArrayList(),
+        current,
+        endpoints);
   }
 
   RESTTableOperations(
@@ -86,7 +96,7 @@ class RESTTableOperations implements TableOperations {
     this.client = client;
     this.path = path;
     this.headers = headers;
-    this.io = io;
+    this.io = EncryptingFileIO.combine(io, encryptionManager);
     this.encryptionManager = encryptionManager;
     this.updateType = updateType;
     this.createChanges = createChanges;
