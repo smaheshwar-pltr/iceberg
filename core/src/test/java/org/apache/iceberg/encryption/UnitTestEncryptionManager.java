@@ -186,16 +186,14 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     public StandardKeyMetadata wrap(StandardKeyMetadata keyMetadata, String location) {
       return new StandardKeyMetadata(
           wrap(keyMetadata.encryptionKey(), location),
-          wrap(keyMetadata.aadPrefix(), location),
-          keyMetadata.fileLength());
+          wrap(keyMetadata.aadPrefix(), location));
     }
 
     @Override
     public StandardKeyMetadata unwrap(StandardKeyMetadata wrappedKeyMetadata, String location) {
       return new StandardKeyMetadata(
           unwrap(wrappedKeyMetadata.encryptionKey(), location),
-          unwrap(wrappedKeyMetadata.aadPrefix(), location),
-          wrappedKeyMetadata.fileLength());
+          unwrap(wrappedKeyMetadata.aadPrefix(), location));
     }
 
     private static byte[] wrap(ByteBuffer key, String location) {
