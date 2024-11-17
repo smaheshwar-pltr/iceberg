@@ -37,4 +37,8 @@ public interface EncryptedOutputFile {
    * #encryptingOutputFile()}.
    */
   EncryptionKeyMetadata keyMetadata();
+
+  default EncryptionKeyMetadata keyMetadataToWrite() {
+    return keyMetadata();
+  }
 }
