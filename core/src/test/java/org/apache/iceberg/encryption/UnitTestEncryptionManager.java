@@ -18,11 +18,7 @@
  */
 package org.apache.iceberg.encryption;
 
-import java.io.Serializable;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
-import java.util.Arrays;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
@@ -34,7 +30,6 @@ import org.apache.iceberg.util.ByteBuffers;
 public class UnitTestEncryptionManager implements EncryptionManager {
 
   private transient volatile SecureRandom lazyRNG = null;
-  private final KeyMetadataWrapper wrapper = new UnitTestKeyMetadataWrapper();
 
   @SuppressWarnings("unused")
   public UnitTestEncryptionManager() {}
@@ -85,16 +80,18 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     }
 
     @Override
+    public EncryptionKeyMetadata keyMetadataToWrite() {
+      
+    }
+
+    @Override
     public OutputFile encryptingOutputFile() {
       if (lazyEncryptingOutputFile == null) {
         this.lazyEncryptingOutputFile =
                 new AesGcmOutputFile(
                         plainOutputFile(),
-                        ByteBuffers.toByteArray(
-                                wrapper.wrap(
-                                        keyMetadata().encryptionKey(), plainOutputFile().location())),
-                        ByteBuffers.toByteArray(
-                                wrapper.wrap(keyMetadata().aadPrefix(), plainOutputFile().location())));
+                        ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
+                        ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
       }
 
       return lazyEncryptingOutputFile;
@@ -106,7 +103,7 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     }
   }
 
-  private class StandardDecryptedInputFile implements NativeEncryptionInputFile {
+  private static class StandardDecryptedInputFile implements NativeEncryptionInputFile {
     private final EncryptedInputFile encryptedInputFile;
     private StandardKeyMetadata lazyKeyMetadata = null;
     private AesGcmInputFile lazyDecryptedInputFile = null;
@@ -135,12 +132,8 @@ public class UnitTestEncryptionManager implements EncryptionManager {
         this.lazyDecryptedInputFile =
                 new AesGcmInputFile(
                         encryptedInputFile(),
-                        ByteBuffers.toByteArray(
-                                wrapper.wrap(
-                                        keyMetadata().encryptionKey(), encryptedInputFile().location())),
-                        ByteBuffers.toByteArray(
-                                wrapper.wrap(
-                                        keyMetadata().aadPrefix(), encryptedInputFile().location())));
+                        ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
+                        ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
       }
 
       return lazyDecryptedInputFile;
@@ -164,39 +157,6 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     @Override
     public boolean exists() {
       return decrypted().exists();
-    }
-  }
-
-  public interface KeyMetadataWrapper {
-    ByteBuffer wrap(ByteBuffer key, String location);
-//    ByteBuffer unwrap(ByteBuffer wrappedKey, InputFile inputFile);
-  }
-
-  // NB: Not for production use. Uses file's location to encrypt/decrypt.
-  private static class UnitTestKeyMetadataWrapper implements KeyMetadataWrapper, Serializable {
-
-    private static final int KEK_LENGTH = 16;
-
-    public ByteBuffer wrap(ByteBuffer key, String location) {
-      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(getKek(location));
-      byte[] encryptedKey = keyEncryptor.encrypt(ByteBuffers.toByteArray(key), null);
-//      return ByteBuffer.wrap(encryptedKey);
-      return ByteBuffer.wrap(truncateKey(encryptedKey));
-    }
-
-//    public ByteBuffer unwrap(ByteBuffer wrappedKey, InputFile inputFile) {
-//      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(getKek(inputFile.location()));
-//      byte[] key = keyDecryptor.decrypt(ByteBuffers.toByteArray(wrappedKey), null);
-////      return ByteBuffer.wrap(key);
-//      return ByteBuffer.wrap(truncateKey(key));
-//    }
-
-    private static byte[] getKek(String location) {
-      return truncateKey(location.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static byte[] truncateKey(byte[] key) {
-      return Arrays.copyOf(key, KEK_LENGTH);
     }
   }
 }
