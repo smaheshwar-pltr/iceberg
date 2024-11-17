@@ -21,112 +21,129 @@ package org.apache.iceberg.encryption;
 import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.Arrays;
-import java.util.List;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SeekableInputStream;
-import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.util.ByteBuffers;
 
 // Extension is required since Iceberg `instanceof` checks `EncryptionManager`s with
 // `StandardEncryptionManager`.
-public class UnitTestEncryptionManager extends StandardEncryptionManager {
+public class UnitTestEncryptionManager implements EncryptionManager {
 
+  private transient volatile SecureRandom lazyRNG = null;
   private final KeyMetadataWrapper wrapper = new UnitTestKeyMetadataWrapper();
 
   @SuppressWarnings("unused")
-  public UnitTestEncryptionManager() {
-    this("keyA", 16, ImmutableList.of(), new UnitestKMS());
-  }
-
-  public UnitTestEncryptionManager(
-      String tableKeyId,
-      int dataKeyLength,
-      List<WrappedEncryptionKey> keys,
-      KeyManagementClient kmsClient) {
-    super(tableKeyId, dataKeyLength, keys, kmsClient);
-  }
+  public UnitTestEncryptionManager() {}
 
   @Override
   public NativeEncryptionOutputFile encrypt(OutputFile plainOutput) {
-    return new WrappingOutputFile(super.encrypt(plainOutput));
+    return new StandardEncryptedOutputFile(plainOutput, 16);
   }
 
   @Override
   public NativeEncryptionInputFile decrypt(EncryptedInputFile encrypted) {
-    return new UnwrappingInputFile(super.decrypt(encrypted));
+    return new StandardDecryptedInputFile(encrypted);
   }
 
-  private class WrappingOutputFile implements NativeEncryptionOutputFile {
-    private final NativeEncryptionOutputFile delegate;
+  private SecureRandom workerRNG() {
+    if (this.lazyRNG == null) {
+      this.lazyRNG = new SecureRandom();
+    }
+
+    return lazyRNG;
+  }
+
+  private class StandardEncryptedOutputFile implements NativeEncryptionOutputFile {
+    private final OutputFile plainOutputFile;
+    private final int dataKeyLength;
+    private StandardKeyMetadata lazyKeyMetadata = null;
     private OutputFile lazyEncryptingOutputFile = null;
 
-    private WrappingOutputFile(NativeEncryptionOutputFile delegate) {
-      this.delegate = delegate;
+    StandardEncryptedOutputFile(OutputFile plainOutputFile, int dataKeyLength) {
+      this.plainOutputFile = plainOutputFile;
+      this.dataKeyLength = dataKeyLength;
+    }
+
+    @Override
+    public StandardKeyMetadata keyMetadata() {
+      // TODO: Is it really fine for this to differ from what was used in encryptingOutputFile?
+      if (null == lazyKeyMetadata) {
+        byte[] fileDek = new byte[dataKeyLength];
+        workerRNG().nextBytes(fileDek);
+
+        byte[] aadPrefix = new byte[TableProperties.ENCRYPTION_AAD_LENGTH_DEFAULT];
+        workerRNG().nextBytes(aadPrefix);
+
+        this.lazyKeyMetadata = new StandardKeyMetadata(fileDek, aadPrefix);
+      }
+
+      return lazyKeyMetadata;
     }
 
     @Override
     public OutputFile encryptingOutputFile() {
       if (lazyEncryptingOutputFile == null) {
         this.lazyEncryptingOutputFile =
-            new AesGcmOutputFile(
-                delegate.plainOutputFile(),
-                ByteBuffers.toByteArray(
-                    wrapper.wrap(
-                        delegate.keyMetadata().encryptionKey(), delegate.plainOutputFile())),
-                ByteBuffers.toByteArray(
-                    wrapper.wrap(delegate.keyMetadata().aadPrefix(), delegate.plainOutputFile())));
+                new AesGcmOutputFile(
+                        plainOutputFile(),
+                        ByteBuffers.toByteArray(
+                                wrapper.wrap(
+                                        keyMetadata().encryptionKey(), plainOutputFile().location())),
+                        ByteBuffers.toByteArray(
+                                wrapper.wrap(keyMetadata().aadPrefix(), plainOutputFile().location())));
       }
 
       return lazyEncryptingOutputFile;
     }
 
     @Override
-    public NativeEncryptionKeyMetadata keyMetadata() {
-      // TODO: Is it really fine for this to differ from what was used in encryptingOutputFile?
-      return delegate.keyMetadata();
-    }
-
-    @Override
     public OutputFile plainOutputFile() {
-      return delegate.plainOutputFile();
+      return plainOutputFile;
     }
   }
 
-  public class UnwrappingInputFile implements NativeEncryptionInputFile {
-    private final NativeEncryptionInputFile delegate;
-    private AesGcmInputFile lazyDecryptingInputFile = null;
+  private class StandardDecryptedInputFile implements NativeEncryptionInputFile {
+    private final EncryptedInputFile encryptedInputFile;
+    private StandardKeyMetadata lazyKeyMetadata = null;
+    private AesGcmInputFile lazyDecryptedInputFile = null;
 
-    private UnwrappingInputFile(NativeEncryptionInputFile delegate) {
-      this.delegate = delegate;
-    }
-
-    private AesGcmInputFile decrypted() {
-      if (lazyDecryptingInputFile == null) {
-        this.lazyDecryptingInputFile =
-            new AesGcmInputFile(
-                delegate.encryptedInputFile(),
-                ByteBuffers.toByteArray(
-                    wrapper.unwrap(
-                        delegate.keyMetadata().encryptionKey(), delegate.encryptedInputFile())),
-                ByteBuffers.toByteArray(
-                    wrapper.unwrap(
-                        delegate.keyMetadata().aadPrefix(), delegate.encryptedInputFile())));
-      }
-
-      return lazyDecryptingInputFile;
+    private StandardDecryptedInputFile(EncryptedInputFile encryptedInputFile) {
+      this.encryptedInputFile = encryptedInputFile;
     }
 
     @Override
     public InputFile encryptedInputFile() {
-      return delegate.encryptedInputFile();
+      return encryptedInputFile.encryptedInputFile();
     }
 
     @Override
-    public NativeEncryptionKeyMetadata keyMetadata() {
+    public StandardKeyMetadata keyMetadata() {
       // TODO: Is it really fine for this to differ from what was used in decrypted?
-      return delegate.keyMetadata();
+      if (null == lazyKeyMetadata) {
+        this.lazyKeyMetadata = StandardKeyMetadata.castOrParse(encryptedInputFile.keyMetadata());
+      }
+
+      return lazyKeyMetadata;
+    }
+
+    private AesGcmInputFile decrypted() {
+      if (lazyDecryptedInputFile == null) {
+        this.lazyDecryptedInputFile =
+                new AesGcmInputFile(
+                        encryptedInputFile(),
+                        ByteBuffers.toByteArray(
+                                wrapper.wrap(
+                                        keyMetadata().encryptionKey(), encryptedInputFile().location())),
+                        ByteBuffers.toByteArray(
+                                wrapper.wrap(
+                                        keyMetadata().aadPrefix(), encryptedInputFile().location())));
+      }
+
+      return lazyDecryptedInputFile;
     }
 
     @Override
@@ -151,9 +168,8 @@ public class UnitTestEncryptionManager extends StandardEncryptionManager {
   }
 
   public interface KeyMetadataWrapper {
-    ByteBuffer wrap(ByteBuffer key, OutputFile outputFile);
-
-    ByteBuffer unwrap(ByteBuffer wrappedKey, InputFile inputFile);
+    ByteBuffer wrap(ByteBuffer key, String location);
+//    ByteBuffer unwrap(ByteBuffer wrappedKey, InputFile inputFile);
   }
 
   // NB: Not for production use. Uses file's location to encrypt/decrypt.
@@ -161,19 +177,19 @@ public class UnitTestEncryptionManager extends StandardEncryptionManager {
 
     private static final int KEK_LENGTH = 16;
 
-    public ByteBuffer wrap(ByteBuffer key, OutputFile outputFile) {
-      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(getKek(outputFile.location()));
+    public ByteBuffer wrap(ByteBuffer key, String location) {
+      Ciphers.AesGcmEncryptor keyEncryptor = new Ciphers.AesGcmEncryptor(getKek(location));
       byte[] encryptedKey = keyEncryptor.encrypt(ByteBuffers.toByteArray(key), null);
 //      return ByteBuffer.wrap(encryptedKey);
       return ByteBuffer.wrap(truncateKey(encryptedKey));
     }
 
-    public ByteBuffer unwrap(ByteBuffer wrappedKey, InputFile inputFile) {
-      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(getKek(inputFile.location()));
-      byte[] key = keyDecryptor.decrypt(ByteBuffers.toByteArray(wrappedKey), null);
-//      return ByteBuffer.wrap(key);
-      return ByteBuffer.wrap(truncateKey(key));
-    }
+//    public ByteBuffer unwrap(ByteBuffer wrappedKey, InputFile inputFile) {
+//      Ciphers.AesGcmDecryptor keyDecryptor = new Ciphers.AesGcmDecryptor(getKek(inputFile.location()));
+//      byte[] key = keyDecryptor.decrypt(ByteBuffers.toByteArray(wrappedKey), null);
+////      return ByteBuffer.wrap(key);
+//      return ByteBuffer.wrap(truncateKey(key));
+//    }
 
     private static byte[] getKek(String location) {
       return truncateKey(location.getBytes(StandardCharsets.UTF_8));
