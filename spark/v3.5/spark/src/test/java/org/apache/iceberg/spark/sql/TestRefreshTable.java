@@ -19,7 +19,6 @@
 package org.apache.iceberg.spark.sql;
 
 import java.util.List;
-import java.util.Set;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
@@ -46,11 +45,8 @@ public class TestRefreshTable extends CatalogTestBase {
   public void testRefreshCommand() {
     // We are not allowed to change the session catalog after it has been initialized, so build a
     // new one
-    if (Set.of(
-            SparkCatalogConfig.SPARK.catalogName(),
-            SparkCatalogConfig.HADOOP.catalogName(),
-            SparkCatalogConfig.REST.catalogName())
-        .contains(catalogName)) {
+    if (catalogName.equals(SparkCatalogConfig.SPARK.catalogName())
+        || catalogName.equals(SparkCatalogConfig.HADOOP.catalogName())) {
       spark.conf().set("spark.sql.catalog." + catalogName + ".cache-enabled", true);
       spark = spark.cloneSession();
     }
