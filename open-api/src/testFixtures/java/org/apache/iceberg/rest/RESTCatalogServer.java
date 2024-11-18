@@ -26,7 +26,6 @@ import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.jdbc.JdbcCatalog;
-import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.PropertyUtil;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.handler.gzip.GzipHandler;
@@ -38,19 +37,12 @@ import org.slf4j.LoggerFactory;
 public class RESTCatalogServer {
   private static final Logger LOG = LoggerFactory.getLogger(RESTCatalogServer.class);
 
-  public static final String REST_PORT = "rest.port";
+  static final String REST_PORT = "rest.port";
   static final int REST_PORT_DEFAULT = 8181;
 
   private Server httpServer;
-  private final Map<String, String> config;
 
-  RESTCatalogServer() {
-    this.config = Maps.newHashMap();
-  }
-
-  RESTCatalogServer(Map<String, String> config) {
-    this.config = config;
-  }
+  RESTCatalogServer() {}
 
   static class CatalogContext {
     private final Catalog catalog;
@@ -72,8 +64,7 @@ public class RESTCatalogServer {
 
   private CatalogContext initializeBackendCatalog() throws IOException {
     // Translate environment variables to catalog properties
-    Map<String, String> catalogProperties = Maps.newHashMap(RCKUtils.environmentCatalogConfig());
-    catalogProperties.putAll(config);
+    Map<String, String> catalogProperties = RCKUtils.environmentCatalogConfig();
 
     // Fallback to a JDBCCatalog impl if one is not set
     catalogProperties.putIfAbsent(CatalogProperties.CATALOG_IMPL, JdbcCatalog.class.getName());
