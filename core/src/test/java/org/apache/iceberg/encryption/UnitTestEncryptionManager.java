@@ -32,17 +32,19 @@ import org.apache.iceberg.util.ByteBuffers;
 
 public class UnitTestEncryptionManager implements EncryptionManager {
 
+  private static final int DEFAULT_ENCRYPTION_KEY_LENGTH = 16;
+  private static final KeyMetadataWrapper WRAPPER = UnitTestKeyMetadataWrapper.INSTANCE;
+
   private transient volatile SecureRandom lazyRNG = null;
 
   @Override
   public NativeEncryptionOutputFile encrypt(OutputFile plainOutput) {
-    return new StandardEncryptedOutputFile(plainOutput, 16);
+    return new StandardEncryptedOutputFile(plainOutput, DEFAULT_ENCRYPTION_KEY_LENGTH);
   }
 
   @Override
   public NativeEncryptionInputFile decrypt(EncryptedInputFile encrypted) {
-    // Unwrap only for manifest files.
-    return new StandardDecryptedInputFile(encrypted, isManifestFile(encrypted));
+    return new StandardDecryptedInputFile(encrypted);
   }
 
   private SecureRandom workerRNG() {
@@ -56,12 +58,15 @@ public class UnitTestEncryptionManager implements EncryptionManager {
   private class StandardEncryptedOutputFile implements NativeEncryptionOutputFile {
     private final OutputFile plainOutputFile;
     private final int dataKeyLength;
+    private final boolean isAvroFile;
+
     private StandardKeyMetadata lazyKeyMetadata = null;
     private OutputFile lazyEncryptingOutputFile = null;
 
     StandardEncryptedOutputFile(OutputFile plainOutputFile, int dataKeyLength) {
       this.plainOutputFile = plainOutputFile;
       this.dataKeyLength = dataKeyLength;
+      this.isAvroFile = isAvroFile(plainOutputFile.location());
     }
 
     @Override
@@ -76,23 +81,30 @@ public class UnitTestEncryptionManager implements EncryptionManager {
         this.lazyKeyMetadata = new StandardKeyMetadata(fileDek, aadPrefix);
       }
 
-      return lazyKeyMetadata;
-    }
-
-    /** Before writing key metadata, wrap it with a key service. */
-    @Override
-    public EncryptionKeyMetadata keyMetadataToWrite() {
-      return UnitTestKeyMetadataWrapper.INSTANCE.wrap(keyMetadata(), plainOutputFile.location());
+      // For Avro files, this method is invoked only to write (persist) the key metadata used
+      // to encrypt the file. This key metadata is written into whatever metadata file lies one
+      // level above in the Iceberg tree, as per enveloping encryption. So, it is fine only in
+      // this case for the value returned by this method to differ from what was used in
+      // `encryptingOutputFile()`.
+      // For Avro files, the AesGcmOutputFile returned by `encryptingOutputFile()` is used to
+      // encrypt
+      // and not the `keyMetadata()`, but this doesn't hold for Parquet which uses PME instead.
+      // TODO: Write note about Avro data files.
+      return (isAvroFile
+          ? WRAPPER.wrap(lazyKeyMetadata, plainOutputFile.location())
+          : lazyKeyMetadata);
     }
 
     @Override
     public OutputFile encryptingOutputFile() {
       if (lazyEncryptingOutputFile == null) {
+        // We need to encrypt with the unwrapped key metadata. First, refresh it:
+        keyMetadata();
         this.lazyEncryptingOutputFile =
             new AesGcmOutputFile(
                 plainOutputFile(),
-                ByteBuffers.toByteArray(keyMetadata().encryptionKey()),
-                ByteBuffers.toByteArray(keyMetadata().aadPrefix()));
+                ByteBuffers.toByteArray(lazyKeyMetadata.encryptionKey()),
+                ByteBuffers.toByteArray(lazyKeyMetadata.aadPrefix()));
       }
 
       return lazyEncryptingOutputFile;
@@ -106,15 +118,14 @@ public class UnitTestEncryptionManager implements EncryptionManager {
 
   private static class StandardDecryptedInputFile implements NativeEncryptionInputFile {
     private final EncryptedInputFile encryptedInputFile;
-    private final boolean shouldUnwrap;
+    private final boolean isAvroFile;
 
     private StandardKeyMetadata lazyKeyMetadata = null;
     private AesGcmInputFile lazyDecryptedInputFile = null;
 
-    private StandardDecryptedInputFile(
-        EncryptedInputFile encryptedInputFile, boolean shouldUnwrap) {
+    private StandardDecryptedInputFile(EncryptedInputFile encryptedInputFile) {
       this.encryptedInputFile = encryptedInputFile;
-      this.shouldUnwrap = shouldUnwrap;
+      this.isAvroFile = isAvroFile(encryptedInputFile.encryptedInputFile().location());
     }
 
     @Override
@@ -127,9 +138,11 @@ public class UnitTestEncryptionManager implements EncryptionManager {
       if (null == lazyKeyMetadata) {
         StandardKeyMetadata wrappedMetadata =
             StandardKeyMetadata.castOrParse(encryptedInputFile.keyMetadata());
+        // The key metadata of the encryptedInputFile will have been wrapped if it is an Avro file
+        // by StandardEncryptedOutputFile#keyMetadata() before being persisted. Unwrap that here:
         this.lazyKeyMetadata =
-            shouldUnwrap
-                ? UnitTestKeyMetadataWrapper.INSTANCE.unwrap(
+            isAvroFile
+                ? WRAPPER.unwrap(
                     wrappedMetadata, encryptedInputFile.encryptedInputFile().location())
                 : wrappedMetadata;
       }
@@ -180,13 +193,10 @@ public class UnitTestEncryptionManager implements EncryptionManager {
   private enum UnitTestKeyMetadataWrapper implements KeyMetadataWrapper {
     INSTANCE;
 
-    private static final int KEK_LENGTH = 16;
-
     @Override
     public StandardKeyMetadata wrap(StandardKeyMetadata keyMetadata, String location) {
       return new StandardKeyMetadata(
-          wrap(keyMetadata.encryptionKey(), location),
-          wrap(keyMetadata.aadPrefix(), location));
+          wrap(keyMetadata.encryptionKey(), location), wrap(keyMetadata.aadPrefix(), location));
     }
 
     @Override
@@ -209,13 +219,12 @@ public class UnitTestEncryptionManager implements EncryptionManager {
     }
 
     private static byte[] getKekFromLocation(String location) {
-      return Arrays.copyOf(location.getBytes(StandardCharsets.UTF_8), KEK_LENGTH);
+      return Arrays.copyOf(
+          location.getBytes(StandardCharsets.UTF_8), DEFAULT_ENCRYPTION_KEY_LENGTH);
     }
   }
 
-  // TODO: Fix this.
-  private static boolean isManifestFile(EncryptedInputFile encrypted) {
-    return Objects.equals(
-        FileFormat.fromFileName(encrypted.encryptedInputFile().location()), FileFormat.AVRO);
+  private static boolean isAvroFile(String location) {
+    return Objects.equals(FileFormat.fromFileName(location), FileFormat.AVRO);
   }
 }
