@@ -89,6 +89,7 @@ public class UnitTestEncryptionManager implements EncryptionManager {
       // For Avro files, the AesGcmOutputFile returned by `encryptingOutputFile()` is used to
       // encrypt
       // and not the `keyMetadata()`, but this doesn't hold for Parquet which uses PME instead.
+      // TODO: Everything except for Parquet and Orc instead?
       // TODO: Write note about Avro data files.
       return (isAvroFile
           ? WRAPPER.wrap(lazyKeyMetadata, plainOutputFile.location())
