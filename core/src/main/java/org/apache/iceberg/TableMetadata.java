@@ -985,10 +985,11 @@ public class TableMetadata implements Serializable {
     }
 
     public Builder withKekCache(Map<String, WrappedEncryptionKey> kekCache) {
-      if (null == kekCache) {
-        return this;
+      if (null != kekCache) {
+        this.kekCache = Maps.newHashMap(kekCache);
+        changes.add(new MetadataUpdate.SetKekCache(kekCache));
       }
-      this.kekCache = Maps.newHashMap(kekCache);
+
       return this;
     }
 

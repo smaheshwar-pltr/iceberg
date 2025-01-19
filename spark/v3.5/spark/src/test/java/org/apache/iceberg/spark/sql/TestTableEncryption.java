@@ -21,6 +21,7 @@ package org.apache.iceberg.spark.sql;
 import static org.apache.iceberg.Files.localInput;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.File;
@@ -48,6 +49,7 @@ import org.apache.iceberg.types.Types;
 import org.apache.parquet.crypto.ParquetCryptoRuntimeException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.TestTemplate;
 
 public class TestTableEncryption extends CatalogTestBase {
@@ -132,7 +134,33 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
-  public void testDirectDataFileRead() {
+  public void testDirectUnencryptedDataFileRead() {
+    String tableName = this.tableName + "_unencrypted";
+
+    sql("CREATE TABLE %s (id bigint, data string, float float) USING iceberg ", tableName);
+    sql("INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN'))", tableName);
+
+    List<Object[]> dataFileTable =
+        sql("SELECT file_path FROM %s.%s", tableName, MetadataTableType.ALL_DATA_FILES);
+    List<String> dataFiles =
+        Streams.concat(dataFileTable.stream())
+            .map(row -> (String) row[0])
+            .collect(Collectors.toList());
+    Schema schema = new Schema(optional(0, "id", Types.IntegerType.get()));
+    for (String filePath : dataFiles) {
+      assertDoesNotThrow(
+          () ->
+              Parquet.read(localInput(filePath))
+                  .project(schema)
+                  .callInit()
+                  .build()
+                  .iterator()
+                  .next());
+    }
+  }
+
+  @TestTemplate
+  public void testDirectEncryptedDataFileRead() {
     List<Object[]> dataFileTable =
         sql("SELECT file_path FROM %s.%s", tableName, MetadataTableType.ALL_DATA_FILES);
     List<String> dataFiles =
@@ -198,6 +226,39 @@ public class TestTableEncryption extends CatalogTestBase {
     if (!foundManifestListFile) {
       throw new RuntimeException("No manifest list files found for table " + tableName);
     }
+  }
+
+  @TestTemplate
+  public void testUnrecognisedEncryptionKeyId() {
+    String tableName = this.tableName + "_unrecognised";
+    sql(
+        "CREATE TABLE %s (id bigint, data string, float float) USING iceberg "
+            + "TBLPROPERTIES ( "
+            + "'encryption.key-id'='keyC')",
+        tableName);
+    assertThrows(
+        RuntimeException.class,
+        () ->
+            sql(
+                "INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN'))",
+                tableName));
+  }
+
+  @Disabled("Fails with `java.lang.IllegalStateException: Null key metadata buffer`")
+  @TestTemplate
+  public void testCtas() {
+    String tableName = this.tableName + "_unrecognised";
+    sql(
+        "CREATE TABLE %s USING iceberg "
+            + "TBLPROPERTIES ( "
+            + "'encryption.key-id'='keyC') AS SELECT * FROM VALUES (1, 'a', 1.0), (2, 'b', 2.0),"
+            + " (3, 'c', float('NaN')) AS t(id, data, float)",
+        tableName);
+
+    List<Object[]> expected =
+        ImmutableList.of(row(1L, "a", 1.0F), row(2L, "b", 2.0F), row(3L, "c", Float.NaN));
+
+    assertEquals("Should return all expected rows", expected, sql("SELECT * FROM %s", tableName));
   }
 
   private void checkMetadataFileEncryption(InputFile file) throws IOException {
