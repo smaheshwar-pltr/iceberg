@@ -129,10 +129,7 @@ class RESTTableOperations implements TableOperations {
                   TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT),
               keyManagementClient);
       this.io = EncryptingFileIO.combine(io, encryptionManager);
-
-      if (this.current.kekCache() != null) {
-        EncryptionUtil.getKekCacheFromMetadata(this.io, this.current.kekCache());
-      }
+      EncryptionUtil.getKekCacheFromMetadata(this.io, this.current.kekCache());
     } else {
       this.encryptionManager = PlaintextEncryptionManager.instance();
       this.io = io;
@@ -161,12 +158,10 @@ class RESTTableOperations implements TableOperations {
     if (encryption() instanceof StandardEncryptionManager) {
       Map<String, WrappedEncryptionKey> cache =
           ((StandardEncryptionManager) encryption()).kekCache();
-      if (cache != null) {
-        // KEK cache setting just requires a MetadataUpdate, and no separate requirements, because
-        // the KEK cache changes only for a new snapshot which adds its requirements.
-        // TODO: Consider not rebuilding here every time.
-        metadata = TableMetadata.buildFrom(metadata).withKekCache(cache).build();
-      }
+      // No requirements are needed to add to the KEK cache via a MetadataUpdate; snapshot key IDs
+      // are unique so can always be added to a KEK cache.
+      // TODO: Consider not rebuilding here every time.
+      metadata = metadata.addKekCache(cache);
     }
 
     Endpoint.check(endpoints, Endpoint.V1_UPDATE_TABLE);
@@ -238,9 +233,8 @@ class RESTTableOperations implements TableOperations {
         || !Objects.equals(current.metadataFileLocation(), response.metadataLocation())) {
       this.current = response.tableMetadata();
 
-      // Update the encryption manager's KEK cache.
-      // TODO: Think more carefully about what a null cache means.
-      if (current.kekCache() != null) {
+      if (encryption() instanceof StandardEncryptionManager) {
+        // Update the encryption manager's KEK cache.
         EncryptionUtil.getKekCacheFromMetadata(io(), current.kekCache());
       }
     }

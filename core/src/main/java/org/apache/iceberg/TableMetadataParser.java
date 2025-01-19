@@ -230,6 +230,7 @@ public class TableMetadataParser {
 
     toJson(metadata.refs(), generator);
 
+    // TODO: null check needed?
     if (metadata.kekCache() != null && !metadata.kekCache().isEmpty()) {
       writeKekCache(metadata.kekCache(), generator);
     }
@@ -501,7 +502,7 @@ public class TableMetadataParser {
       refs = ImmutableMap.of();
     }
 
-    Map<String, WrappedEncryptionKey> kekCache = null;
+    Map<String, WrappedEncryptionKey> kekCache = Maps.newHashMap();
     if (node.has(KEK_CACHE)) {
       kekCache = readKekCache(node);
     }
@@ -559,8 +560,7 @@ public class TableMetadataParser {
       }
     }
 
-    TableMetadata result =
-        new TableMetadata(
+    return new TableMetadata(
             metadataLocation,
             formatVersion,
             uuid,
@@ -584,13 +584,8 @@ public class TableMetadataParser {
             refs,
             statisticsFiles,
             partitionStatisticsFiles,
-            ImmutableList.of() /* no changes from the file */);
-
-    if (kekCache != null) {
-      result.setKekCache(kekCache);
-    }
-
-    return result;
+            ImmutableList.of() /* no changes from the file */)
+        .internalSetKekCache(kekCache); // TODO: Change.
   }
 
   public static Map<String, WrappedEncryptionKey> readKekCache(JsonNode node) {

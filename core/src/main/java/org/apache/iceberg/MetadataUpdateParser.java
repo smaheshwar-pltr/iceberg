@@ -150,7 +150,7 @@ public class MetadataUpdateParser {
           .put(MetadataUpdate.SetLocation.class, SET_LOCATION)
           .put(MetadataUpdate.AddViewVersion.class, ADD_VIEW_VERSION)
           .put(MetadataUpdate.SetCurrentViewVersion.class, SET_CURRENT_VIEW_VERSION)
-          .put(MetadataUpdate.SetKekCache.class, SET_KEK_CACHE)
+          .put(MetadataUpdate.AddKekCache.class, SET_KEK_CACHE)
           .buildOrThrow();
 
   public static String toJson(MetadataUpdate metadataUpdate) {
@@ -244,7 +244,7 @@ public class MetadataUpdateParser {
             (MetadataUpdate.SetCurrentViewVersion) metadataUpdate, generator);
         break;
       case SET_KEK_CACHE:
-        writeSetKekCache((MetadataUpdate.SetKekCache) metadataUpdate, generator);
+        writeSetKekCache((MetadataUpdate.AddKekCache) metadataUpdate, generator);
         break;
       default:
         throw new IllegalArgumentException(
@@ -454,7 +454,7 @@ public class MetadataUpdateParser {
     gen.writeNumberField(VIEW_VERSION_ID, metadataUpdate.versionId());
   }
 
-  private static void writeSetKekCache(MetadataUpdate.SetKekCache metadataUpdate, JsonGenerator gen)
+  private static void writeSetKekCache(MetadataUpdate.AddKekCache metadataUpdate, JsonGenerator gen)
       throws IOException {
     TableMetadataParser.writeKekCache(metadataUpdate.kekCache(), gen);
   }
@@ -610,6 +610,6 @@ public class MetadataUpdateParser {
   }
 
   private static MetadataUpdate readSetKekCache(JsonNode node) {
-    return new MetadataUpdate.SetKekCache(TableMetadataParser.readKekCache(node));
+    return new MetadataUpdate.AddKekCache(TableMetadataParser.readKekCache(node));
   }
 }

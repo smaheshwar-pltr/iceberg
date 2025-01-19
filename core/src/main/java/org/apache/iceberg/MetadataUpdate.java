@@ -39,10 +39,11 @@ public interface MetadataUpdate extends Serializable {
         String.format("Cannot apply update %s to a view", this.getClass().getSimpleName()));
   }
 
-  class SetKekCache implements MetadataUpdate {
+  // TODO: Add to REST spec.
+  class AddKekCache implements MetadataUpdate {
     private final Map<String, WrappedEncryptionKey> kekCache;
 
-    public SetKekCache(Map<String, WrappedEncryptionKey> kekCache) {
+    public AddKekCache(Map<String, WrappedEncryptionKey> kekCache) {
       this.kekCache = kekCache;
     }
 
@@ -52,7 +53,7 @@ public interface MetadataUpdate extends Serializable {
 
     @Override
     public void applyTo(TableMetadata.Builder metadataBuilder) {
-      metadataBuilder.withKekCache(kekCache);
+      metadataBuilder.addKekCache(kekCache);
     }
   }
 

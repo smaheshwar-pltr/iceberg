@@ -330,6 +330,7 @@ public class TableMetadata implements Serializable {
     this.snapshotsLoaded = snapshotsSupplier == null;
     this.snapshotLog = snapshotLog;
     this.previousFiles = previousFiles;
+    this.kekCache = Maps.newHashMap(); // TODO: Stop being lazy.
 
     // changes are carried through until metadata is read from a file
     this.changes = changes;
@@ -516,10 +517,6 @@ public class TableMetadata implements Serializable {
     return snapshots;
   }
 
-  public void setKekCache(Map<String, WrappedEncryptionKey> kekCache) {
-    this.kekCache = kekCache;
-  }
-
   public Map<String, WrappedEncryptionKey> kekCache() {
     return kekCache;
   }
@@ -566,6 +563,17 @@ public class TableMetadata implements Serializable {
 
   public List<MetadataUpdate> changes() {
     return changes;
+  }
+
+  // TODO: Fix these methods...
+  public TableMetadata internalSetKekCache(Map<String, WrappedEncryptionKey> kekCache) {
+    Preconditions.checkNotNull(kekCache, "KEK cache cannot be null");
+    this.kekCache = kekCache;
+    return this;
+  }
+
+  public TableMetadata addKekCache(Map<String, WrappedEncryptionKey> kekCache) {
+    return new Builder(this).addKekCache(kekCache).build();
   }
 
   public TableMetadata withUUID() {
@@ -899,6 +907,7 @@ public class TableMetadata implements Serializable {
     private final Map<Long, List<StatisticsFile>> statisticsFiles;
     private final Map<Long, List<PartitionStatisticsFile>> partitionStatisticsFiles;
     private boolean suppressHistoricalSnapshots = false;
+    private Map<String, WrappedEncryptionKey> kekCache;
 
     // change tracking
     private final List<MetadataUpdate> changes;
@@ -907,7 +916,6 @@ public class TableMetadata implements Serializable {
     private Integer lastAddedSchemaId = null;
     private Integer lastAddedSpecId = null;
     private Integer lastAddedOrderId = null;
-    private Map<String, WrappedEncryptionKey> kekCache = null;
 
     // handled in build
     private final List<HistoryEntry> snapshotLog;
@@ -946,6 +954,7 @@ public class TableMetadata implements Serializable {
       this.schemasById = Maps.newHashMap();
       this.specsById = Maps.newHashMap();
       this.sortOrdersById = Maps.newHashMap();
+      this.kekCache = Maps.newHashMap();
     }
 
     private Builder(TableMetadata base) {
@@ -979,15 +988,27 @@ public class TableMetadata implements Serializable {
       this.schemasById = Maps.newHashMap(base.schemasById);
       this.specsById = Maps.newHashMap(base.specsById);
       this.sortOrdersById = Maps.newHashMap(base.sortOrdersById);
-      if (base.kekCache != null) {
-        this.kekCache = Maps.newHashMap(base.kekCache);
-      }
+      this.kekCache = Maps.newHashMap(base.kekCache);
     }
 
-    public Builder withKekCache(Map<String, WrappedEncryptionKey> kekCache) {
+    public Builder addKekCache(Map<String, WrappedEncryptionKey> kekCache) {
       if (null != kekCache) {
-        this.kekCache = Maps.newHashMap(kekCache);
-        changes.add(new MetadataUpdate.SetKekCache(kekCache));
+        // Validate that the provided kekCache is consistent with the existing one.
+        for (Map.Entry<String, WrappedEncryptionKey> entry : kekCache.entrySet()) {
+          WrappedEncryptionKey wrappedKek = entry.getValue();
+          WrappedEncryptionKey thisKek = this.kekCache.get(entry.getKey());
+
+          if (thisKek != null) {
+            Preconditions.checkState(
+                thisKek.wrappedKey().equals(wrappedKek.wrappedKey()),
+                "Current kek wrap differs from newly added for %s",
+                entry.getKey());
+          } else {
+            this.kekCache.put(entry.getKey(), wrappedKek); // TODO: Changed.
+          }
+        }
+
+        changes.add(new MetadataUpdate.AddKekCache(kekCache));
       }
 
       return this;
@@ -1496,8 +1517,7 @@ public class TableMetadata implements Serializable {
       List<HistoryEntry> newSnapshotLog =
           updateSnapshotLog(snapshotLog, snapshotsById, currentSnapshotId, changes);
 
-      TableMetadata result =
-          new TableMetadata(
+      return new TableMetadata(
               metadataLocation,
               formatVersion,
               uuid,
@@ -1523,11 +1543,8 @@ public class TableMetadata implements Serializable {
               partitionStatisticsFiles.values().stream()
                   .flatMap(List::stream)
                   .collect(Collectors.toList()),
-              discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes));
-
-      result.setKekCache(kekCache);
-
-      return result;
+              discardChanges ? ImmutableList.of() : ImmutableList.copyOf(changes))
+          .internalSetKekCache(kekCache); // TODO: Change.
     }
 
     private int addSchemaInternal(Schema schema, int newLastColumnId) {
