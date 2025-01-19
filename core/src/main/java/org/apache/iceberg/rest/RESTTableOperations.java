@@ -163,8 +163,7 @@ class RESTTableOperations implements TableOperations {
           ((StandardEncryptionManager) encryption()).kekCache();
       if (cache != null) {
         // KEK cache setting just requires a MetadataUpdate, and no separate requirements, because
-        // the KEK cache changes
-        // only for a new snapshot which adds its requirements.
+        // the KEK cache changes only for a new snapshot which adds its requirements.
         // TODO: Consider not rebuilding here every time.
         metadata = TableMetadata.buildFrom(metadata).withKekCache(cache).build();
       }
