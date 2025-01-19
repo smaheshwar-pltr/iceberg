@@ -310,7 +310,8 @@ public class TableMetadataParser {
         InputStream gis = codec == Codec.GZIP ? new GZIPInputStream(is) : is) {
       TableMetadata tableMetadata =
           fromJson(file, JsonUtil.mapper().readValue(gis, JsonNode.class));
-      if (tableMetadata.kekCache() != null && (io instanceof EncryptingFileIO)) {
+      // TODO: Actually, maybe think more about nulls. I had to add empty check here. Null means unencrypted I guess?
+      if (tableMetadata.kekCache() != null && !tableMetadata.kekCache().isEmpty() && (io instanceof EncryptingFileIO)) {
         EncryptionUtil.getKekCacheFromMetadata(io, tableMetadata.kekCache());
       }
       return tableMetadata;

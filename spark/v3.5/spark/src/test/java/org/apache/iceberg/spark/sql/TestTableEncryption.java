@@ -102,7 +102,10 @@ public class TestTableEncryption extends CatalogTestBase {
     List<Object[]> expected =
         ImmutableList.of(row(1L, "a", 1.0F), row(2L, "b", 2.0F), row(3L, "c", Float.NaN));
 
-    assertEquals("Should return all expected rows", expected, sql("SELECT * FROM %s", tableName));
+    assertEquals(
+        "Should return all expected rows",
+        expected,
+        sql("SELECT * FROM %s ORDER BY id", tableName));
   }
 
   @TestTemplate
