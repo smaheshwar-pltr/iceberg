@@ -161,6 +161,8 @@ class RESTTableOperations implements TableOperations {
       // No requirements are needed to add to the KEK cache via a MetadataUpdate; snapshot key IDs
       // are unique so can always be added to a KEK cache.
       // TODO: Consider not rebuilding here every time.
+      // TODO: Think about this more. See also:
+      // https://github.com/apache/iceberg/pull/10755/files#diff-c540a31e66b157a8f080433c82a29a070096d0e08c6578a0099153f1229bdb7a
       metadata = metadata.addKekCache(cache);
     }
 
