@@ -234,7 +234,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     encryptionPropsFromMetadata(metadata.properties());
 
     if (encryption() instanceof StandardEncryptionManager) { // TODO: changed.
-      metadata.setKekCache(((StandardEncryptionManager) encryptionManager).kekCache());
+      metadata.internalSetKekCache(((StandardEncryptionManager) encryptionManager).kekCache());
     }
 
     String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);

@@ -22,6 +22,7 @@ import java.io.Serializable;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.view.ViewMetadata;
 import org.apache.iceberg.view.ViewVersion;
@@ -36,6 +37,24 @@ public interface MetadataUpdate extends Serializable {
   default void applyTo(ViewMetadata.Builder viewMetadataBuilder) {
     throw new UnsupportedOperationException(
         String.format("Cannot apply update %s to a view", this.getClass().getSimpleName()));
+  }
+
+  // TODO: Add to REST spec.
+  class AddKekCache implements MetadataUpdate {
+    private final Map<String, WrappedEncryptionKey> kekCache;
+
+    public AddKekCache(Map<String, WrappedEncryptionKey> kekCache) {
+      this.kekCache = kekCache;
+    }
+
+    public Map<String, WrappedEncryptionKey> kekCache() {
+      return kekCache;
+    }
+
+    @Override
+    public void applyTo(TableMetadata.Builder metadataBuilder) {
+      metadataBuilder.addKekCache(kekCache);
+    }
   }
 
   class AssignUUID implements MetadataUpdate {

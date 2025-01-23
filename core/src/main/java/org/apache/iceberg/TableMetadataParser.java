@@ -36,6 +36,7 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import org.apache.iceberg.TableMetadata.MetadataLogEntry;
 import org.apache.iceberg.TableMetadata.SnapshotLogEntry;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.WrappedEncryptionKey;
 import org.apache.iceberg.exceptions.RuntimeIOException;
@@ -229,19 +230,9 @@ public class TableMetadataParser {
 
     toJson(metadata.refs(), generator);
 
+    // TODO: null check needed?
     if (metadata.kekCache() != null && !metadata.kekCache().isEmpty()) {
-      generator.writeArrayFieldStart(KEK_CACHE);
-      for (Map.Entry<String, WrappedEncryptionKey> entry : metadata.kekCache().entrySet()) {
-        generator.writeStartObject();
-        generator.writeStringField(KEK_ID, entry.getKey());
-        generator.writeStringField(
-            KEK_WRAP,
-            Base64.getEncoder()
-                .encodeToString(ByteBuffers.toByteArray(entry.getValue().wrappedKey())));
-        generator.writeNumberField(TIMESTAMP_MS, entry.getValue().timestamp());
-        generator.writeEndObject();
-      }
-      generator.writeEndArray();
+      writeKekCache(metadata.kekCache(), generator);
     }
 
     generator.writeArrayFieldStart(SNAPSHOTS);
@@ -283,6 +274,22 @@ public class TableMetadataParser {
     generator.writeEndObject();
   }
 
+  public static void writeKekCache(
+      Map<String, WrappedEncryptionKey> kekCache, JsonGenerator generator) throws IOException {
+    generator.writeArrayFieldStart(KEK_CACHE);
+    for (Map.Entry<String, WrappedEncryptionKey> entry : kekCache.entrySet()) {
+      generator.writeStartObject();
+      generator.writeStringField(KEK_ID, entry.getKey());
+      generator.writeStringField(
+          KEK_WRAP,
+          Base64.getEncoder()
+              .encodeToString(ByteBuffers.toByteArray(entry.getValue().wrappedKey())));
+      generator.writeNumberField(TIMESTAMP_MS, entry.getValue().timestamp());
+      generator.writeEndObject();
+    }
+    generator.writeEndArray();
+  }
+
   private static void toJson(Map<String, SnapshotRef> refs, JsonGenerator generator)
       throws IOException {
     generator.writeObjectFieldStart(REFS);
@@ -303,7 +310,8 @@ public class TableMetadataParser {
         InputStream gis = codec == Codec.GZIP ? new GZIPInputStream(is) : is) {
       TableMetadata tableMetadata =
           fromJson(file, JsonUtil.mapper().readValue(gis, JsonNode.class));
-      if (tableMetadata.kekCache() != null) {
+      // TODO: Actually, maybe think more about nulls. I had to add empty check here. Null means unencrypted I guess?
+      if (tableMetadata.kekCache() != null && !tableMetadata.kekCache().isEmpty() && (io instanceof EncryptingFileIO)) {
         EncryptionUtil.getKekCacheFromMetadata(io, tableMetadata.kekCache());
       }
       return tableMetadata;
@@ -495,21 +503,9 @@ public class TableMetadataParser {
       refs = ImmutableMap.of();
     }
 
-    Map<String, WrappedEncryptionKey> kekCache = null;
+    Map<String, WrappedEncryptionKey> kekCache = Maps.newHashMap();
     if (node.has(KEK_CACHE)) {
-      kekCache = Maps.newHashMap();
-      Iterator<JsonNode> cacheIterator = node.get(KEK_CACHE).elements();
-      while (cacheIterator.hasNext()) {
-        JsonNode entryNode = cacheIterator.next();
-        String kekID = JsonUtil.getString(KEK_ID, entryNode);
-        kekCache.put(
-            kekID,
-            new WrappedEncryptionKey(
-                kekID,
-                ByteBuffer.wrap(
-                    Base64.getDecoder().decode(JsonUtil.getString(KEK_WRAP, entryNode))),
-                JsonUtil.getLong(TIMESTAMP_MS, entryNode)));
-      }
+      kekCache = readKekCache(node);
     }
 
     List<Snapshot> snapshots;
@@ -565,8 +561,7 @@ public class TableMetadataParser {
       }
     }
 
-    TableMetadata result =
-        new TableMetadata(
+    return new TableMetadata(
             metadataLocation,
             formatVersion,
             uuid,
@@ -590,13 +585,28 @@ public class TableMetadataParser {
             refs,
             statisticsFiles,
             partitionStatisticsFiles,
-            ImmutableList.of() /* no changes from the file */);
+            ImmutableList.of() /* no changes from the file */)
+        .internalSetKekCache(kekCache); // TODO: Change.
+  }
 
-    if (kekCache != null) {
-      result.setKekCache(kekCache);
+  public static Map<String, WrappedEncryptionKey> readKekCache(JsonNode node) {
+    if (!node.has(KEK_CACHE)) {
+      throw new IllegalArgumentException(
+          "Cannot parse kek cache from node without kek cache: " + node);
     }
-
-    return result;
+    Map<String, WrappedEncryptionKey> kekCache = Maps.newHashMap();
+    Iterator<JsonNode> cacheIterator = node.get(KEK_CACHE).elements();
+    while (cacheIterator.hasNext()) {
+      JsonNode entryNode = cacheIterator.next();
+      String kekID = JsonUtil.getString(KEK_ID, entryNode);
+      kekCache.put(
+          kekID,
+          new WrappedEncryptionKey(
+              kekID,
+              ByteBuffer.wrap(Base64.getDecoder().decode(JsonUtil.getString(KEK_WRAP, entryNode))),
+              JsonUtil.getLong(TIMESTAMP_MS, entryNode)));
+    }
+    return kekCache;
   }
 
   private static Map<String, SnapshotRef> refsFromJson(JsonNode refMap) {
