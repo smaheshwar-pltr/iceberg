@@ -140,8 +140,8 @@ public class TestTableEncryption extends CatalogTestBase {
   public void testDirectUnencryptedDataFileRead() {
     String tableName = this.tableName + "_unencrypted";
 
-    sql("CREATE TABLE %s (id bigint, data string, float float) USING iceberg ", tableName);
-    sql("INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN'))", tableName);
+    sql("CREATE TABLE %s (id bigint, data string, float float) USING iceberg PARTITIONED BY (bucket(2, id))", tableName);
+    sql("INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN')), (4, 'd', 1.5)", tableName);
 
     List<Object[]> dataFileTable =
         sql("SELECT file_path FROM %s.%s", tableName, MetadataTableType.ALL_DATA_FILES);
@@ -149,8 +149,10 @@ public class TestTableEncryption extends CatalogTestBase {
         Streams.concat(dataFileTable.stream())
             .map(row -> (String) row[0])
             .collect(Collectors.toList());
+
     Schema schema = new Schema(optional(0, "id", Types.IntegerType.get()));
     for (String filePath : dataFiles) {
+      System.out.println(filePath);
       assertDoesNotThrow(
           () ->
               Parquet.read(localInput(filePath))
