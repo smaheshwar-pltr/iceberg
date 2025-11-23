@@ -124,8 +124,8 @@ class RESTTableOperations implements TableOperations {
     }
     this.endpoints = endpoints;
 
-    // N.B. We don't use this.current because for tables-to-be-created, because it would be null,
-    // and we still want encrypted properties in this case for its TableOperations.
+    // N.B. We don't use this.current due it being null for the CREATE update type; we still
+    // want encryption configured for this case.
     encryptionPropsFromMetadata(current);
   }
 
@@ -344,12 +344,11 @@ class RESTTableOperations implements TableOperations {
 
     encryptedKeysFromMetadata = metadata.encryptionKeys();
 
+    // Refresh encryption-related table properties on new/refreshed metadata
     Map<String, String> tableProperties = metadata.properties();
-    if (tableKeyId == null) {
-      tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
-    }
+    tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
 
-    if (tableKeyId != null && encryptionDekLength <= 0) {
+    if (tableKeyId != null) {
       encryptionDekLength =
           PropertyUtil.propertyAsInt(
               tableProperties,
@@ -357,7 +356,7 @@ class RESTTableOperations implements TableOperations {
               TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
     }
 
-    // Force re-creation of encryptingFileIO and encryptionManager
+    // Force re-creation of encryption manager
     encryptingFileIO = null;
     encryptionManager = null;
   }
