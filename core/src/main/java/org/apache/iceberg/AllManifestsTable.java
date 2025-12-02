@@ -19,10 +19,12 @@
 package org.apache.iceberg;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.expressions.Binder;
 import org.apache.iceberg.expressions.BoundReference;
@@ -33,9 +35,11 @@ import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.StructProjection;
@@ -76,7 +80,8 @@ public class AllManifestsTable extends BaseMetadataTable {
                       Types.NestedField.required(11, "contains_nan", Types.BooleanType.get()),
                       Types.NestedField.optional(12, "lower_bound", Types.StringType.get()),
                       Types.NestedField.optional(13, "upper_bound", Types.StringType.get())))),
-          REF_SNAPSHOT_ID);
+          REF_SNAPSHOT_ID,
+          Types.NestedField.optional(19, "key_metadata", Types.BinaryType.get()));
 
   AllManifestsTable(Table table) {
     this(table, table.name() + ".all_manifests");
@@ -128,31 +133,45 @@ public class AllManifestsTable extends BaseMetadataTable {
       Iterable<Snapshot> filteredSnapshots =
           Iterables.filter(table().snapshots(), snapshotEvaluator::eval);
 
+      if (io instanceof EncryptingFileIO) {
+        // Encrypted manifest lists must be read on the driver:
+        List<FileScanTask> tasks = Lists.newArrayList();
+        for (Snapshot snap : filteredSnapshots) {
+          tasks.add(getTask(io, specs, dataTableSchema, snap, filter));
+        }
+        return CloseableIterable.withNoopClose(tasks);
+      }
+
       return CloseableIterable.withNoopClose(
           Iterables.transform(
-              filteredSnapshots,
-              snap -> {
-                if (snap.manifestListLocation() != null) {
-                  return new ManifestListReadTask(
-                      dataTableSchema,
-                      io,
-                      schema(),
-                      specs,
-                      snap.manifestListLocation(),
-                      filter,
-                      snap.snapshotId());
-                } else {
-                  return StaticDataTask.of(
-                      io.newInputFile(
-                          ((BaseTable) table()).operations().current().metadataFileLocation()),
-                      MANIFEST_FILE_SCHEMA,
-                      schema(),
-                      snap.allManifests(io),
-                      manifest ->
-                          manifestFileToRow(
-                              specs.get(manifest.partitionSpecId()), manifest, snap.snapshotId()));
-                }
-              }));
+              filteredSnapshots, snap -> getTask(io, specs, dataTableSchema, snap, filter)));
+    }
+
+    private FileScanTask getTask(
+        FileIO io,
+        Map<Integer, PartitionSpec> specs,
+        Schema dataTableSchema,
+        Snapshot snap,
+        Expression filter) {
+      if (snap.manifestListLocation() != null) {
+        return new ManifestListReadTask(
+            dataTableSchema,
+            io,
+            schema(),
+            specs,
+            new BaseManifestListFile(snap.manifestListLocation(), snap.keyId()),
+            filter,
+            snap.snapshotId());
+      } else {
+        return StaticDataTask.of(
+            io.newInputFile(((BaseTable) table()).operations().current().metadataFileLocation()),
+            MANIFEST_FILE_SCHEMA,
+            schema(),
+            snap.allManifests(io),
+            manifest ->
+                manifestFileToRow(
+                    specs.get(manifest.partitionSpecId()), manifest, snap.snapshotId()));
+      }
     }
   }
 
@@ -161,7 +180,8 @@ public class AllManifestsTable extends BaseMetadataTable {
     private final FileIO io;
     private final Schema schema;
     private final Map<Integer, PartitionSpec> specs;
-    private final String manifestListLocation;
+    private final ManifestListFile manifestListFile;
+    private final byte[] keyMetadata;
     private final Expression residual;
     private final long referenceSnapshotId;
     private DataFile lazyDataFile = null;
@@ -171,16 +191,25 @@ public class AllManifestsTable extends BaseMetadataTable {
         FileIO io,
         Schema schema,
         Map<Integer, PartitionSpec> specs,
-        String manifestListLocation,
+        ManifestListFile manifestListFile,
         Expression residual,
         long referenceSnapshotId) {
-      this.dataTableSchema = dataTableSchema;
       this.io = io;
+      this.dataTableSchema = dataTableSchema;
       this.schema = schema;
       this.specs = specs;
-      this.manifestListLocation = manifestListLocation;
+      this.manifestListFile = manifestListFile;
       this.residual = residual;
       this.referenceSnapshotId = referenceSnapshotId;
+
+      if (io instanceof EncryptingFileIO) {
+        keyMetadata =
+            manifestListFile
+                .decryptKeyMetadata(((EncryptingFileIO) io).encryptionManager())
+                .array();
+      } else {
+        keyMetadata = null;
+      }
     }
 
     @Override
@@ -191,7 +220,7 @@ public class AllManifestsTable extends BaseMetadataTable {
     @Override
     public CloseableIterable<StructLike> rows() {
       try (CloseableIterable<ManifestFile> manifests =
-          InternalData.read(FileFormat.AVRO, io.newInputFile(manifestListLocation))
+          InternalData.read(FileFormat.AVRO, newManifestListInputFile())
               .setRootType(GenericManifestFile.class)
               .setCustomType(
                   ManifestFile.PARTITION_SUMMARIES_ELEMENT_ID, GenericPartitionFieldSummary.class)
@@ -209,7 +238,8 @@ public class AllManifestsTable extends BaseMetadataTable {
         return CloseableIterable.transform(rowIterable, projection::wrap);
 
       } catch (IOException e) {
-        throw new RuntimeIOException(e, "Cannot read manifest list file: %s", manifestListLocation);
+        throw new RuntimeIOException(
+            e, "Cannot read manifest list file: %s", manifestListFile.location());
       }
     }
 
@@ -218,7 +248,7 @@ public class AllManifestsTable extends BaseMetadataTable {
       if (lazyDataFile == null) {
         this.lazyDataFile =
             DataFiles.builder(PartitionSpec.unpartitioned())
-                .withInputFile(io.newInputFile(manifestListLocation))
+                .withInputFile(newManifestListInputFile())
                 .withRecordCount(1)
                 .withFormat(FileFormat.AVRO)
                 .build();
@@ -271,12 +301,21 @@ public class AllManifestsTable extends BaseMetadataTable {
       return specs;
     }
 
-    String manifestListLocation() {
-      return manifestListLocation;
+    ManifestListFile manifestListFile() {
+      return manifestListFile;
     }
 
     long referenceSnapshotId() {
       return referenceSnapshotId;
+    }
+
+    private InputFile newManifestListInputFile() {
+      if (io instanceof EncryptingFileIO) {
+        return ((EncryptingFileIO) io)
+            .newDecryptingInputFile(manifestListFile.location(), ByteBuffer.wrap(keyMetadata));
+      } else {
+        return io.newInputFile(manifestListFile);
+      }
     }
   }
 
@@ -295,7 +334,8 @@ public class AllManifestsTable extends BaseMetadataTable {
         manifest.content() == ManifestContent.DELETES ? manifest.existingFilesCount() : 0,
         manifest.content() == ManifestContent.DELETES ? manifest.deletedFilesCount() : 0,
         ManifestsTable.partitionSummariesToRows(spec, manifest.partitions()),
-        referenceSnapshotId);
+        referenceSnapshotId,
+        manifest.keyMetadata() == null ? null : manifest.keyMetadata().array());
   }
 
   private static class SnapshotEvaluator {
