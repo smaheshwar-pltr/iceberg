@@ -127,7 +127,7 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
-  public void testTransaction() {
+  public void testAppendTransaction() {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
 
@@ -140,11 +140,11 @@ public class TestTableEncryption extends CatalogTestBase {
     append.commit();
     transaction.commitTransaction();
 
-    assertThat(currentDataFiles(table).size()).isEqualTo(dataFiles.size() + 1);
+    assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 1);
   }
 
   @TestTemplate
-  public void testTransactionRetry() {
+  public void testConcurrentAppendTransactions() {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
 
@@ -161,7 +161,38 @@ public class TestTableEncryption extends CatalogTestBase {
     append.commit();
     transaction.commitTransaction();
 
-    assertThat(currentDataFiles(table).size()).isEqualTo(dataFiles.size() + 2);
+    assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 2);
+  }
+
+  @TestTemplate
+  public void testConcurrentReplaceTransactions() {
+    validationCatalog.initialize(catalogName, catalogConfig);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    DataFile file = currentDataFiles(table).get(0);
+    Schema schema = table.schema();
+
+    // Write data for a replace transaction that will be committed later
+    Transaction secondReplace =
+            validationCatalog
+                    .buildTable(tableIdent, schema)
+                    .withProperty("encryption.key-id", UnitestKMS.MASTER_KEY_NAME1)
+                    .replaceTransaction();
+    secondReplace.newFastAppend().appendFile(file).commit();
+
+    // Commit another replace transaction first
+    Transaction firstReplace =
+            validationCatalog
+                    .buildTable(tableIdent, schema)
+                    .withProperty("encryption.key-id", UnitestKMS.MASTER_KEY_NAME1)
+                    .replaceTransaction();
+    firstReplace.newFastAppend().appendFile(file).commit();
+    firstReplace.commitTransaction();
+
+    secondReplace.commitTransaction();
+
+    Table afterSecondReplace = validationCatalog.loadTable(tableIdent);
+    assertThat(currentDataFiles(afterSecondReplace)).hasSize(1);
   }
 
   @TestTemplate
