@@ -21,6 +21,7 @@ package org.apache.iceberg.rest;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -77,7 +78,13 @@ class RESTTableOperations implements TableOperations {
   private EncryptingFileIO encryptingFileIO;
   private String tableKeyId;
   private int encryptionDekLength;
-  private List<EncryptedKey> encryptedKeysFromMetadata;
+
+  // keys loaded from the latest metadata
+  private Optional<List<EncryptedKey>> encryptedKeysFromMetadata = Optional.empty();
+
+  // keys added to EM (e.g. as a result of a FileAppend) but not committed into the latest metadata
+  // yet
+  private Optional<List<EncryptedKey>> encryptedKeysPending = Optional.empty();
 
   RESTTableOperations(
       RESTClient client,
@@ -290,9 +297,12 @@ class RESTTableOperations implements TableOperations {
               TableProperties.ENCRYPTION_DEK_LENGTH,
               String.valueOf(encryptionDekLength));
 
+      List<EncryptedKey> keys = Lists.newLinkedList();
+      encryptedKeysFromMetadata.ifPresent(keys::addAll);
+      encryptedKeysPending.ifPresent(keys::addAll);
+
       encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              encryptedKeysFromMetadata, encryptionProperties, kmsClient);
+          EncryptionUtil.createEncryptionManager(keys, encryptionProperties, kmsClient);
     } else {
       return PlaintextEncryptionManager.instance();
     }
@@ -342,7 +352,25 @@ class RESTTableOperations implements TableOperations {
       return;
     }
 
-    encryptedKeysFromMetadata = metadata.encryptionKeys();
+    encryptedKeysFromMetadata = Optional.ofNullable(metadata.encryptionKeys());
+
+    if (encryptionManager != null) {
+      encryptedKeysPending = Optional.of(Lists.newLinkedList());
+
+      Set<String> keyIdsFromMetadata =
+          encryptedKeysFromMetadata.orElseGet(Lists::newLinkedList).stream()
+              .map(EncryptedKey::keyId)
+              .collect(Collectors.toSet());
+
+      for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
+        if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
+          encryptedKeysPending.get().add(keyFromEM);
+        }
+      }
+
+    } else {
+      encryptedKeysPending = Optional.empty();
+    }
 
     // Refresh encryption-related table properties on new/refreshed metadata
     Map<String, String> tableProperties = metadata.properties();
@@ -368,7 +396,7 @@ class RESTTableOperations implements TableOperations {
     if (current == null
         || !Objects.equals(current.metadataFileLocation(), response.metadataLocation())) {
       this.current = checkUUID(current, response.tableMetadata());
-      encryptionPropsFromMetadata(this.current);
+      encryptionPropsFromMetadata(current);
     }
 
     return current;
