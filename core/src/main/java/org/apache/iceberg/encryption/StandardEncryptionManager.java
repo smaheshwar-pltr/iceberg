@@ -57,15 +57,6 @@ public class StandardEncryptionManager implements EncryptionManager {
       this.kmsClient = kmsClient;
       this.encryptionKeys = Maps.newLinkedHashMap();
 
-      if (keys != null) {
-        for (EncryptedKey key : keys) {
-          encryptionKeys.put(
-              key.keyId(),
-              new BaseEncryptedKey(
-                  key.keyId(), key.encryptedKeyMetadata(), key.encryptedById(), key.properties()));
-        }
-      }
-
       this.unwrappedKeyCache =
           Caffeine.newBuilder()
               .expireAfterWrite(1, TimeUnit.HOURS)
@@ -73,6 +64,19 @@ public class StandardEncryptionManager implements EncryptionManager {
                   keyId ->
                       kmsClient.unwrapKey(
                           encryptionKeys.get(keyId).encryptedKeyMetadata(), tableKeyId));
+
+      putEncryptionKeys(keys);
+    }
+
+    private void putEncryptionKeys(List<EncryptedKey> keys) {
+      if (keys != null) {
+        for (EncryptedKey key : keys) {
+          encryptionKeys.put(
+                  key.keyId(),
+                  new BaseEncryptedKey(
+                          key.keyId(), key.encryptedKeyMetadata(), key.encryptedById(), key.properties()));
+        }
+      }
     }
   }
 
@@ -171,6 +175,14 @@ public class StandardEncryptionManager implements EncryptionManager {
     }
 
     return transientState.encryptionKeys;
+  }
+
+  void putEncryptionKeys(List<EncryptedKey> keys) {
+    if (transientState == null) {
+      throw new IllegalStateException("Cannot add encryption keys after serialization");
+    }
+
+    transientState.putEncryptionKeys(keys);
   }
 
   String keyEncryptionKeyID() {

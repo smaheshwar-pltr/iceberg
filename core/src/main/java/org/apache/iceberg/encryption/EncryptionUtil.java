@@ -162,6 +162,14 @@ public class EncryptionUtil {
     return sem.encryptionKeys();
   }
 
+  public static void putEncryptionKeys(EncryptionManager em, List<EncryptedKey> keys) {
+    Preconditions.checkState(
+            em instanceof StandardEncryptionManager,
+            "Adding encryption keys requires a StandardEncryptionManager");
+    StandardEncryptionManager sem = (StandardEncryptionManager) em;
+    sem.putEncryptionKeys(keys);
+  }
+
   /**
    * Encrypts the key metadata for a manifest list.
    *
