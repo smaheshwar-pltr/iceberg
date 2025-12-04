@@ -72,9 +72,9 @@ public class StandardEncryptionManager implements EncryptionManager {
       if (keys != null) {
         for (EncryptedKey key : keys) {
           encryptionKeys.put(
-                  key.keyId(),
-                  new BaseEncryptedKey(
-                          key.keyId(), key.encryptedKeyMetadata(), key.encryptedById(), key.properties()));
+              key.keyId(),
+              new BaseEncryptedKey(
+                  key.keyId(), key.encryptedKeyMetadata(), key.encryptedById(), key.properties()));
         }
       }
     }

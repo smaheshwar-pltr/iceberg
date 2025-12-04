@@ -22,7 +22,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
@@ -55,7 +54,6 @@ import org.apache.iceberg.hadoop.ConfigProperties;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
@@ -151,8 +149,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
           TableProperties.ENCRYPTION_DEK_LENGTH, String.valueOf(encryptionDekLength));
 
       encryptionManager =
-              EncryptionUtil.createEncryptionManager(
-                      encryptedKeysFromMetadata, encryptionProperties, keyManagementClient);
+          EncryptionUtil.createEncryptionManager(
+              encryptedKeysFromMetadata, encryptionProperties, keyManagementClient);
     } else {
       return PlaintextEncryptionManager.instance();
     }

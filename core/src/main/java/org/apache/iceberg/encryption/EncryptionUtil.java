@@ -164,8 +164,8 @@ public class EncryptionUtil {
 
   public static void putEncryptionKeys(EncryptionManager em, List<EncryptedKey> keys) {
     Preconditions.checkState(
-            em instanceof StandardEncryptionManager,
-            "Adding encryption keys requires a StandardEncryptionManager");
+        em instanceof StandardEncryptionManager,
+        "Adding encryption keys requires a StandardEncryptionManager");
     StandardEncryptionManager sem = (StandardEncryptionManager) em;
     sem.putEncryptionKeys(keys);
   }
