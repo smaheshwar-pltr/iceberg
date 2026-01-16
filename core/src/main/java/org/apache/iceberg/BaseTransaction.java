@@ -80,6 +80,12 @@ public class BaseTransaction implements Transaction {
   private boolean hasLastOpCommitted;
   private final MetricsReporter reporter;
 
+  private final Schema initialSchema;
+  private final PartitionSpec initialSpec;
+  private final SortOrder initialSortOrder;
+  private final String initialLocation;
+  private final Map<String, String> initialProperties;
+
   BaseTransaction(
       String tableName, TableOperations ops, TransactionType type, TableMetadata start) {
     this(tableName, ops, type, start, LoggingMetricsReporter.instance());
@@ -101,6 +107,12 @@ public class BaseTransaction implements Transaction {
     this.type = type;
     this.hasLastOpCommitted = true;
     this.reporter = reporter;
+
+    this.initialSchema = start.schema();
+    this.initialSpec = start.spec();
+    this.initialSortOrder = start.sortOrder();
+    this.initialLocation = start.location();
+    this.initialProperties = start.properties();
   }
 
   @Override
@@ -316,17 +328,11 @@ public class BaseTransaction implements Transaction {
           .run(
               underlyingOps -> {
                 try {
-                  underlyingOps.refresh();
+                  applyUpdates(underlyingOps, true);
                 } catch (NoSuchTableException e) {
                   if (!orCreate) {
                     throw e;
                   }
-                }
-
-                // because this is a replace table, it will always completely replace the table
-                // metadata. even if it was just updated.
-                if (base != underlyingOps.current()) {
-                  this.base = underlyingOps.current(); // just refreshed
                 }
 
                 underlyingOps.commit(base, current);
@@ -370,7 +376,7 @@ public class BaseTransaction implements Transaction {
           .onlyRetryOn(CommitFailedException.class)
           .run(
               underlyingOps -> {
-                applyUpdates(underlyingOps);
+                applyUpdates(underlyingOps, false);
 
                 underlyingOps.commit(base, current);
               });
@@ -458,11 +464,20 @@ public class BaseTransaction implements Transaction {
     }
   }
 
-  private void applyUpdates(TableOperations underlyingOps) {
+  private void applyUpdates(TableOperations underlyingOps, boolean replace) {
     if (base != underlyingOps.refresh()) {
       // use refreshed the metadata
       this.base = underlyingOps.current();
-      this.current = underlyingOps.current();
+
+      if (replace) {
+        // Even if we are dealing with a replace transaction, we need to re-apply updates on top of refreshed metadata's
+        // replacement, because of possible row lineage requirements and to not lose snapshot history
+        this.current = underlyingOps.current().buildReplacement(
+                initialSchema, initialSpec, initialSortOrder, initialLocation, initialProperties);
+      } else {
+        this.current = underlyingOps.current();
+      }
+
       for (PendingUpdate update : updates) {
         // re-commit each update in the chain to apply it and update current
         try {
