@@ -18,6 +18,8 @@
  */
 package org.apache.iceberg.rest;
 
+import static org.apache.iceberg.rest.RequestMatcher.containsHeaders;
+import static org.apache.iceberg.rest.RequestMatcher.matches;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,17 +35,14 @@ import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.benmanes.caffeine.cache.Cache;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -56,8 +55,6 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.http.HttpHeaders;
-import org.apache.iceberg.BaseMetadataTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.BaseTransaction;
 import org.apache.iceberg.CatalogProperties;
@@ -83,7 +80,6 @@ import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
-import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.NotAuthorizedException;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.RESTException;
@@ -91,15 +87,13 @@ import org.apache.iceberg.exceptions.ServiceFailureException;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.metrics.CommitReport;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
-import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.rest.HTTPRequest.HTTPMethod;
 import org.apache.iceberg.rest.RESTCatalogProperties.SnapshotMode;
-import org.apache.iceberg.rest.RESTTableCache.SessionIdTableId;
-import org.apache.iceberg.rest.RESTTableCache.TableWithETag;
 import org.apache.iceberg.rest.auth.AuthManager;
 import org.apache.iceberg.rest.auth.AuthManagers;
 import org.apache.iceberg.rest.auth.AuthSession;
@@ -107,6 +101,7 @@ import org.apache.iceberg.rest.auth.AuthSessionUtil;
 import org.apache.iceberg.rest.auth.OAuth2Properties;
 import org.apache.iceberg.rest.auth.OAuth2Util;
 import org.apache.iceberg.rest.requests.CreateTableRequest;
+import org.apache.iceberg.rest.requests.ReportMetricsRequest;
 import org.apache.iceberg.rest.requests.UpdateTableRequest;
 import org.apache.iceberg.rest.responses.ConfigResponse;
 import org.apache.iceberg.rest.responses.CreateNamespaceResponse;
@@ -116,7 +111,6 @@ import org.apache.iceberg.rest.responses.ListTablesResponse;
 import org.apache.iceberg.rest.responses.LoadTableResponse;
 import org.apache.iceberg.rest.responses.OAuthTokenResponse;
 import org.apache.iceberg.types.Types;
-import org.apache.iceberg.util.FakeTicker;
 import org.apache.iceberg.util.Pair;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.awaitility.Awaitility;
@@ -141,16 +135,6 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
           ImmutableMap.of(
               RESTCatalogProperties.NAMESPACE_SEPARATOR,
               RESTCatalogAdapter.NAMESPACE_SEPARATOR_URLENCODED_UTF_8));
-  private static final Duration TABLE_EXPIRATION =
-      Duration.ofMillis(RESTCatalogProperties.TABLE_CACHE_EXPIRE_AFTER_WRITE_MS_DEFAULT);
-  private static final Duration HALF_OF_TABLE_EXPIRATION = TABLE_EXPIRATION.dividedBy(2);
-
-  private static final SessionCatalog.SessionContext DEFAULT_SESSION_CONTEXT =
-      new SessionCatalog.SessionContext(
-          UUID.randomUUID().toString(),
-          "user",
-          ImmutableMap.of("credential", "user:12345"),
-          ImmutableMap.of());
 
   private static final class IdempotentEnv {
     private final TableIdentifier ident;
@@ -327,7 +311,11 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     RESTCatalog catalog =
         new RESTCatalog(
-            DEFAULT_SESSION_CONTEXT,
+            new SessionCatalog.SessionContext(
+                UUID.randomUUID().toString(),
+                "user",
+                ImmutableMap.of("credential", "user:12345"),
+                ImmutableMap.of()),
             (config) ->
                 HTTPClient.builder(config)
                     .uri(config.get(CatalogProperties.URI))
@@ -527,13 +515,13 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // the bearer token should be used for all interactions
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), catalogHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), catalogHeaders),
             any(),
             any(),
             any());
@@ -557,21 +545,21 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // no token or credential for catalog token exchange
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, ResourcePaths.tokens(), emptyHeaders),
+            matches(HTTPMethod.POST, ResourcePaths.tokens(), emptyHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // no token or credential for config
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     // use the catalog token for all interactions
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), catalogHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), catalogHeaders),
             any(),
             any(),
             any());
@@ -603,21 +591,21 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // no token or credential for catalog token exchange
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // no token or credential for config
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     // use the catalog token for all interactions
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), catalogHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), catalogHeaders),
             any(),
             any(),
             any());
@@ -655,21 +643,21 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // use the bearer token for config
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     // use the bearer token to fetch the context token
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // use the context token for table existence check
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), contextHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), contextHeaders),
             any(),
             any(),
             any());
@@ -709,28 +697,28 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // call client credentials with no initial auth
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // use the client credential token for config
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     // use the client credential to fetch the context token
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // use the context token for table existence check
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), contextHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), contextHeaders),
             any(),
             any(),
             any());
@@ -772,28 +760,28 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // use the bearer token for client credentials
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, initHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, initHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // use the client credential token for config
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     // use the client credential to fetch the context token
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
     // use the context token for table existence check
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), contextHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), contextHeaders),
             any(),
             any(),
             any());
@@ -955,7 +943,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -965,14 +953,14 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     if (!credentials.containsKey("token")) {
       Mockito.verify(adapter)
           .execute(
-              reqMatcher(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
+              matches(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
               eq(OAuthTokenResponse.class),
               any(),
               any());
     }
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), expectedHeaders),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), expectedHeaders),
             any(),
             any(),
             any());
@@ -1082,7 +1070,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // verify that the table was loaded with the refs argument
     verify(adapter, times(1))
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.GET, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of("snapshots", "refs")),
             eq(LoadTableResponse.class),
             any(),
@@ -1092,7 +1080,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     assertThat(refsTable.snapshots()).containsExactlyInAnyOrderElementsOf(table.snapshots());
     verify(adapter, times(1))
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.GET, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of("snapshots", "all")),
             eq(LoadTableResponse.class),
             any(),
@@ -1176,7 +1164,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // verify that the table was loaded with the refs argument
     verify(adapter, times(1))
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.GET, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of("snapshots", "refs")),
             eq(LoadTableResponse.class),
             any(),
@@ -1187,7 +1175,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
         .containsExactlyInAnyOrderElementsOf(table.snapshots());
     verify(adapter, times(1))
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.GET, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of("snapshots", "all")),
             eq(LoadTableResponse.class),
             any(),
@@ -1288,7 +1276,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     Mockito.doAnswer(addTableConfig)
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.tables(namespace), expectedContextHeaders),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.tables(namespace), expectedContextHeaders),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -1296,7 +1284,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     Mockito.doAnswer(addTableConfig)
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedContextHeaders),
+            matches(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedContextHeaders),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -1339,14 +1327,14 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
     // session client credentials flow
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
+            matches(HTTPMethod.POST, oauth2ServerUri, catalogHeaders),
             eq(OAuthTokenResponse.class),
             any(),
             any());
@@ -1354,7 +1342,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // create table request
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.tables(namespace), expectedContextHeaders),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.tables(namespace), expectedContextHeaders),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -1364,7 +1352,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
       // token exchange to get a table token
       Mockito.verify(adapter, times(1))
           .execute(
-              reqMatcher(HTTPMethod.POST, oauth2ServerUri, expectedContextHeaders),
+              matches(HTTPMethod.POST, oauth2ServerUri, expectedContextHeaders),
               eq(OAuthTokenResponse.class),
               any(),
               any());
@@ -1374,7 +1362,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
       // load table from catalog + refresh loaded table
       Mockito.verify(adapter, times(2))
           .execute(
-              reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedTableHeaders),
+              matches(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedTableHeaders),
               eq(LoadTableResponse.class),
               any(),
               any());
@@ -1382,7 +1370,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
       // load table from catalog
       Mockito.verify(adapter)
           .execute(
-              reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedContextHeaders),
+              matches(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedContextHeaders),
               eq(LoadTableResponse.class),
               any(),
               any());
@@ -1390,7 +1378,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
       // refresh loaded table
       Mockito.verify(adapter)
           .execute(
-              reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedTableHeaders),
+              matches(HTTPMethod.GET, RESOURCE_PATHS.table(TBL), expectedTableHeaders),
               eq(LoadTableResponse.class),
               any(),
               any());
@@ -1445,7 +1433,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // call client credentials with no initial auth
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
+                      matches(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
                       eq(OAuthTokenResponse.class),
                       any(),
                       any());
@@ -1453,7 +1441,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // use the client credential token for config
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+                      matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
                       eq(ConfigResponse.class),
                       any(),
                       any());
@@ -1467,7 +1455,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "scope", "catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
+                      matches(
                           HTTPMethod.POST,
                           oauth2ServerUri,
                           catalogHeaders,
@@ -1491,7 +1479,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "Bearer token-exchange-token:sub=client-credentials-token:sub=catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
+                      matches(
                           HTTPMethod.POST,
                           oauth2ServerUri,
                           secondRefreshHeaders,
@@ -1560,7 +1548,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "scope", "catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
+                      matches(
                           HTTPMethod.POST,
                           oauth2ServerUri,
                           emptyHeaders,
@@ -1573,7 +1561,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // use the client credential token for config
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+                      matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
                       eq(ConfigResponse.class),
                       any(),
                       any());
@@ -1587,7 +1575,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "scope", "catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
+                      matches(
                           HTTPMethod.POST,
                           oauth2ServerUri,
                           catalogHeaders,
@@ -1604,8 +1592,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "Bearer token-exchange-token:sub=client-credentials-token:sub=catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
-                          HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), refreshedCatalogHeader),
+                      matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), refreshedCatalogHeader),
                       any(),
                       any(),
                       any());
@@ -1669,7 +1656,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // call client credentials with no initial auth
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
+                      matches(HTTPMethod.POST, oauth2ServerUri, emptyHeaders),
                       eq(OAuthTokenResponse.class),
                       any(),
                       any());
@@ -1677,7 +1664,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // use the client credential token for config
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.GET, "v1/config", catalogHeaders),
+                      matches(HTTPMethod.GET, "v1/config", catalogHeaders),
                       eq(ConfigResponse.class),
                       any(),
                       any());
@@ -1685,7 +1672,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // verify the new token request is issued
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
+                      matches(
                           HTTPMethod.POST, oauth2ServerUri, emptyHeaders, Map.of(), refreshRequest),
                       eq(OAuthTokenResponse.class),
                       any(),
@@ -1752,7 +1739,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             "scope", "catalog");
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.POST, oauth2ServerUri, emptyHeaders, Map.of(), clientCredentialsRequest),
             eq(OAuthTokenResponse.class),
             any(),
@@ -1760,7 +1747,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -1773,7 +1760,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             "scope", "catalog");
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.POST,
                 oauth2ServerUri,
                 OAuth2Util.basicAuthHeaders(credential),
@@ -1792,7 +1779,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             "scope", "catalog");
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.POST,
                 oauth2ServerUri,
                 OAuth2Util.basicAuthHeaders(credential),
@@ -1804,7 +1791,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.HEAD,
                 RESOURCE_PATHS.table(TBL),
                 Map.of("Authorization", "Bearer token-exchange-token:sub=" + token)),
@@ -1853,7 +1840,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.POST, oauth2ServerUri, emptyHeaders, Map.of(), clientCredentialsRequest),
             eq(OAuthTokenResponse.class),
             any(),
@@ -1861,14 +1848,14 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, "v1/config", catalogHeaders),
+            matches(HTTPMethod.GET, "v1/config", catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.POST, oauth2ServerUri, emptyHeaders, Map.of(), clientCredentialsRequest),
             eq(OAuthTokenResponse.class),
             any(),
@@ -1898,14 +1885,14 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), OAuth2Util.authHeaders(token)),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), OAuth2Util.authHeaders(token)),
             any(),
             any(),
             any());
@@ -1991,7 +1978,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "scope", "catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
+                      matches(
                           HTTPMethod.POST,
                           oauth2ServerUri,
                           emptyHeaders,
@@ -2004,7 +1991,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // use the client credential token for config
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+                      matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
                       eq(ConfigResponse.class),
                       any(),
                       any());
@@ -2036,8 +2023,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                       "Bearer token-exchange-token:sub=client-credentials-token:sub=catalog");
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(
-                          HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), refreshedCatalogHeader),
+                      matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TBL), refreshedCatalogHeader),
                       any(),
                       any(),
                       any());
@@ -2104,7 +2090,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
               // use the client credential token for config
               Mockito.verify(adapter)
                   .execute(
-                      reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+                      matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
                       eq(ConfigResponse.class),
                       any(),
                       any());
@@ -2170,7 +2156,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -2222,7 +2208,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
+            matches(HTTPMethod.GET, ResourcePaths.config(), catalogHeaders),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -2394,14 +2380,14 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
             eq(ConfigResponse.class),
             any(),
             any());
 
     Mockito.verify(adapter, times(numberOfItems))
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.namespaces(), Map.of(), Map.of()),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.namespaces(), Map.of(), Map.of()),
             eq(CreateNamespaceResponse.class),
             any(),
             any());
@@ -2456,14 +2442,14 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
             eq(ConfigResponse.class),
             any(),
             any());
 
     Mockito.verify(adapter, times(numberOfItems))
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.tables(namespace), Map.of(), Map.of()),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.tables(namespace), Map.of(), Map.of()),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -2516,7 +2502,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     Table table = catalog.loadTable(TABLE);
     Mockito.doThrow(new NotAuthorizedException("not authorized"))
         .when(adapter)
-        .execute(reqMatcher(HTTPMethod.POST), any(), any(), any());
+        .execute(matches(HTTPMethod.POST), any(), any(), any());
     assertThatThrownBy(() -> catalog.loadTable(TABLE).newFastAppend().appendFile(file).commit())
         .isInstanceOf(NotAuthorizedException.class)
         .hasMessage("not authorized");
@@ -2553,7 +2539,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.doThrow(new ServiceFailureException("some service failure"))
         .when(adapter)
-        .execute(reqMatcher(HTTPMethod.POST), any(), any(), any());
+        .execute(matches(HTTPMethod.POST), any(), any(), any());
     assertThatThrownBy(() -> catalog.loadTable(TABLE).newFastAppend().appendFile(FILE_A).commit())
         .isInstanceOf(ServiceFailureException.class)
         .hasMessage("some service failure");
@@ -2587,7 +2573,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     TableIdentifier newTable = TableIdentifier.of(TABLE.namespace(), "some_table");
     Mockito.doThrow(new NotAuthorizedException("not authorized"))
         .when(adapter)
-        .execute(reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(newTable)), any(), any(), any());
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.table(newTable)), any(), any(), any());
 
     Transaction createTableTransaction = catalog.newCreateTableTransaction(newTable, SCHEMA);
     createTableTransaction.newAppend().appendFile(FILE_A).commit();
@@ -2634,7 +2620,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     TableIdentifier newTable = TableIdentifier.of(TABLE.namespace(), "some_table");
     Mockito.doThrow(new ServiceFailureException("some service failure"))
         .when(adapter)
-        .execute(reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(newTable)), any(), any(), any());
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.table(newTable)), any(), any(), any());
 
     Transaction createTableTransaction = catalog.newCreateTableTransaction(newTable, SCHEMA);
     createTableTransaction.newAppend().appendFile(FILE_A).commit();
@@ -2664,6 +2650,77 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
   }
 
   @Test
+  public void testNoCleanupOnCreate503() {
+    RESTCatalogAdapter adapter =
+        Mockito.spy(
+            new RESTCatalogAdapter(backendCatalog) {
+              @Override
+              protected <T extends RESTResponse> T execute(
+                  HTTPRequest request,
+                  Class<T> responseType,
+                  Consumer<ErrorResponse> errorHandler,
+                  Consumer<Map<String, String>> responseHeaders) {
+                var response = super.execute(request, responseType, errorHandler, responseHeaders);
+                if (request.method() == HTTPMethod.POST && request.path().contains(TABLE.name())) {
+                  // Simulate a 503 Service Unavailable error
+                  ErrorResponse error =
+                      ErrorResponse.builder()
+                          .responseCode(503)
+                          .withMessage("Service unavailable")
+                          .build();
+
+                  errorHandler.accept(error);
+                  throw new IllegalStateException("Error handler should have thrown");
+                }
+                return response;
+              }
+            });
+
+    RESTCatalog catalog = catalog(adapter);
+
+    if (requiresNamespaceCreate()) {
+      catalog.createNamespace(TABLE.namespace());
+    }
+
+    Transaction createTableTransaction = catalog.newCreateTableTransaction(TABLE, SCHEMA);
+    createTableTransaction.newAppend().appendFile(FILE_A).commit();
+
+    // Verify that 503 is mapped to CommitStateUnknownException (not just ServiceFailureException)
+    assertThatThrownBy(createTableTransaction::commitTransaction)
+        .isInstanceOf(CommitStateUnknownException.class)
+        .cause()
+        .isInstanceOf(ServiceFailureException.class)
+        .hasMessageContaining("Service failed: 503");
+
+    // Verify files are NOT cleaned up (because commit state is unknown)
+    assertThat(allRequests(adapter))
+        .anySatisfy(
+            req -> {
+              assertThat(req.method()).isEqualTo(HTTPMethod.POST);
+              assertThat(req.path()).isEqualTo(RESOURCE_PATHS.table(TABLE));
+              assertThat(req.body()).isInstanceOf(UpdateTableRequest.class);
+              UpdateTableRequest body = (UpdateTableRequest) req.body();
+              assertThat(
+                      body.updates().stream()
+                          .filter(MetadataUpdate.AddSnapshot.class::isInstance)
+                          .map(MetadataUpdate.AddSnapshot.class::cast)
+                          .findFirst())
+                  .hasValueSatisfying(
+                      addSnapshot -> {
+                        String manifestListLocation = addSnapshot.snapshot().manifestListLocation();
+                        // Files should still exist because we don't know if commit succeeded
+                        assertThat(
+                                catalog
+                                    .loadTable(TABLE)
+                                    .io()
+                                    .newInputFile(manifestListLocation)
+                                    .exists())
+                            .isTrue();
+                      });
+            });
+  }
+
+  @Test
   public void testCleanupCleanableExceptionsReplace() {
     RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
     RESTCatalog catalog = catalog(adapter);
@@ -2675,7 +2732,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     catalog.createTable(TABLE, SCHEMA);
     Mockito.doThrow(new NotAuthorizedException("not authorized"))
         .when(adapter)
-        .execute(reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
 
     Transaction replaceTableTransaction = catalog.newReplaceTableTransaction(TABLE, SCHEMA, false);
     replaceTableTransaction.newAppend().appendFile(FILE_A).commit();
@@ -2718,7 +2775,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     catalog.createTable(TABLE, SCHEMA);
     Mockito.doThrow(new ServiceFailureException("some service failure"))
         .when(adapter)
-        .execute(reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
 
     Transaction replaceTableTransaction = catalog.newReplaceTableTransaction(TABLE, SCHEMA, false);
     replaceTableTransaction.newAppend().appendFile(FILE_A).commit();
@@ -2759,13 +2816,13 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
             eq(ConfigResponse.class),
             any(),
             any());
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.namespace(namespace), Map.of(), Map.of()),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.namespace(namespace), Map.of(), Map.of()),
             any(),
             any(),
             any());
@@ -2808,7 +2865,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -2816,7 +2873,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // verifies that the namespace is loaded via a GET instead of HEAD (V1_NAMESPACE_EXISTS)
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.namespace(namespace), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, RESOURCE_PATHS.namespace(namespace), Map.of(), Map.of()),
             any(),
             any(),
             any());
@@ -2840,13 +2897,13 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
             eq(ConfigResponse.class),
             any(),
             any());
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.HEAD, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of()),
+            matches(HTTPMethod.HEAD, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of()),
             any(),
             any(),
             any());
@@ -2886,7 +2943,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
 
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
+            matches(HTTPMethod.GET, ResourcePaths.config(), Map.of(), Map.of()),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -2894,7 +2951,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // verifies that the table is loaded via a GET instead of HEAD (V1_LOAD_TABLE)
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.GET, RESOURCE_PATHS.table(TABLE), Map.of(), Map.of("snapshots", "all")),
             any(),
             any(),
@@ -2906,179 +2963,6 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // simulate a legacy server that doesn't send back supported endpoints, thus the
     // client relies on the default endpoints
     verifyTableExistsFallbackToGETRequest(ConfigResponse.builder().build());
-  }
-
-  @Test
-  public void testETagWithCreateAndLoadTable() {
-    Map<String, String> respHeaders = Maps.newHashMap();
-
-    RESTCatalog catalog = catalogWithResponseHeaders(respHeaders);
-
-    if (requiresNamespaceCreate()) {
-      catalog.createNamespace(TABLE.namespace());
-    }
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    String eTag = respHeaders.get(HttpHeaders.ETAG);
-    respHeaders.clear();
-
-    catalog.loadTable(TABLE);
-
-    assertThat(respHeaders).containsEntry(HttpHeaders.ETAG, eTag);
-  }
-
-  @Test
-  public void testETagWithDifferentTables() {
-    Map<String, String> respHeaders = Maps.newHashMap();
-
-    RESTCatalog catalog = catalogWithResponseHeaders(respHeaders);
-
-    if (requiresNamespaceCreate()) {
-      catalog.createNamespace(TABLE.namespace());
-    }
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    String eTagTbl1 = respHeaders.get(HttpHeaders.ETAG);
-    respHeaders.clear();
-
-    catalog.createTable(TableIdentifier.of(TABLE.namespace(), "table2"), SCHEMA);
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    assertThat(eTagTbl1).isNotEqualTo(respHeaders.get(HttpHeaders.ETAG));
-  }
-
-  @Test
-  public void testETagAfterDataUpdate() {
-    Map<String, String> respHeaders = Maps.newHashMap();
-
-    RESTCatalog catalog = catalogWithResponseHeaders(respHeaders);
-
-    if (requiresNamespaceCreate()) {
-      catalog.createNamespace(TABLE.namespace());
-    }
-
-    Table tbl = catalog.createTable(TABLE, SCHEMA);
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    String eTag = respHeaders.get(HttpHeaders.ETAG);
-
-    respHeaders.clear();
-
-    tbl.newAppend().appendFile(FILE_A).commit();
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    assertThat(eTag).isNotEqualTo(respHeaders.get(HttpHeaders.ETAG));
-  }
-
-  @Test
-  public void testETagAfterMetadataOnlyUpdate() {
-    Map<String, String> respHeaders = Maps.newHashMap();
-
-    RESTCatalog catalog = catalogWithResponseHeaders(respHeaders);
-
-    if (requiresNamespaceCreate()) {
-      catalog.createNamespace(TABLE.namespace());
-    }
-
-    Table tbl = catalog.createTable(TABLE, SCHEMA);
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    String eTag = respHeaders.get(HttpHeaders.ETAG);
-
-    respHeaders.clear();
-
-    tbl.updateSchema().addColumn("extra", Types.IntegerType.get()).commit();
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    assertThat(eTag).isNotEqualTo(respHeaders.get(HttpHeaders.ETAG));
-  }
-
-  @Test
-  public void testETagWithRegisterTable() {
-    Map<String, String> respHeaders = Maps.newHashMap();
-
-    RESTCatalog catalog = catalogWithResponseHeaders(respHeaders);
-
-    if (requiresNamespaceCreate()) {
-      catalog.createNamespace(TABLE.namespace());
-    }
-
-    Table tbl = catalog.createTable(TABLE, SCHEMA);
-
-    assertThat(respHeaders).containsKey(HttpHeaders.ETAG);
-    String eTag = respHeaders.get(HttpHeaders.ETAG);
-
-    respHeaders.clear();
-
-    catalog.registerTable(
-        TableIdentifier.of(TABLE.namespace(), "other_table"),
-        ((BaseTable) tbl).operations().current().metadataFileLocation());
-
-    assertThat(respHeaders).containsEntry(HttpHeaders.ETAG, eTag);
-  }
-
-  @Test
-  public void testNotModified() {
-    catalog().createNamespace(TABLE.namespace());
-
-    catalog().createTable(TABLE, SCHEMA);
-
-    Table table = catalog().loadTable(TABLE);
-
-    String eTag =
-        ETagProvider.of(((BaseTable) table).operations().current().metadataFileLocation());
-
-    Mockito.doAnswer(
-            invocation -> {
-              HTTPRequest originalRequest = invocation.getArgument(0);
-
-              assertThat(originalRequest.headers().contains(HttpHeaders.IF_NONE_MATCH));
-              assertThat(
-                      originalRequest.headers().firstEntry(HttpHeaders.IF_NONE_MATCH).get().value())
-                  .isEqualTo(eTag);
-
-              assertThat(
-                      adapterForRESTServer.execute(
-                          originalRequest,
-                          LoadTableResponse.class,
-                          invocation.getArgument(2),
-                          invocation.getArgument(3),
-                          ParserContext.builder().build()))
-                  .isNull();
-
-              return null;
-            })
-        .when(adapterForRESTServer)
-        .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TABLE)),
-            eq(LoadTableResponse.class),
-            any(),
-            any());
-
-    catalog().loadTable(TABLE);
-
-    TableIdentifier metadataTableIdentifier =
-        TableIdentifier.of(NS.toString(), TABLE.name(), "partitions");
-
-    catalog().loadTable(metadataTableIdentifier);
-
-    Mockito.verify(adapterForRESTServer, times(3))
-        .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TABLE)),
-            eq(LoadTableResponse.class),
-            any(),
-            any());
-
-    verify(adapterForRESTServer)
-        .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(metadataTableIdentifier)),
-            any(),
-            any(),
-            any());
   }
 
   @Test
@@ -3106,7 +2990,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     Mockito.doAnswer(updateTable)
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -3121,22 +3005,6 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     assertThatThrownBy(() -> catalog.loadTable(TABLE).newFastAppend().appendFile(file).commit())
         .isInstanceOf(IllegalStateException.class)
         .hasMessageMatching("Table UUID does not match: current=.* != refreshed=" + newUUID);
-  }
-
-  private RESTCatalog catalogWithResponseHeaders(Map<String, String> respHeaders) {
-    RESTCatalogAdapter adapter =
-        new RESTCatalogAdapter(backendCatalog) {
-          @Override
-          public <T extends RESTResponse> T execute(
-              HTTPRequest request,
-              Class<T> responseType,
-              Consumer<ErrorResponse> errorHandler,
-              Consumer<Map<String, String>> responseHeaders) {
-            return super.execute(request, responseType, errorHandler, respHeaders::putAll);
-          }
-        };
-
-    return catalog(adapter);
   }
 
   @Test
@@ -3165,7 +3033,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             })
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -3221,7 +3089,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             new CommitStateUnknownException(new ServiceFailureException("Service failed: 503")))
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)),
+            matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -3366,7 +3234,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
       // Verify the custom operations were used with custom headers
       Mockito.verify(adapter, Mockito.atLeastOnce())
           .execute(
-              reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE), customHeaders),
+              matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE), customHeaders),
               eq(LoadTableResponse.class),
               any(),
               any());
@@ -3390,7 +3258,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
       // Verify the custom operations were used with custom headers
       Mockito.verify(adapter, Mockito.atLeastOnce())
           .execute(
-              reqMatcher(HTTPMethod.POST, RESOURCE_PATHS.table(table2), customHeaders),
+              matches(HTTPMethod.POST, RESOURCE_PATHS.table(table2), customHeaders),
               eq(LoadTableResponse.class),
               any(),
               any());
@@ -3654,7 +3522,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             })
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config()),
+            matches(HTTPMethod.GET, ResourcePaths.config()),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -3686,7 +3554,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             })
         .when(adapter)
         .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config()),
+            matches(HTTPMethod.GET, ResourcePaths.config()),
             eq(ConfigResponse.class),
             any(),
             any());
@@ -3715,7 +3583,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // Verify the namespace separator in the path
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(HTTPMethod.POST, expectedPaths.tables(nestedNamespace)),
+            matches(HTTPMethod.POST, expectedPaths.tables(nestedNamespace)),
             eq(LoadTableResponse.class),
             any(),
             any());
@@ -3723,7 +3591,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     // Verify the namespace separator in query parameters
     Mockito.verify(adapter)
         .execute(
-            reqMatcher(
+            matches(
                 HTTPMethod.GET,
                 expectedPaths.namespaces(),
                 Map.of(),
@@ -3731,8 +3599,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
                     "parent",
                     RESTUtil.namespaceToQueryParam(parentNamespace, expectedSeparator),
                     "pageToken",
-                    ""),
-                null),
+                    "")),
             eq(ListNamespacesResponse.class),
             any(),
             any());
@@ -3830,7 +3697,7 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
   private void verifyCreatePost(Namespace ns, Map<String, String> headers) {
     verify(adapterForRESTServer, atLeastOnce())
         .execute(
-            reqMatcherContainsHeaders(
+            containsHeaders(
                 HTTPMethod.POST,
                 ResourcePaths.forCatalogProperties(ImmutableMap.of()).tables(ns),
                 headers),
@@ -3861,493 +3728,94 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
   }
 
   @Test
-  public void testInvalidTableCacheParameters() {
-    RESTCatalog catalog = new RESTCatalog(config -> new RESTCatalogAdapter(backendCatalog));
-
-    assertThatThrownBy(
-            () ->
-                catalog.initialize(
-                    "test", Map.of(RESTCatalogProperties.TABLE_CACHE_EXPIRE_AFTER_WRITE_MS, "0")))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Invalid expire after write: zero or negative");
-
-    assertThatThrownBy(
-            () ->
-                catalog.initialize(
-                    "test", Map.of(RESTCatalogProperties.TABLE_CACHE_EXPIRE_AFTER_WRITE_MS, "-1")))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Invalid expire after write: zero or negative");
-
-    assertThatThrownBy(
-            () ->
-                catalog.initialize(
-                    "test", Map.of(RESTCatalogProperties.TABLE_CACHE_MAX_ENTRIES, "-1")))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Invalid max entries: negative");
-  }
-
-  @Test
-  public void testFreshnessAwareLoading() {
-    catalog().createNamespace(TABLE.namespace());
-
-    catalog().createTable(TABLE, SCHEMA);
-
-    Cache<SessionIdTableId, TableWithETag> tableCache =
-        restCatalog.sessionCatalog().tableCache().cache();
-    assertThat(tableCache.estimatedSize()).isZero();
-
-    expectFullTableLoadForLoadTable(TABLE, adapterForRESTServer);
-
-    BaseTable tableAfterFirstLoad = (BaseTable) catalog().loadTable(TABLE);
-
-    assertThat(tableCache.stats().hitCount()).isZero();
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-    expectNotModifiedResponseForLoadTable(TABLE, adapterForRESTServer);
-
-    BaseTable tableAfterSecondLoad = (BaseTable) catalog().loadTable(TABLE);
-
-    assertThat(tableAfterFirstLoad).isNotEqualTo(tableAfterSecondLoad);
-    assertThat(tableAfterFirstLoad.operations().current().location())
-        .isEqualTo(tableAfterSecondLoad.operations().current().location());
-    assertThat(
-            tableCache
-                .asMap()
-                .get(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE))
-                .supplier()
-                .get()
-                .operations()
-                .current()
-                .metadataFileLocation())
-        .isEqualTo(tableAfterFirstLoad.operations().current().metadataFileLocation());
-
-    Mockito.verify(adapterForRESTServer, times(2))
-        .execute(reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
-  }
-
-  @Test
-  public void testFreshnessAwareLoadingMetadataTables() {
-    catalog().createNamespace(TABLE.namespace());
-
-    catalog().createTable(TABLE, SCHEMA);
-
-    Cache<SessionIdTableId, TableWithETag> tableCache =
-        restCatalog.sessionCatalog().tableCache().cache();
-    assertThat(tableCache.estimatedSize()).isZero();
-
-    BaseTable table = (BaseTable) catalog().loadTable(TABLE);
-
-    assertThat(tableCache.stats().hitCount()).isZero();
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-    TableIdentifier metadataTableIdentifier =
-        TableIdentifier.of(TABLE.namespace().toString(), TABLE.name(), "partitions");
-
-    BaseMetadataTable metadataTable =
-        (BaseMetadataTable) catalog().loadTable(metadataTableIdentifier);
-
-    assertThat(tableCache.stats().hitCount()).isEqualTo(1);
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-    assertThat(table).isNotEqualTo(metadataTable.table());
-    assertThat(table.operations().current().metadataFileLocation())
-        .isEqualTo(metadataTable.table().operations().current().metadataFileLocation());
-
-    ResourcePaths paths =
-        ResourcePaths.forCatalogProperties(
-            ImmutableMap.of(RESTCatalogProperties.NAMESPACE_SEPARATOR, "%2E"));
-
-    Mockito.verify(adapterForRESTServer, times(2))
-        .execute(reqMatcher(HTTPMethod.GET, paths.table(TABLE)), any(), any(), any());
-
-    Mockito.verify(adapterForRESTServer)
-        .execute(
-            reqMatcher(HTTPMethod.GET, paths.table(metadataTableIdentifier)), any(), any(), any());
-  }
-
-  @Test
-  public void testRenameTableInvalidatesTable() {
-    runTableInvalidationTest(
-        restCatalog,
-        adapterForRESTServer,
-        (catalog) ->
-            catalog.renameTable(TABLE, TableIdentifier.of(TABLE.namespace(), "other_table")),
-        0);
-  }
-
-  @ParameterizedTest
-  @ValueSource(booleans = {true, false})
-  public void testDropTableInvalidatesTable(boolean purge) {
-    runTableInvalidationTest(
-        restCatalog, adapterForRESTServer, (catalog) -> catalog.dropTable(TABLE, purge), 0);
-  }
-
-  @Test
-  public void testTableExistViaHeadRequestInvalidatesTable() {
-    runTableInvalidationTest(
-        restCatalog,
-        adapterForRESTServer,
-        ((catalog) -> {
-          // Use a different catalog to drop the table
-          catalog(new RESTCatalogAdapter(backendCatalog)).dropTable(TABLE, true);
-
-          // The main catalog still has the table in cache
-          assertThat(catalog.sessionCatalog().tableCache().cache().asMap())
-              .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-          catalog.tableExists(TABLE);
-        }),
-        0);
-  }
-
-  @Test
-  public void testTableExistViaGetRequestInvalidatesTable() {
+  public void testNumLoadTableCallsForMergeAppend() {
     RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
+    RESTCatalog catalog = catalog(adapter);
 
-    // Configure REST server to answer tableExists query via GET
+    catalog.createNamespace(TABLE.namespace());
+    BaseTable table = (BaseTable) catalog.createTable(TABLE, SCHEMA);
+    table.newAppend().appendFile(FILE_A).commit();
+
+    // loadTable is executed once
+    Mockito.verify(adapter)
+        .execute(matches(HTTPMethod.GET, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
+
+    // CommitReport reflects the table state after the commit
+    Mockito.verify(adapter)
+        .execute(
+            matches(
+                HTTPMethod.POST,
+                RESOURCE_PATHS.metrics(TABLE),
+                Map.of(),
+                Map.of(),
+                requestObj ->
+                    requestObj instanceof ReportMetricsRequest reportRequest
+                        && reportRequest.report() instanceof CommitReport commitReport
+                        && commitReport.tableName().equals(table.name())
+                        && commitReport.snapshotId() == table.currentSnapshot().snapshotId()
+                        && commitReport.sequenceNumber() == table.currentSnapshot().sequenceNumber()
+                        && commitReport.operation().equals("append")
+                        && commitReport.commitMetrics().addedDataFiles().value() == 1),
+            any(),
+            any(),
+            any());
+  }
+
+  @Test
+  public void testSequenceNumberConflictThrowsCommitFailed() {
+    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
+    RESTCatalog catalog = catalog(adapter);
+
+    catalog.createNamespace(TABLE.namespace());
+    catalog.buildTable(TABLE, SCHEMA).withPartitionSpec(SPEC).create();
+
+    DataFile fileOnMain =
+        DataFiles.builder(SPEC)
+            .withPath("/path/commit-test-file1.parquet")
+            .withFileSizeInBytes(10)
+            .withPartitionPath("id_bucket=0")
+            .withRecordCount(1)
+            .build();
+
+    catalog.loadTable(TABLE).newFastAppend().appendFile(fileOnMain).commit();
+
+    DataFile fileOnAnotherBranch =
+        DataFiles.builder(SPEC)
+            .withPath("/path/commit-test-conflicting.parquet")
+            .withFileSizeInBytes(10)
+            .withPartitionPath("id_bucket=0")
+            .withRecordCount(1)
+            .build();
+
+    // Before the next commit is processed by the server, advance the server's lastSequenceNumber
+    // by committing to a different branch. This simulates a concurrent request to a different
+    // branch
+    // that "beats" the commit to main.
     Mockito.doAnswer(
-            invocation ->
-                ConfigResponse.builder()
-                    .withEndpoints(
-                        ImmutableList.of(
-                            Endpoint.V1_LOAD_TABLE,
-                            Endpoint.V1_CREATE_NAMESPACE,
-                            Endpoint.V1_CREATE_TABLE))
-                    .build())
+            invocation -> {
+              backendCatalog
+                  .loadTable(TABLE)
+                  .newFastAppend()
+                  .appendFile(fileOnAnotherBranch)
+                  .toBranch("other")
+                  .commit();
+              return invocation.callRealMethod();
+            })
         .when(adapter)
-        .execute(
-            reqMatcher(HTTPMethod.GET, ResourcePaths.config()),
-            eq(ConfigResponse.class),
-            any(),
-            any());
-
-    RESTCatalog catalog = new RESTCatalog(DEFAULT_SESSION_CONTEXT, config -> adapter);
-    catalog.initialize(
-        "catalog",
-        ImmutableMap.of(
-            CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.inmemory.InMemoryFileIO"));
-
-    runTableInvalidationTest(
-        catalog,
-        adapter,
-        (cat) -> {
-          // Use a different catalog to drop the table
-          catalog(new RESTCatalogAdapter(backendCatalog)).dropTable(TABLE, true);
-
-          // The main catalog still has the table in cache
-          assertThat(cat.sessionCatalog().tableCache().cache().asMap())
-              .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-          cat.tableExists(TABLE);
-        },
-        1);
-  }
-
-  @Test
-  public void testLoadTableInvalidatesCache() {
-    runTableInvalidationTest(
-        restCatalog,
-        adapterForRESTServer,
-        (catalog) -> {
-          // Use a different catalog to drop the table
-          catalog(new RESTCatalogAdapter(backendCatalog)).dropTable(TABLE, true);
-
-          // The main catalog still has the table in cache
-          assertThat(catalog.sessionCatalog().tableCache().cache().asMap())
-              .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-          assertThatThrownBy(() -> catalog.loadTable(TABLE))
-              .isInstanceOf(NoSuchTableException.class)
-              .hasMessage("Table does not exist: %s", TABLE);
-        },
-        1);
-  }
-
-  @Test
-  public void testLoadTableWithMetadataTableNameInvalidatesCache() {
-    TableIdentifier metadataTableIdentifier =
-        TableIdentifier.of(TABLE.namespace().toString(), TABLE.name(), "partitions");
-
-    runTableInvalidationTest(
-        restCatalog,
-        adapterForRESTServer,
-        (catalog) -> {
-          // Use a different catalog to drop the table
-          catalog(new RESTCatalogAdapter(backendCatalog)).dropTable(TABLE, true);
-
-          // The main catalog still has the table in cache
-          assertThat(catalog.sessionCatalog().tableCache().cache().asMap())
-              .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-          assertThatThrownBy(() -> catalog.loadTable(metadataTableIdentifier))
-              .isInstanceOf(NoSuchTableException.class)
-              .hasMessage("Table does not exist: %s", TABLE);
-        },
-        1);
-
-    ResourcePaths paths =
-        ResourcePaths.forCatalogProperties(
-            ImmutableMap.of(RESTCatalogProperties.NAMESPACE_SEPARATOR, "%2E"));
-
-    Mockito.verify(adapterForRESTServer)
-        .execute(
-            reqMatcher(HTTPMethod.GET, paths.table(metadataTableIdentifier)), any(), any(), any());
-  }
-
-  private void runTableInvalidationTest(
-      RESTCatalog catalog,
-      RESTCatalogAdapter adapterToVerify,
-      Consumer<RESTCatalog> action,
-      int loadTableCountFromAction) {
-    catalog.createNamespace(TABLE.namespace());
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    BaseTable originalTable = (BaseTable) catalog.loadTable(TABLE);
-
-    Cache<SessionIdTableId, TableWithETag> tableCache =
-        catalog.sessionCatalog().tableCache().cache();
-    assertThat(tableCache.stats().hitCount()).isZero();
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-    action.accept(catalog);
-
-    // Check that 'action' invalidates cache
-    assertThat(tableCache.estimatedSize()).isZero();
-
-    assertThatThrownBy(() -> catalog.loadTable(TABLE))
-        .isInstanceOf(NoSuchTableException.class)
-        .hasMessageContaining("Table does not exist: %s", TABLE);
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    expectFullTableLoadForLoadTable(TABLE, adapterToVerify);
-
-    BaseTable newTableWithSameName = (BaseTable) catalog.loadTable(TABLE);
-
-    assertThat(tableCache.stats().hitCount()).isEqualTo(loadTableCountFromAction);
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-    assertThat(newTableWithSameName).isNotEqualTo(originalTable);
-    assertThat(newTableWithSameName.operations().current().metadataFileLocation())
-        .isNotEqualTo(originalTable.operations().current().metadataFileLocation());
-
-    Mockito.verify(adapterToVerify, times(3 + loadTableCountFromAction))
-        .execute(reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
-  }
-
-  @Test
-  public void testTableCacheWithMultiSessions() {
-    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
-
-    RESTSessionCatalog sessionCatalog = new RESTSessionCatalog(config -> adapter, null);
-    sessionCatalog.initialize("test_session_catalog", Map.of());
-
-    SessionCatalog.SessionContext otherSessionContext =
-        new SessionCatalog.SessionContext(
-            "session_id_2", "user", ImmutableMap.of("credential", "user:12345"), ImmutableMap.of());
-
-    sessionCatalog.createNamespace(DEFAULT_SESSION_CONTEXT, TABLE.namespace());
-
-    sessionCatalog.buildTable(DEFAULT_SESSION_CONTEXT, TABLE, SCHEMA).create();
-
-    expectFullTableLoadForLoadTable(TABLE, adapter);
-
-    sessionCatalog.loadTable(DEFAULT_SESSION_CONTEXT, TABLE);
-
-    Cache<SessionIdTableId, TableWithETag> tableCache = sessionCatalog.tableCache().cache();
-    assertThat(tableCache.stats().hitCount()).isZero();
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE));
-
-    expectFullTableLoadForLoadTable(TABLE, adapter);
-
-    sessionCatalog.loadTable(otherSessionContext, TABLE);
-
-    assertThat(tableCache.asMap())
-        .containsOnlyKeys(
-            SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE),
-            SessionIdTableId.of(otherSessionContext.sessionId(), TABLE));
-  }
-
-  @Test
-  public void test304NotModifiedResponseWithEmptyTableCache() {
-    Mockito.doAnswer(invocation -> null)
-        .when(adapterForRESTServer)
-        .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(TABLE)),
-            eq(LoadTableResponse.class),
-            any(),
-            any());
-
-    catalog().createNamespace(TABLE.namespace());
-
-    catalog().createTable(TABLE, SCHEMA);
-
-    catalog().invalidateTable(TABLE);
-
-    // Table is not in the cache and null LoadTableResponse is received
-    assertThatThrownBy(() -> catalog().loadTable(TABLE))
-        .isInstanceOf(RESTException.class)
-        .hasMessage(
-            "Invalid (NOT_MODIFIED) response for request: method=%s, path=%s",
-            HTTPMethod.GET, RESOURCE_PATHS.table(TABLE));
-  }
-
-  @Test
-  public void testTableCacheNotUpdatedWithoutETag() {
-    RESTCatalogAdapter adapter =
-        Mockito.spy(
-            new RESTCatalogAdapter(backendCatalog) {
-              @Override
-              public <T extends RESTResponse> T execute(
-                  HTTPRequest request,
-                  Class<T> responseType,
-                  Consumer<ErrorResponse> errorHandler,
-                  Consumer<Map<String, String>> responseHeaders) {
-                // Wrap the original responseHeaders to not accept ETag.
-                Consumer<Map<String, String>> noETagConsumer =
-                    headers -> {
-                      if (!headers.containsKey(HttpHeaders.ETAG)) {
-                        responseHeaders.accept(headers);
-                      }
-                    };
-                return super.execute(request, responseType, errorHandler, noETagConsumer);
-              }
-            });
-
-    RESTCatalog catalog = new RESTCatalog(DEFAULT_SESSION_CONTEXT, config -> adapter);
-    catalog.initialize(
-        "catalog",
-        ImmutableMap.of(
-            CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.inmemory.InMemoryFileIO"));
-
-    catalog.createNamespace(TABLE.namespace());
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    catalog.loadTable(TABLE);
-
-    assertThat(catalog.sessionCatalog().tableCache().cache().estimatedSize()).isZero();
-  }
-
-  @Test
-  public void testTableCacheIsDisabled() {
-    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
-
-    RESTCatalog catalog = new RESTCatalog(DEFAULT_SESSION_CONTEXT, config -> adapter);
-    catalog.initialize(
-        "catalog",
-        ImmutableMap.of(
-            CatalogProperties.FILE_IO_IMPL,
-            "org.apache.iceberg.inmemory.InMemoryFileIO",
-            RESTCatalogProperties.TABLE_CACHE_MAX_ENTRIES,
-            "0"));
-
-    catalog.createNamespace(TABLE.namespace());
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    assertThat(catalog.sessionCatalog().tableCache().cache().estimatedSize()).isZero();
-
-    expectFullTableLoadForLoadTable(TABLE, adapter);
-
-    catalog.loadTable(TABLE);
-
-    catalog.sessionCatalog().tableCache().cache().cleanUp();
-
-    assertThat(catalog.sessionCatalog().tableCache().cache().estimatedSize()).isZero();
-  }
-
-  @Test
-  public void testFullTableLoadAfterExpiryFromCache() {
-    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
-
-    FakeTicker ticker = new FakeTicker();
-
-    TestableRESTCatalog catalog =
-        new TestableRESTCatalog(DEFAULT_SESSION_CONTEXT, config -> adapter, ticker);
-    catalog.initialize("catalog", Map.of());
-
-    catalog.createNamespace(TABLE.namespace());
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    catalog.loadTable(TABLE);
-
-    Cache<SessionIdTableId, TableWithETag> tableCache =
-        catalog.sessionCatalog().tableCache().cache();
-    SessionIdTableId tableCacheKey =
-        SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE);
-
-    assertThat(tableCache.asMap()).containsOnlyKeys(tableCacheKey);
-    assertThat(tableCache.policy().expireAfterWrite().get().ageOf(tableCacheKey))
-        .isPresent()
-        .get()
-        .isEqualTo(Duration.ZERO);
-
-    ticker.advance(HALF_OF_TABLE_EXPIRATION);
-
-    assertThat(tableCache.asMap()).containsOnlyKeys(tableCacheKey);
-    assertThat(tableCache.policy().expireAfterWrite().get().ageOf(tableCacheKey))
-        .isPresent()
-        .get()
-        .isEqualTo(HALF_OF_TABLE_EXPIRATION);
-
-    ticker.advance(HALF_OF_TABLE_EXPIRATION.plus(Duration.ofSeconds(10)));
-
-    assertThat(tableCache.asMap()).doesNotContainKey(tableCacheKey);
-
-    expectFullTableLoadForLoadTable(TABLE, adapter);
-
-    catalog.loadTable(TABLE);
-
-    assertThat(tableCache.stats().hitCount()).isEqualTo(0);
-    assertThat(tableCache.asMap()).containsOnlyKeys(tableCacheKey);
-    assertThat(tableCache.policy().expireAfterWrite().get().ageOf(tableCacheKey))
-        .isPresent()
-        .get()
-        .isEqualTo(Duration.ZERO);
-  }
-
-  @Test
-  public void testTableCacheAgeDoesNotRefreshesAfterAccess() {
-    FakeTicker ticker = new FakeTicker();
-
-    TestableRESTCatalog catalog =
-        new TestableRESTCatalog(
-            DEFAULT_SESSION_CONTEXT, config -> new RESTCatalogAdapter(backendCatalog), ticker);
-    catalog.initialize("catalog", Map.of());
-
-    catalog.createNamespace(TABLE.namespace());
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    catalog.loadTable(TABLE);
-
-    ticker.advance(HALF_OF_TABLE_EXPIRATION);
-
-    Cache<SessionIdTableId, TableWithETag> tableCache =
-        catalog.sessionCatalog().tableCache().cache();
-    SessionIdTableId tableCacheKey =
-        SessionIdTableId.of(DEFAULT_SESSION_CONTEXT.sessionId(), TABLE);
-
-    assertThat(tableCache.policy().expireAfterWrite().get().ageOf(tableCacheKey))
-        .isPresent()
-        .get()
-        .isEqualTo(HALF_OF_TABLE_EXPIRATION);
-
-    catalog.loadTable(TABLE);
-
-    assertThat(tableCache.policy().expireAfterWrite().get().ageOf(tableCacheKey))
-        .isPresent()
-        .get()
-        .isEqualTo(HALF_OF_TABLE_EXPIRATION);
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.table(TABLE)), any(), any(), any());
+
+    DataFile anotherFileOnMain =
+        DataFiles.builder(SPEC)
+            .withPath("/path/commit-test-file2.parquet")
+            .withFileSizeInBytes(10)
+            .withPartitionPath("id_bucket=0")
+            .withRecordCount(1)
+            .build();
+
+    assertThatThrownBy(
+            () -> catalog.loadTable(TABLE).newFastAppend().appendFile(anotherFileOnMain).commit())
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessageContaining("Validation failed, please retry");
   }
 
   private RESTCatalog catalog(RESTCatalogAdapter adapter) {
@@ -4377,95 +3845,6 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
         ImmutableMap.of(
             CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.inmemory.InMemoryFileIO"));
     return catalog;
-  }
-
-  private void expectFullTableLoadForLoadTable(TableIdentifier ident, RESTCatalogAdapter adapter) {
-    Answer<LoadTableResponse> invocationAssertsFullLoad =
-        invocation -> {
-          LoadTableResponse response = (LoadTableResponse) invocation.callRealMethod();
-
-          assertThat(response).isNotEqualTo(null);
-
-          return response;
-        };
-
-    Mockito.doAnswer(invocationAssertsFullLoad)
-        .when(adapter)
-        .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(ident)),
-            eq(LoadTableResponse.class),
-            any(),
-            any());
-  }
-
-  private void expectNotModifiedResponseForLoadTable(
-      TableIdentifier ident, RESTCatalogAdapter adapter) {
-    Answer<LoadTableResponse> invocationAssertsFullLoad =
-        invocation -> {
-          LoadTableResponse response = (LoadTableResponse) invocation.callRealMethod();
-
-          assertThat(response).isEqualTo(null);
-
-          return response;
-        };
-
-    Mockito.doAnswer(invocationAssertsFullLoad)
-        .when(adapter)
-        .execute(
-            reqMatcher(HTTPMethod.GET, RESOURCE_PATHS.table(ident)),
-            eq(LoadTableResponse.class),
-            any(),
-            any());
-  }
-
-  static HTTPRequest reqMatcher(HTTPMethod method) {
-    return argThat(req -> req.method() == method);
-  }
-
-  static HTTPRequest reqMatcher(HTTPMethod method, String path) {
-    return argThat(req -> req.method() == method && req.path().equals(path));
-  }
-
-  static HTTPRequest reqMatcher(HTTPMethod method, String path, Map<String, String> headers) {
-    return argThat(
-        req ->
-            req.method() == method
-                && req.path().equals(path)
-                && req.headers().equals(HTTPHeaders.of(headers)));
-  }
-
-  static HTTPRequest reqMatcher(
-      HTTPMethod method, String path, Map<String, String> headers, Map<String, String> parameters) {
-    return argThat(
-        req ->
-            req.method() == method
-                && req.path().equals(path)
-                && req.headers().equals(HTTPHeaders.of(headers))
-                && req.queryParameters().equals(parameters));
-  }
-
-  static HTTPRequest reqMatcher(
-      HTTPMethod method,
-      String path,
-      Map<String, String> headers,
-      Map<String, String> parameters,
-      Object body) {
-    return argThat(
-        req ->
-            req.method() == method
-                && req.path().equals(path)
-                && req.headers().equals(HTTPHeaders.of(headers))
-                && req.queryParameters().equals(parameters)
-                && Objects.equals(req.body(), body));
-  }
-
-  static HTTPRequest reqMatcherContainsHeaders(
-      HTTPMethod method, String path, Map<String, String> headers) {
-    return argThat(
-        req ->
-            req.method() == method
-                && req.path().equals(path)
-                && req.headers().entries().containsAll(HTTPHeaders.of(headers).entries()));
   }
 
   private static List<HTTPRequest> allRequests(RESTCatalogAdapter adapter) {

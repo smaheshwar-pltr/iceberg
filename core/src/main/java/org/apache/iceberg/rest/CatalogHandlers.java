@@ -24,6 +24,7 @@ import static org.apache.iceberg.TableProperties.COMMIT_NUM_RETRIES_DEFAULT;
 import static org.apache.iceberg.TableProperties.COMMIT_TOTAL_RETRY_TIME_MS_DEFAULT;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -52,6 +53,7 @@ import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.MetadataUpdate.UpgradeFormatVersion;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.RetryableValidationException;
 import org.apache.iceberg.Scan;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SortOrder;
@@ -84,6 +86,7 @@ import org.apache.iceberg.rest.requests.CreateViewRequest;
 import org.apache.iceberg.rest.requests.FetchScanTasksRequest;
 import org.apache.iceberg.rest.requests.PlanTableScanRequest;
 import org.apache.iceberg.rest.requests.RegisterTableRequest;
+import org.apache.iceberg.rest.requests.RegisterViewRequest;
 import org.apache.iceberg.rest.requests.RenameTableRequest;
 import org.apache.iceberg.rest.requests.UpdateNamespacePropertiesRequest;
 import org.apache.iceberg.rest.requests.UpdateTableRequest;
@@ -632,7 +635,17 @@ public class CatalogHandlers {
 
                 // apply changes
                 TableMetadata.Builder metadataBuilder = TableMetadata.buildFrom(base);
-                request.updates().forEach(update -> update.applyTo(metadataBuilder));
+                try {
+                  request.updates().forEach(update -> update.applyTo(metadataBuilder));
+                } catch (RetryableValidationException e) {
+                  // Validation failed because the commit includes stale values (e.g. sequence
+                  // number or first-row-id behind the current table state). This is not a conflict.
+                  // Server-side retry won't help since the stale values are in the request itself.
+                  // Wrap as CommitFailedException so the client can retry with refreshed metadata.
+                  throw new ValidationFailureException(
+                      new CommitFailedException(
+                          e, "Validation failed, please retry: %s", e.getMessage()));
+                }
 
                 TableMetadata updated = metadataBuilder.build();
                 if (updated.changes().isEmpty()) {
@@ -744,6 +757,18 @@ public class CatalogHandlers {
     if (!dropped) {
       throw new NoSuchViewException("View does not exist: %s", viewIdentifier);
     }
+  }
+
+  public static LoadViewResponse registerView(
+      ViewCatalog catalog, Namespace namespace, RegisterViewRequest request) {
+    request.validate();
+
+    TableIdentifier identifier = TableIdentifier.of(namespace, request.name());
+    View view = catalog.registerView(identifier, request.metadataLocation());
+    return ImmutableLoadViewResponse.builder()
+        .metadata(asBaseView(view).operations().current())
+        .metadataLocation(request.metadataLocation())
+        .build();
   }
 
   static ViewMetadata commit(ViewOperations ops, UpdateTableRequest request) {
@@ -988,7 +1013,7 @@ public class CatalogHandlers {
       }
       return Pair.of(initialFileScanTasks, firstPlanTaskKey);
     } catch (IOException e) {
-      throw new RuntimeException(e);
+      throw new UncheckedIOException(e);
     }
   }
 
