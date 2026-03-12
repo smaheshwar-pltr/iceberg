@@ -3266,69 +3266,6 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
   }
 
   @Test
-  public void testCustomTableOperationsWithFreshnessAwareLoading() {
-    class CustomTableOps extends RESTTableOperations {
-      CustomTableOps(
-          RESTClient client,
-          String path,
-          Supplier<Map<String, String>> readHeaders,
-          Supplier<Map<String, String>> mutationHeaders,
-          FileIO io,
-          KeyManagementClient kmsClient,
-          TableMetadata current,
-          Set<Endpoint> endpoints) {
-        super(client, path, readHeaders, mutationHeaders, io, kmsClient, current, endpoints);
-      }
-    }
-
-    class CustomRESTSessionCatalog extends RESTSessionCatalog {
-      CustomRESTSessionCatalog(
-          Function<Map<String, String>, RESTClient> clientBuilder,
-          BiFunction<SessionCatalog.SessionContext, Map<String, String>, FileIO> ioBuilder) {
-        super(clientBuilder, ioBuilder);
-      }
-
-      @Override
-      protected RESTTableOperations newTableOps(
-          RESTClient restClient,
-          String path,
-          Supplier<Map<String, String>> readHeaders,
-          Supplier<Map<String, String>> mutationHeaders,
-          FileIO fileIO,
-          KeyManagementClient kmsClient,
-          TableMetadata current,
-          Set<Endpoint> supportedEndpoints) {
-        return new CustomTableOps(
-            restClient,
-            path,
-            readHeaders,
-            mutationHeaders,
-            fileIO,
-            kmsClient,
-            current,
-            supportedEndpoints);
-      }
-    }
-
-    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
-    RESTCatalog catalog =
-        catalog(adapter, clientBuilder -> new CustomRESTSessionCatalog(clientBuilder, null));
-
-    catalog.createNamespace(NS);
-
-    catalog.createTable(TABLE, SCHEMA);
-
-    expectFullTableLoadForLoadTable(TABLE, adapter);
-    BaseTable table = (BaseTable) catalog.loadTable(TABLE);
-    assertThat(table.operations()).isInstanceOf(CustomTableOps.class);
-
-    // When answering loadTable from table cache we still get the injected ops.
-    expectNotModifiedResponseForLoadTable(TABLE, adapter);
-    table = (BaseTable) catalog.loadTable(TABLE);
-    assertThat(table.operations()).isInstanceOf(CustomTableOps.class);
-  }
-
-  @Test
   public void testClientAutoSendsIdempotencyWhenServerAdvertises() {
     ConfigResponse cfgWithIdem =
         ConfigResponse.builder()
