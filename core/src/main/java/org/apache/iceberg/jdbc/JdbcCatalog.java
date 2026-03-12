@@ -47,6 +47,8 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
@@ -82,6 +84,7 @@ public class JdbcCatalog extends BaseMetastoreViewCatalog
       "JDBC catalog is initialized without view support. To auto-migrate the database's schema and enable view support, set jdbc.schema-version=V1";
 
   private FileIO io;
+  private KeyManagementClient keyManagementClient;
   private String catalogName = "jdbc";
   private String warehouseLocation;
   private Object conf;
@@ -133,6 +136,11 @@ public class JdbcCatalog extends BaseMetastoreViewCatalog
       this.io = CatalogUtil.loadFileIO(ioImpl, properties, conf);
     }
 
+    if (catalogProperties.containsKey(CatalogProperties.ENCRYPTION_KMS_TYPE)
+        || catalogProperties.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
+      this.keyManagementClient = EncryptionUtil.createKmsClient(properties);
+    }
+
     LOG.debug("Connecting to JDBC database {}", uri);
     if (null != clientPoolBuilder) {
       this.connections = clientPoolBuilder.apply(properties);
@@ -153,6 +161,7 @@ public class JdbcCatalog extends BaseMetastoreViewCatalog
     closeableGroup.addCloseable(metricsReporter());
     closeableGroup.addCloseable(connections);
     closeableGroup.addCloseable(io);
+    closeableGroup.addCloseable(keyManagementClient);
     closeableGroup.setSuppressCloseFailure(true);
   }
 
@@ -266,7 +275,13 @@ public class JdbcCatalog extends BaseMetastoreViewCatalog
   @Override
   protected TableOperations newTableOps(TableIdentifier tableIdentifier) {
     return new JdbcTableOperations(
-        connections, io, catalogName, tableIdentifier, catalogProperties, schemaVersion);
+        connections,
+        io,
+        catalogName,
+        tableIdentifier,
+        catalogProperties,
+        schemaVersion,
+        keyManagementClient);
   }
 
   @Override
