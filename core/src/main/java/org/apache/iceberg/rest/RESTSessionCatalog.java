@@ -276,7 +276,8 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             RESTCatalogProperties.METRICS_REPORTING_ENABLED,
             RESTCatalogProperties.METRICS_REPORTING_ENABLED_DEFAULT);
 
-    if (mergedProps.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
+    if (mergedProps.containsKey(CatalogProperties.ENCRYPTION_KMS_TYPE)
+            || mergedProps.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
       this.keyManagementClient = EncryptionUtil.createKmsClient(mergedProps);
       this.closeables.addCloseable(this.keyManagementClient);
     }
