@@ -47,8 +47,8 @@ import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.catalog.SessionCatalog;
-import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.RESTException;
 import org.apache.iceberg.io.FileIO;
@@ -769,7 +769,14 @@ public class TestFreshnessAwareLoading extends TestBaseWithRESTServer {
           TableMetadata current,
           Set<Endpoint> supportedEndpoints) {
         return new CustomTableOps(
-            restClient, path, readHeaders, mutationHeaders, fileIO, kmsClient, current, supportedEndpoints);
+            restClient,
+            path,
+            readHeaders,
+            mutationHeaders,
+            fileIO,
+            kmsClient,
+            current,
+            supportedEndpoints);
       }
     }
 

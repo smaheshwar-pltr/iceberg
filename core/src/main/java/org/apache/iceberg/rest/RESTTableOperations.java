@@ -176,7 +176,7 @@ class RESTTableOperations implements TableOperations {
     }
     this.endpoints = endpoints;
 
-    // N.B. We don't use this.current due it being null for the CREATE update type; we still
+    // N.B. We don't use this.current due to it being null for the CREATE update type; we still
     // want encryption configured for this case.
     encryptionPropsFromMetadata(current);
   }
@@ -197,10 +197,11 @@ class RESTTableOperations implements TableOperations {
   public void commit(TableMetadata base, TableMetadata metadata) {
     Endpoint.check(endpoints, Endpoint.V1_UPDATE_TABLE);
 
-    if (encryption() instanceof StandardEncryptionManager) {
+    EncryptionManager encryption = encryption();
+    if (encryption instanceof StandardEncryptionManager) {
       // Add encryption keys to the to-be-committed metadata
       TableMetadata.Builder builder = TableMetadata.buildFrom(metadata);
-      EncryptionUtil.encryptionKeys(encryption()).values().forEach(builder::addEncryptionKey);
+      EncryptionUtil.encryptionKeys(encryption).values().forEach(builder::addEncryptionKey);
       commitInternal(base, builder.build());
     } else {
       commitInternal(base, metadata);
