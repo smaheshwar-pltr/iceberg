@@ -2748,7 +2748,7 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
         .containsExactlyElementsOf(
             original.schema().columns().stream()
                 .map(Types.NestedField::name)
-                .collect(java.util.stream.Collectors.toList()));
+                .collect(Collectors.toList()));
     assertUUIDsMatch(original, afterSecondReplace);
     assertFiles(afterSecondReplace, FILE_C);
   }
@@ -2787,11 +2787,12 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     Table afterSecondReplace = catalog.loadTable(TABLE);
     // The second replace is rebased on the first replace, so new field IDs will be assigned
     assertThat(afterSecondReplace.schema().asStruct())
-        .as("Table schema should differ from the original schema")
+        .as("Table schema should differ from the original schema due to rebased field IDs")
         .isNotEqualTo(original.schema().asStruct());
-    assertThat(afterSecondReplace.schema().select("name", "type").asStruct())
-        .as("Table schema should match the original schema in names and types")
-        .isEqualTo(original.schema().select("name", "type").asStruct());
+    assertThat(afterSecondReplace.schema().columns())
+        .as("Table schema should have the same column names as the replacement schema")
+        .extracting("name")
+        .containsExactly("id", "data");
     assertUUIDsMatch(original, afterSecondReplace);
     assertFiles(afterSecondReplace, FILE_C);
   }

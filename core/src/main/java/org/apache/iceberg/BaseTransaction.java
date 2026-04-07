@@ -438,6 +438,7 @@ public class BaseTransaction implements Transaction {
       underlyingOps.refresh();
     } catch (NoSuchTableException e) {
       if (type == TransactionType.CREATE_OR_REPLACE_TABLE) {
+        this.base = null;
         return;
       }
       throw e;
@@ -470,10 +471,6 @@ public class BaseTransaction implements Transaction {
   private TableMetadata startingMetadataFor(TableMetadata refreshed) {
     return switch (type) {
       case REPLACE_TABLE, CREATE_OR_REPLACE_TABLE ->
-          // TODO: Reconsider implementation here, relies on "start" being produced via replacement,
-          //  and its immutability (not guaranteed - its the "properties()" hash map is exposed).
-          // Even if we are dealing with a replace-style transaction, we need to re-apply
-          // updates on top of the refreshed metadata's replacement
           refreshed.buildReplacement(
               start.schema(),
               start.spec(),
