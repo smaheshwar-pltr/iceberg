@@ -2711,10 +2711,7 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     }
 
     Transaction transaction =
-        catalog
-            .buildTable(TABLE, SCHEMA)
-            .withProperty("format-version", "3")
-            .createTransaction();
+        catalog.buildTable(TABLE, SCHEMA).withProperty("format-version", "3").createTransaction();
     transaction.newFastAppend().appendFile(FILE_A).commit();
     transaction.commitTransaction();
 
