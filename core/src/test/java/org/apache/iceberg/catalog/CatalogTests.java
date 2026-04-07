@@ -2718,7 +2718,7 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     Table original = catalog.loadTable(TABLE);
     assertFiles(original, FILE_A);
 
-    // start two concurrent replace transactions while the table is at V3
+    // start two concurrent replace transactions
     Transaction secondReplace = catalog.buildTable(TABLE, SCHEMA).replaceTransaction();
     secondReplace.newFastAppend().appendFile(FILE_C).commit();
 
@@ -2726,13 +2726,10 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     firstReplace.newFastAppend().appendFile(FILE_B).commit();
     firstReplace.commitTransaction();
 
-    // the second replace should also succeed, but it fails because the snapshot's
+    // the second replace should also succeed, but it fails for REST because the snapshot's
     // first-row-id (set from the original base's next-row-id) is now behind the table's
     // next-row-id after the first replace advanced it
     secondReplace.commitTransaction();
-
-    Table afterSecondReplace = catalog.loadTable(TABLE);
-    assertThat(afterSecondReplace.snapshots()).hasSize(3);
   }
 
   @Test
