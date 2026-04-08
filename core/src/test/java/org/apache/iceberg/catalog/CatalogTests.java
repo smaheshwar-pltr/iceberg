@@ -3021,6 +3021,38 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     assertFiles(afterSecondReplace, FILE_C);
   }
 
+  @Test
+  public void testConcurrentReplaceTransactionPropertyUpdate() {
+    C catalog = catalog();
+
+    if (requiresNamespaceCreate()) {
+      catalog.createNamespace(NS);
+    }
+
+    catalog.buildTable(TABLE, SCHEMA).withProperty("initial-key", "initial-value").create();
+
+    Table original = catalog.loadTable(TABLE);
+    assertThat(original.properties()).containsEntry("initial-key", "initial-value");
+
+    Transaction replace = catalog.buildTable(TABLE, SCHEMA).replaceTransaction();
+    replace.newFastAppend().appendFile(FILE_A).commit();
+
+    original.updateProperties().set("concurrent-key", "concurrent-value").commit();
+
+    Table afterPropertyUpdate = catalog.loadTable(TABLE);
+    assertThat(afterPropertyUpdate.properties()).containsEntry("concurrent-key", "concurrent-value");
+
+    replace.commitTransaction();
+
+    Table afterReplace = catalog.loadTable(TABLE);
+    assertThat(afterReplace.properties()).containsEntry("initial-key", "initial-value");
+    assertThat(afterReplace.properties())
+        .as(
+            "Concurrent property should survive the replace — "
+                + "the replace did not remove it, so it should be preserved")
+        .containsEntry("concurrent-key", "concurrent-value");
+  }
+
   @ParameterizedTest
   @ValueSource(ints = {1, 2, 3})
   public void createTableTransaction(int formatVersion) {
