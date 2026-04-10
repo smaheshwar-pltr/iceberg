@@ -29,8 +29,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 import javax.annotation.Nullable;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -42,7 +45,9 @@ import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.client.JobExecutionException;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.graph.StreamNode;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.util.DataFormatConverters;
@@ -58,6 +63,8 @@ import org.apache.iceberg.DistributionMode;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Catalog;
@@ -78,6 +85,7 @@ import org.apache.iceberg.inmemory.InMemoryInputFile;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
@@ -217,9 +225,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     runTest(rows);
   }
@@ -230,11 +244,11 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
 
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec));
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec));
 
     runTest(rows);
   }
@@ -257,11 +271,11 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
 
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
-            new DynamicIcebergDataImpl(schema, "t1", "main", spec),
-            new DynamicIcebergDataImpl(schema, "t1", "main", spec),
-            new DynamicIcebergDataImpl(schema, "t1", "main", spec),
-            new DynamicIcebergDataImpl(schema2, "t1", "main", spec2),
-            new DynamicIcebergDataImpl(schema2, "t1", "main", spec2));
+            new DynamicIcebergDataImpl(schema, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(schema, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(schema, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(schema2, "t1", SnapshotRef.MAIN_BRANCH, spec2),
+            new DynamicIcebergDataImpl(schema2, "t1", SnapshotRef.MAIN_BRANCH, spec2));
 
     runTest(rows);
   }
@@ -291,15 +305,35 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                schema, expectedSchema, "t1", "main", PartitionSpec.unpartitioned()),
+                schema,
+                expectedSchema,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                schema, expectedSchema, "t1", "main", PartitionSpec.unpartitioned()),
+                schema,
+                expectedSchema,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                schema, expectedSchema, "t1", "main", PartitionSpec.unpartitioned()),
+                schema,
+                expectedSchema,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                schema2, expectedSchema2, "t1", "main", PartitionSpec.unpartitioned()),
+                schema2,
+                expectedSchema2,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                schema2, expectedSchema2, "t1", "main", PartitionSpec.unpartitioned()));
+                schema2,
+                expectedSchema2,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     for (DynamicIcebergDataImpl row : rows) {
       if (row.schemaExpected == expectedSchema) {
@@ -316,9 +350,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t2", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     runTest(rows);
   }
@@ -329,8 +369,8 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
 
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t2", "main", spec));
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t2", SnapshotRef.MAIN_BRANCH, spec));
 
     runTest(rows);
   }
@@ -340,9 +380,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA2, "t1", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA2,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     runTest(rows, this.env, 1);
   }
@@ -352,9 +398,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA2, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA2,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     runTest(rows, this.env, 1);
   }
@@ -379,7 +431,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
                 writeSchemaWithoutRequiredField,
                 existingSchemaWithRequiredField,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned()));
 
     runTest(rows, this.env, 1);
@@ -393,9 +445,10 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
 
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
-            new DynamicIcebergDataImpl(initialSchema, "t1", "main", PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                erroringSchema, "t1", "main", PartitionSpec.unpartitioned()));
+                initialSchema, "t1", SnapshotRef.MAIN_BRANCH, PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(
+                erroringSchema, "t1", SnapshotRef.MAIN_BRANCH, PartitionSpec.unpartitioned()));
 
     try {
       runTest(rows, StreamExecutionEnvironment.getExecutionEnvironment(), 1);
@@ -416,20 +469,45 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
 
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec1),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec2),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec1),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec2),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec1),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec1),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec2),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec2),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec1),
-            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", "main", spec2));
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec1),
+            new DynamicIcebergDataImpl(
+                SimpleDataUtil.SCHEMA, "t1", SnapshotRef.MAIN_BRANCH, spec2));
 
     runTest(rows);
+
+    // Validate the table has expected partition specs
+    Table table = CATALOG_EXTENSION.catalog().loadTable(TableIdentifier.of(DATABASE, "t1"));
+    Map<Integer, PartitionSpec> tableSpecs = table.specs();
+    List<PartitionSpec> expectedSpecs = List.of(spec1, spec2, PartitionSpec.unpartitioned());
+
+    assertThat(tableSpecs).hasSize(expectedSpecs.size());
+    expectedSpecs.forEach(
+        expectedSpec ->
+            assertThat(
+                    tableSpecs.values().stream()
+                        .anyMatch(
+                            spec -> PartitionSpecEvolution.checkCompatibility(spec, expectedSpec)))
+                .withFailMessage("Table spec not found: %s.", expectedSpec)
+                .isTrue());
   }
 
   @Test
@@ -439,7 +517,10 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA, "t1", "branch1", PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     runTest(rows);
   }
@@ -449,23 +530,50 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t2", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA2, "t2", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA2,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t2", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA2, "t2", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA2,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     runTest(rows);
   }
@@ -478,7 +586,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -487,7 +595,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -495,7 +603,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -503,7 +611,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -547,7 +655,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -556,7 +664,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -564,7 +672,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -572,7 +680,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -625,7 +733,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -634,7 +742,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -642,7 +750,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -650,7 +758,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t1",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -662,7 +770,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t2",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -671,7 +779,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t2",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -679,7 +787,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t2",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -687,7 +795,7 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             new DynamicIcebergDataImpl(
                 SimpleDataUtil.SCHEMA,
                 "t2",
-                "main",
+                SnapshotRef.MAIN_BRANCH,
                 PartitionSpec.unpartitioned(),
                 true,
                 Sets.newHashSet("id"),
@@ -745,9 +853,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t2", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     final CommitHook commitHook = new FailBeforeAndAfterCommit();
     assertThat(FailBeforeAndAfterCommit.failedBeforeCommit).isFalse();
@@ -769,9 +883,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> rows =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t1", "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                "t1",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, "t2", "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                "t2",
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     TableIdentifier tableIdentifier = TableIdentifier.of("default", "t1");
     Catalog catalog = CATALOG_EXTENSION.catalog();
@@ -789,9 +909,15 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
     List<DynamicIcebergDataImpl> records =
         Lists.newArrayList(
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, tableId.name(), "main", PartitionSpec.unpartitioned()),
+                SimpleDataUtil.SCHEMA,
+                tableId.name(),
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()),
             new DynamicIcebergDataImpl(
-                SimpleDataUtil.SCHEMA, tableId.name(), "main", PartitionSpec.unpartitioned()));
+                SimpleDataUtil.SCHEMA,
+                tableId.name(),
+                SnapshotRef.MAIN_BRANCH,
+                PartitionSpec.unpartitioned()));
 
     CommitHook duplicateCommit =
         new DuplicateCommitHook(
@@ -820,6 +946,275 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
             .mapToLong(Long::valueOf)
             .sum();
     assertThat(totalAddedRecords).isEqualTo(records.size());
+  }
+
+  @Test
+  void testCommitsOncePerTableBranchAndCheckpoint() throws Exception {
+    String tableName = "t1";
+    String branch = SnapshotRef.MAIN_BRANCH;
+    PartitionSpec spec1 = PartitionSpec.unpartitioned();
+    PartitionSpec spec2 = PartitionSpec.builderFor(SimpleDataUtil.SCHEMA).bucket("id", 10).build();
+    Set<String> equalityFields = Sets.newHashSet("id");
+
+    List<DynamicIcebergDataImpl> inputRecords =
+        Lists.newArrayList(
+            // Two schemas
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, tableName, branch, spec1),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA2, tableName, branch, spec1),
+            // Two specs
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, tableName, branch, spec1),
+            new DynamicIcebergDataImpl(SimpleDataUtil.SCHEMA, tableName, branch, spec2),
+            // Some upserts
+            new DynamicIcebergDataImpl(
+                SimpleDataUtil.SCHEMA, tableName, branch, spec1, true, equalityFields, false),
+            new DynamicIcebergDataImpl(
+                SimpleDataUtil.SCHEMA, tableName, branch, spec1, true, equalityFields, true));
+
+    executeDynamicSink(inputRecords, env, true, 1, null);
+
+    List<Record> actualRecords;
+    try (CloseableIterable<Record> iterable =
+        IcebergGenerics.read(
+                CATALOG_EXTENSION.catalog().loadTable(TableIdentifier.of("default", "t1")))
+            .build()) {
+      actualRecords = Lists.newArrayList(iterable);
+    }
+
+    // Validate records
+    int expectedRecords = inputRecords.size() - 1; // 1 duplicate
+    assertThat(actualRecords).hasSize(expectedRecords);
+
+    for (int i = 0; i < expectedRecords; i++) {
+      Record actual = actualRecords.get(0);
+      assertThat(inputRecords)
+          .anySatisfy(
+              inputRecord -> {
+                assertThat(actual.get(0)).isEqualTo(inputRecord.rowProvided.getField(0));
+                assertThat(actual.get(1)).isEqualTo(inputRecord.rowProvided.getField(1));
+                if (inputRecord.schemaProvided.equals(SimpleDataUtil.SCHEMA2)) {
+                  assertThat(actual.get(2)).isEqualTo(inputRecord.rowProvided.getField(2));
+                }
+                // There is an additional _pos field which gets added
+              });
+    }
+
+    TableIdentifier tableIdentifier = TableIdentifier.of("default", tableName);
+    Table table = CATALOG_EXTENSION.catalog().loadTable(tableIdentifier);
+
+    Snapshot lastSnapshot = Iterables.getLast(table.snapshots());
+    assertThat(lastSnapshot).isNotNull();
+    assertThat(lastSnapshot.summary())
+        .containsAllEntriesOf(
+            ImmutableMap.<String, String>builder()
+                .put("total-delete-files", "2")
+                .put("total-records", "6")
+                .build());
+
+    // Count commits per checkpoint
+    Map<Long, Long> commitsPerCheckpoint =
+        StreamSupport.stream(table.snapshots().spliterator(), false)
+            .map(snapshot -> snapshot.summary().get("flink.max-committed-checkpoint-id"))
+            .filter(Objects::nonNull)
+            .map(Long::parseLong)
+            .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+    assertThat(commitsPerCheckpoint.values()).allMatch(count -> count == 1);
+  }
+
+  @Test
+  void testOptInDropUnusedColumns() throws Exception {
+    Schema schema1 =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "data", Types.StringType.get()),
+            Types.NestedField.optional(3, "extra", Types.StringType.get()));
+
+    Schema schema2 =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "data", Types.StringType.get()));
+
+    Catalog catalog = CATALOG_EXTENSION.catalog();
+    TableIdentifier tableIdentifier = TableIdentifier.of(DATABASE, "t1");
+    catalog.createTable(tableIdentifier, schema1);
+
+    List<DynamicIcebergDataImpl> rows =
+        Lists.newArrayList(
+            // Drop columns
+            new DynamicIcebergDataImpl(
+                schema2, "t1", SnapshotRef.MAIN_BRANCH, PartitionSpec.unpartitioned()),
+            // Re-add columns
+            new DynamicIcebergDataImpl(
+                schema1, "t1", SnapshotRef.MAIN_BRANCH, PartitionSpec.unpartitioned()));
+
+    DataStream<DynamicIcebergDataImpl> dataStream =
+        env.fromData(rows, TypeInformation.of(new TypeHint<>() {}));
+    env.setParallelism(1);
+
+    DynamicIcebergSink.forInput(dataStream)
+        .generator(new Generator())
+        .catalogLoader(CATALOG_EXTENSION.catalogLoader())
+        .immediateTableUpdate(true)
+        .dropUnusedColumns(true)
+        .append();
+
+    env.execute("Test Drop Unused Columns");
+
+    Table table = catalog.loadTable(tableIdentifier);
+    table.refresh();
+
+    assertThat(table.schema().columns()).hasSize(2);
+    assertThat(table.schema().findField("id")).isNotNull();
+    assertThat(table.schema().findField("data")).isNotNull();
+    assertThat(table.schema().findField("extra")).isNull();
+
+    List<Record> records = Lists.newArrayList(IcebergGenerics.read(table).build());
+    assertThat(records).hasSize(2);
+  }
+
+  @Test
+  void testCaseInsensitiveSchemaMatching() throws Exception {
+    Schema lowerCaseSchema =
+        new Schema(
+            Types.NestedField.optional(1, "id", Types.IntegerType.get()),
+            Types.NestedField.optional(2, "data", Types.StringType.get()));
+
+    Schema upperCaseSchema =
+        new Schema(
+            Types.NestedField.optional(1, "ID", Types.IntegerType.get()),
+            Types.NestedField.optional(2, "DATA", Types.StringType.get()));
+
+    Schema mixedCaseSchema =
+        new Schema(
+            Types.NestedField.optional(1, "Id", Types.IntegerType.get()),
+            Types.NestedField.optional(2, "Data", Types.StringType.get()));
+
+    List<DynamicIcebergDataImpl> rows =
+        Lists.newArrayList(
+            new DynamicIcebergDataImpl(
+                lowerCaseSchema, "t1", "main", PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(
+                upperCaseSchema, "t1", "main", PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(
+                mixedCaseSchema, "t1", "main", PartitionSpec.unpartitioned()));
+
+    DataStream<DynamicIcebergDataImpl> dataStream =
+        env.fromData(rows, TypeInformation.of(new TypeHint<>() {}));
+    env.setParallelism(2);
+
+    DynamicIcebergSink.forInput(dataStream)
+        .generator(new Generator())
+        .catalogLoader(CATALOG_EXTENSION.catalogLoader())
+        .writeParallelism(2)
+        .immediateTableUpdate(true)
+        .caseSensitive(false)
+        .append();
+
+    env.execute("Test Case Insensitive Iceberg DataStream");
+
+    verifyResults(rows);
+  }
+
+  @Test
+  void testCaseSensitiveSchemaMatchingCreatesNewFields() throws Exception {
+    Schema lowerCaseSchema =
+        new Schema(
+            Types.NestedField.optional(1, "id", Types.IntegerType.get()),
+            Types.NestedField.optional(2, "data", Types.StringType.get()));
+
+    Schema upperCaseSchema =
+        new Schema(
+            Types.NestedField.optional(1, "ID", Types.IntegerType.get()),
+            Types.NestedField.optional(2, "DATA", Types.StringType.get()));
+
+    List<DynamicIcebergDataImpl> rows =
+        Lists.newArrayList(
+            new DynamicIcebergDataImpl(
+                lowerCaseSchema, "t1", "main", PartitionSpec.unpartitioned()),
+            new DynamicIcebergDataImpl(
+                upperCaseSchema, "t1", "main", PartitionSpec.unpartitioned()));
+
+    DataStream<DynamicIcebergDataImpl> dataStream =
+        env.fromData(rows, TypeInformation.of(new TypeHint<>() {}));
+    env.setParallelism(2);
+
+    DynamicIcebergSink.forInput(dataStream)
+        .generator(new Generator())
+        .catalogLoader(CATALOG_EXTENSION.catalogLoader())
+        .writeParallelism(2)
+        .immediateTableUpdate(true)
+        .caseSensitive(true)
+        .append();
+
+    env.execute("Test Case Sensitive Iceberg DataStream");
+
+    Table table = CATALOG_EXTENSION.catalog().loadTable(TableIdentifier.of(DATABASE, "t1"));
+    Schema resultSchema = table.schema();
+    assertThat(resultSchema.columns()).hasSize(4);
+    assertThat(resultSchema.findField("id")).isNotNull();
+    assertThat(resultSchema.findField("ID")).isNotNull();
+    assertThat(resultSchema.findField("data")).isNotNull();
+    assertThat(resultSchema.findField("DATA")).isNotNull();
+  }
+
+  @Test
+  void testOperatorUidsAreDeterministic() {
+    assertThat(createSinkAndReturnUIds("test")).isEqualTo(createSinkAndReturnUIds("test"));
+    assertThat(createSinkAndReturnUIds("test"))
+        .doesNotContainAnyElementsOf(createSinkAndReturnUIds("test2"));
+  }
+
+  @Test
+  void testOperatorUidsFormat() {
+    Set<String> sinkUids = createSinkAndReturnUIds("test");
+    // These look odd, but we need to keep the UIDs consistent. We had a bug where the UID of the
+    // pre commit topology was off, but since it is stateless, users will still be able to restore
+    // state, but we must keep the stateful operators UUIds like the committer consistent.
+    assertThat(sinkUids)
+        .contains(
+            "test--sink",
+            "test--generator",
+            "test--updater",
+            "test--sink: test--pre-commit-topology",
+            "Sink Committer: test--sink");
+
+    sinkUids = createSinkAndReturnUIds("");
+    assertThat(sinkUids)
+        .contains(
+            "--sink",
+            "--generator",
+            "--updater",
+            "--sink: --pre-commit-topology",
+            "Sink Committer: --sink");
+
+    sinkUids = createSinkAndReturnUIds(null);
+    assertThat(sinkUids)
+        .contains(
+            "--sink",
+            "--generator",
+            "--updater",
+            "--sink: --pre-commit-topology",
+            "Sink Committer: --sink");
+  }
+
+  private Set<String> createSinkAndReturnUIds(String uidPrefix) {
+    StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+
+    DataStreamSource<DynamicIcebergDataImpl> source =
+        streamEnv.fromData(Collections.emptySet(), TypeInformation.of(new TypeHint<>() {}));
+    source.uid("source");
+
+    DynamicIcebergSink.forInput(source)
+        .generator(new Generator())
+        .catalogLoader(CATALOG_EXTENSION.catalogLoader())
+        .uidPrefix(uidPrefix)
+        .append();
+
+    // Make sure to get the expanded graph with all sink nodes
+    return streamEnv.getStreamGraph().getStreamNodes().stream()
+        .map(StreamNode::getTransformationUID)
+        // We are not interested in the source
+        .filter(uid -> !uid.equals("source"))
+        .collect(Collectors.toSet());
   }
 
   /**
@@ -964,14 +1359,14 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
 
     @Override
     DynamicIcebergSink instantiateSink(
-        Map<String, String> writeProperties, FlinkWriteConf flinkWriteConf) {
+        Map<String, String> writeProperties, Configuration flinkConfig) {
       return new CommitHookDynamicIcebergSink(
           commitHook,
           CATALOG_EXTENSION.catalogLoader(),
           Collections.emptyMap(),
           "uidPrefix",
           writeProperties,
-          flinkWriteConf,
+          flinkConfig,
           100);
     }
   }
@@ -987,17 +1382,17 @@ class TestDynamicIcebergSink extends TestFlinkIcebergSinkBase {
         Map<String, String> snapshotProperties,
         String uidPrefix,
         Map<String, String> writeProperties,
-        FlinkWriteConf flinkWriteConf,
+        Configuration flinkConfig,
         int cacheMaximumSize) {
       super(
           catalogLoader,
           snapshotProperties,
           uidPrefix,
           writeProperties,
-          flinkWriteConf,
+          flinkConfig,
           cacheMaximumSize);
       this.commitHook = commitHook;
-      this.overwriteMode = flinkWriteConf.overwriteMode();
+      this.overwriteMode = new FlinkWriteConf(writeProperties, flinkConfig).overwriteMode();
     }
 
     @Override

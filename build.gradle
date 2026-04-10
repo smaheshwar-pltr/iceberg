@@ -26,17 +26,17 @@ buildscript {
     gradlePluginPortal()
   }
   dependencies {
-    classpath 'com.gradleup.shadow:shadow-gradle-plugin:8.3.9'
-    classpath 'com.palantir.baseline:gradle-baseline-java:5.72.0'
-    classpath 'com.diffplug.spotless:spotless-plugin-gradle:6.25.0'
+    classpath 'com.gradleup.shadow:shadow-gradle-plugin:9.4.1'
+    classpath 'com.palantir.baseline:gradle-baseline-java:6.90.0'
+    classpath 'com.diffplug.spotless:spotless-plugin-gradle:8.4.0'
     classpath 'gradle.plugin.org.inferred:gradle-processors:3.7.0'
     classpath 'me.champeau.jmh:jmh-gradle-plugin:0.7.3'
     classpath 'gradle.plugin.io.morethan.jmhreport:gradle-jmh-report:0.9.6'
     classpath "com.github.alisiikh:gradle-scalastyle-plugin:3.5.0"
     classpath 'org.revapi:gradle-revapi:1.8.0'
-    classpath 'com.gorylenko.gradle-git-properties:gradle-git-properties:2.5.4'
-    classpath 'com.palantir.gradle.gitversion:gradle-git-version:3.4.0'
-    classpath 'org.openapitools:openapi-generator-gradle-plugin:7.17.0'
+    classpath 'com.gorylenko.gradle-git-properties:gradle-git-properties:2.5.7'
+    classpath 'com.palantir.gradle.gitversion:gradle-git-version:4.3.0'
+    classpath 'org.openapitools:openapi-generator-gradle-plugin:7.21.0'
   }
 }
 
@@ -51,10 +51,7 @@ try {
   project.logger.error(e.getMessage())
 }
 
-if (JavaVersion.current() == JavaVersion.VERSION_11) {
-  project.ext.jdkVersion = '11'
-  project.ext.extraJvmArgs = []
-} else if (JavaVersion.current() == JavaVersion.VERSION_17 || JavaVersion.current() == JavaVersion.VERSION_21) {
+if (JavaVersion.current() == JavaVersion.VERSION_17 || JavaVersion.current() == JavaVersion.VERSION_21) {
   project.ext.jdkVersion = JavaVersion.current().getMajorVersion().toString()
   project.ext.extraJvmArgs = ["--add-opens", "java.base/java.io=ALL-UNNAMED",
                               "--add-opens", "java.base/java.lang.invoke=ALL-UNNAMED",
@@ -78,7 +75,7 @@ if (JavaVersion.current() == JavaVersion.VERSION_11) {
                               "--add-opens", "java.base/sun.security.action=ALL-UNNAMED",
                               "--add-opens", "java.base/sun.util.calendar=ALL-UNNAMED"]
 } else {
-  throw new GradleException("This build must be run with JDK 11 or 17 or 21 but was executed with JDK " + JavaVersion.current())
+  throw new GradleException("This build must be run with JDK 17 or 21 but was executed with JDK " + JavaVersion.current())
 }
 
 tasks.withType(AbstractArchiveTask).configureEach {
@@ -120,6 +117,15 @@ allprojects {
   repositories {
     mavenCentral()
     mavenLocal()
+  }
+}
+
+tasks.register('checkAllRuntimeDeps') {
+  description = 'Validates runtime dependency baselines for all subprojects that have them'
+  group = 'verification'
+
+  dependsOn subprojects.collect { subproject ->
+    subproject.tasks.matching { it.name == 'checkRuntimeDeps' }
   }
 }
 
@@ -196,6 +202,12 @@ subprojects {
       exclude group: 'com.sun.jersey.contribs'
       exclude group: 'org.pentaho', module: 'pentaho-aggdesigner-algorithm'
       exclude group: 'org.jetbrains', module: 'annotations'
+      resolutionStrategy {
+        dependencySubstitution {
+          substitute module("org.lz4:lz4-java") using module(libs.lz4Java.get().toString()) because("Enforce lz4-java that contains CVE-2025-12183 and CVE-2025-66566 fixes")
+          substitute module("io.airlift:aircompressor") using module(libs.aircompressor.get().toString()) because("Enforce aircompressor that contains CVE-2025-67721 fix")
+        }
+      }
     }
 
     testArtifacts
@@ -203,7 +215,7 @@ subprojects {
 
   tasks.withType(JavaCompile.class).configureEach {
     options.encoding = "UTF-8"
-    options.release = 11
+    options.release = 17
   }
 
   javadoc {
@@ -262,9 +274,9 @@ subprojects {
     tasks.withType(ScalaCompile.class) {
       scalaCompileOptions.keepAliveMode.set(KeepAliveMode.DAEMON)
       // `options.release` doesn't seem to work for ScalaCompile :(
-      sourceCompatibility = "11"
-      targetCompatibility = "11"
-      scalaCompileOptions.additionalParameters.add("-release:11")
+      sourceCompatibility = "17"
+      targetCompatibility = "17"
+      scalaCompileOptions.additionalParameters.add("-release:17")
     }
   }
 }
@@ -456,6 +468,8 @@ project(':iceberg-aliyun') {
     implementation project(':iceberg-common')
 
     compileOnly libs.aliyun.sdk.oss
+    compileOnly libs.aliyun.credentials.java
+    compileOnly libs.aliyun.tea
     compileOnly libs.jaxb.api
     compileOnly libs.activation
     compileOnly libs.jaxb.runtime
@@ -469,6 +483,7 @@ project(':iceberg-aliyun') {
     testImplementation platform(libs.jackson.bom)
     testImplementation "com.fasterxml.jackson.dataformat:jackson-dataformat-xml"
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testImplementation libs.junit.pioneer
   }
 }
 
@@ -554,6 +569,7 @@ project(':iceberg-aws') {
     jvmArgs += project.property('extraJvmArgs')
   }
 
+  // TODO delete once s3-signer-open-api.yaml is removed
   def s3SignerSpec = "$projectDir/src/main/resources/s3-signer-open-api.yaml"
   tasks.register('validateS3SignerSpec', org.openapitools.generator.gradle.plugin.tasks.ValidateTask) {
     inputSpec.set(s3SignerSpec)
@@ -576,6 +592,7 @@ project(':iceberg-azure') {
 
     compileOnly platform(libs.azuresdk.bom)
     compileOnly "com.azure:azure-storage-file-datalake"
+    compileOnly "com.azure:azure-security-keyvault-keys"
     compileOnly "com.azure:azure-identity"
 
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
@@ -699,10 +716,10 @@ project(':iceberg-bigquery') {
 
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
 
-    implementation platform(libs.google.libraries.bom)
+    compileOnly platform(libs.google.libraries.bom)
     compileOnly "com.google.cloud:google-cloud-storage"
-    implementation "com.google.cloud:google-cloud-bigquery"
-    implementation "com.google.cloud:google-cloud-core"
+    compileOnly "com.google.cloud:google-cloud-bigquery"
+    compileOnly "com.google.cloud:google-cloud-core"
 
     testImplementation project(path: ':iceberg-core', configuration: 'testArtifacts')
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
@@ -730,6 +747,7 @@ project(':iceberg-gcp') {
     compileOnly platform(libs.google.libraries.bom)
     compileOnly "com.google.cloud:google-cloud-storage"
     compileOnly "com.google.cloud:google-cloud-kms"
+    compileOnly(libs.gcs.analytics.core)
 
     testImplementation "com.google.cloud:google-cloud-nio"
 
@@ -742,10 +760,13 @@ project(':iceberg-gcp') {
       exclude group: 'javax.servlet', module: 'servlet-api'
       exclude group: 'com.google.code.gson', module: 'gson'
     }
+    testImplementation libs.awaitility
     testImplementation libs.esotericsoftware.kryo
     testImplementation libs.mockserver.netty
     testImplementation libs.mockserver.client.java
     testImplementation libs.mockito.junit.jupiter
+    testImplementation libs.testcontainers
+    testImplementation libs.testcontainers.junit.jupiter
   }
 
   sourceSets {
@@ -953,8 +974,6 @@ project(':iceberg-arrow') {
 }
 
 project(':iceberg-nessie') {
-  // Starting from Nessie 0.104.2, JDK 17+ is required for test dependencies
-  test.onlyIf { JavaVersion.current() != JavaVersion.VERSION_11 }
   test {
     useJUnitPlatform()
   }

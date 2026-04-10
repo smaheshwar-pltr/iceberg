@@ -24,6 +24,7 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.actions.BinPackRewriteFilePlanner;
 import org.apache.iceberg.actions.SizeBasedFileRewritePlanner;
 import org.apache.iceberg.expressions.Expression;
@@ -59,6 +60,7 @@ public class RewriteDataFiles {
     private final Map<String, String> rewriteOptions = Maps.newHashMapWithExpectedSize(6);
     private long maxRewriteBytes = Long.MAX_VALUE;
     private Expression filter = Expressions.alwaysTrue();
+    private String branch = SnapshotRef.MAIN_BRANCH;
 
     @Override
     String maintenanceTaskName() {
@@ -182,6 +184,19 @@ public class RewriteDataFiles {
     }
 
     /**
+     * Configures the max file count for rewriting. See {@link
+     * SizeBasedFileRewritePlanner#MAX_FILE_GROUP_INPUT_FILES} for more details.
+     *
+     * @param maxFileGroupInputFiles file count for rewrite
+     */
+    public Builder maxFileGroupInputFiles(long maxFileGroupInputFiles) {
+      this.rewriteOptions.put(
+          SizeBasedFileRewritePlanner.MAX_FILE_GROUP_INPUT_FILES,
+          String.valueOf(maxFileGroupInputFiles));
+      return this;
+    }
+
+    /**
      * Configures max files to rewrite. See {@link BinPackRewriteFilePlanner#MAX_FILES_TO_REWRITE}
      * for more details.
      *
@@ -202,6 +217,18 @@ public class RewriteDataFiles {
      */
     public Builder filter(Expression newFilter) {
       this.filter = newFilter;
+      return this;
+    }
+
+    /**
+     * Sets the branch to compact. When set, the planner reads from the branch's snapshot and
+     * commits are made to this branch.
+     *
+     * @param newBranch the branch name
+     * @return this for method chaining
+     */
+    public Builder branch(String newBranch) {
+      this.branch = newBranch;
       return this;
     }
 
@@ -249,7 +276,8 @@ public class RewriteDataFiles {
                       partialProgressEnabled ? partialProgressMaxCommits : 1,
                       maxRewriteBytes,
                       rewriteOptions,
-                      filter))
+                      filter,
+                      branch))
               .name(operatorName(PLANNER_TASK_NAME))
               .uid(PLANNER_TASK_NAME + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
@@ -269,7 +297,8 @@ public class RewriteDataFiles {
               .transform(
                   operatorName(COMMIT_TASK_NAME),
                   TypeInformation.of(Trigger.class),
-                  new DataFileRewriteCommitter(tableName(), taskName(), index(), tableLoader()))
+                  new DataFileRewriteCommitter(
+                      tableName(), taskName(), index(), tableLoader(), branch))
               .uid(COMMIT_TASK_NAME + uidSuffix())
               .slotSharingGroup(slotSharingGroup())
               .forceNonParallel();

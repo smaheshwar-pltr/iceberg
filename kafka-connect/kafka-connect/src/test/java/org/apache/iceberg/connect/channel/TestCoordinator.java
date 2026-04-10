@@ -32,7 +32,9 @@ import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotChanges;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.connect.events.AvroUtil;
 import org.apache.iceberg.connect.events.CommitComplete;
 import org.apache.iceberg.connect.events.CommitToTable;
@@ -71,8 +73,9 @@ public class TestCoordinator extends ChannelTestBase {
 
     Snapshot snapshot = snapshots.get(0);
     assertThat(snapshot.operation()).isEqualTo(DataOperations.APPEND);
-    assertThat(snapshot.addedDataFiles(table.io())).hasSize(1);
-    assertThat(snapshot.addedDeleteFiles(table.io())).isEmpty();
+    SnapshotChanges changes = SnapshotChanges.builderFor(table).snapshot(snapshot).build();
+    assertThat(changes.addedDataFiles()).hasSize(1);
+    assertThat(changes.addedDeleteFiles()).isEmpty();
 
     assertThat(snapshot.summary())
         .containsEntry(COMMIT_ID_SNAPSHOT_PROP, commitId.toString())
@@ -98,8 +101,9 @@ public class TestCoordinator extends ChannelTestBase {
 
     Snapshot snapshot = snapshots.get(0);
     assertThat(snapshot.operation()).isEqualTo(DataOperations.OVERWRITE);
-    assertThat(snapshot.addedDataFiles(table.io())).hasSize(1);
-    assertThat(snapshot.addedDeleteFiles(table.io())).hasSize(1);
+    SnapshotChanges changes = SnapshotChanges.builderFor(table).snapshot(snapshot).build();
+    assertThat(changes.addedDataFiles()).hasSize(1);
+    assertThat(changes.addedDeleteFiles()).hasSize(1);
 
     assertThat(snapshot.summary())
         .containsEntry(COMMIT_ID_SNAPSHOT_PROP, commitId.toString())
@@ -189,7 +193,7 @@ public class TestCoordinator extends ChannelTestBase {
             new DataWritten(
                 StructType.of(),
                 commitId,
-                new TableReference("catalog", ImmutableList.of("db"), "tbl"),
+                TableReference.of("catalog", TableIdentifier.of("db", "tbl"), null),
                 dataFiles,
                 deleteFiles));
     bytes = AvroUtil.encode(commitResponse);
