@@ -2741,14 +2741,10 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     secondReplace.commitTransaction();
 
     Table afterSecondReplace = catalog.loadTable(TABLE);
-    // The second replace is rebased on the first replace, so new field IDs will be assigned
-    assertThat(afterSecondReplace.schema().columns())
-        .as("Table schema should have the same column names as the original")
-        .extracting("name")
-        .containsExactlyElementsOf(
-            original.schema().columns().stream()
-                .map(Types.NestedField::name)
-                .collect(Collectors.toList()));
+    // Field IDs from the second replace's start schema are preserved during rebase
+    assertThat(afterSecondReplace.schema().asStruct())
+        .as("Table schema struct should match the original — field IDs are preserved on rebase")
+        .isEqualTo(original.schema().asStruct());
     assertUUIDsMatch(original, afterSecondReplace);
     assertFiles(afterSecondReplace, FILE_C);
   }
@@ -2785,14 +2781,10 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
     secondReplace.commitTransaction();
 
     Table afterSecondReplace = catalog.loadTable(TABLE);
-    // The second replace is rebased on the first replace, so new field IDs will be assigned
+    // Field IDs from the second replace's start schema are preserved during rebase
     assertThat(afterSecondReplace.schema().asStruct())
-        .as("Table schema should differ from the original schema due to rebased field IDs")
-        .isNotEqualTo(original.schema().asStruct());
-    assertThat(afterSecondReplace.schema().columns())
-        .as("Table schema should have the same column names as the replacement schema")
-        .extracting("name")
-        .containsExactly("id", "data");
+        .as("Table schema should match the replacement schema — field IDs are preserved on rebase")
+        .isEqualTo(REPLACE_SCHEMA.asStruct());
     assertUUIDsMatch(original, afterSecondReplace);
     assertFiles(afterSecondReplace, FILE_C);
   }
@@ -3034,6 +3026,55 @@ public abstract class CatalogTests<C extends Catalog & SupportsNamespaces> {
         .isEqualTo(TABLE_WRITE_ORDER.fields());
     assertUUIDsMatch(original, afterSecondReplace);
     assertFiles(afterSecondReplace, FILE_C);
+  }
+
+  @Test
+  public void testConcurrentReplaceTransactionFieldIdsPreserved() {
+    C catalog = catalog();
+
+    if (requiresNamespaceCreate()) {
+      catalog.createNamespace(NS);
+    }
+
+    // Create a table with OTHER_SCHEMA = {1: some_id}
+    catalog.buildTable(TABLE, OTHER_SCHEMA).create();
+
+    Table original = catalog.loadTable(TABLE);
+    assertThat(original.schema().columns()).hasSize(1);
+    assertThat(original.schema().findField("some_id").fieldId()).isEqualTo(1);
+
+    // Start a replace with SCHEMA = {id, data} — this gets fresh IDs {2: id, 3: data}
+    Transaction replace = catalog.buildTable(TABLE, SCHEMA).replaceTransaction();
+    replace.newFastAppend().appendFile(FILE_A).commit();
+
+    // Capture the field IDs that the replace transaction's schema was assigned
+    Table replaceView = replace.table();
+    int idFieldId = replaceView.schema().findField("id").fieldId();
+    int dataFieldId = replaceView.schema().findField("data").fieldId();
+
+    // Concurrently, another replace changes the schema to something different
+    Transaction concurrentReplace = catalog.buildTable(TABLE, SCHEMA).replaceTransaction();
+    concurrentReplace.commitTransaction();
+
+    // The concurrent replace changed the table schema and lastColumnId.
+    // Now commit the first replace — it must rebase and preserve field IDs.
+    replace.commitTransaction();
+
+    Table afterReplace = catalog.loadTable(TABLE);
+
+    // Field IDs must match what the replace transaction originally assigned, because
+    // data files appended during the transaction reference those IDs in their Parquet metadata.
+    assertThat(afterReplace.schema().findField("id").fieldId())
+        .as(
+            "id field ID must be preserved after rebase — data files reference this ID")
+        .isEqualTo(idFieldId);
+    assertThat(afterReplace.schema().findField("data").fieldId())
+        .as(
+            "data field ID must be preserved after rebase — data files reference this ID")
+        .isEqualTo(dataFieldId);
+
+    assertUUIDsMatch(original, afterReplace);
+    assertFiles(afterReplace, FILE_A);
   }
 
   @ParameterizedTest
