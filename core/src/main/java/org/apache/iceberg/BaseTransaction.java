@@ -471,7 +471,7 @@ public class BaseTransaction implements Transaction {
   private TableMetadata startingMetadataFor(TableMetadata refreshed) {
     return switch (type) {
       case REPLACE_TABLE, CREATE_OR_REPLACE_TABLE ->
-          refreshed.buildReplacement(
+          refreshed.buildReplacementPreservingIds(
               start.schema(),
               start.spec(),
               start.sortOrder(),
