@@ -58,7 +58,6 @@ import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
@@ -228,38 +227,19 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (tableKeyIdFromHMS != null) {
       checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
 
-      // Rebuild the encryption state from the refreshed metadata, but keep any keys the current
-      // manager already holds that are not yet in that metadata. Invariant: the manager holds a
-      // *superset* of current().encryptionKeys() -- the committed keys, plus keys minted by commits
-      // still in flight on this instance (e.g. snapshots staged in a transaction, or a snapshot
-      // committed concurrently and about to be rebased onto). Transaction `temp` ops read those
-      // snapshots' manifest lists through this shared manager, so dropping an in-flight key here
-      // would make an in-progress transaction fail to decrypt. SnapshotProducer persists each
-      // committed snapshot's key into its metadata, so committed keys always come back via
-      // current().encryptionKeys(); the merge below is only needed to preserve the
-      // not-yet-committed
-      // ones across this reset.
+      // Rebuild the encryption state to mirror the refreshed metadata. Encryption keys travel with
+      // the metadata: SnapshotProducer persists each snapshot's manifest-list key (and its key
+      // encryption key) into the metadata it commits, and re-mints/re-attaches on every retry and
+      // transaction rebase, so current().encryptionKeys() holds every key a committed snapshot
+      // needs. We therefore reset the manager to exactly those keys without merging from the old
+      // manager.
       synchronized (encryptionLock) {
         encryptionDekLength =
             (dekLengthFromHMS != null)
                 ? Integer.parseInt(dekLengthFromHMS)
                 : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-        encryptedKeys =
-            Optional.ofNullable(current().encryptionKeys())
-                .map(Lists::newLinkedList)
-                .orElseGet(Lists::newLinkedList);
-
-        if (encryptionManager != null) {
-          Set<String> keyIdsFromMetadata =
-              encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
-
-          for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
-            if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
-              encryptedKeys.add(keyFromEM);
-            }
-          }
-        }
+        encryptedKeys = Optional.ofNullable(current().encryptionKeys()).orElseGet(List::of);
 
         // Force re-creation of the encryption manager and file IO from the refreshed keys.
         encryptingFileIO = null;

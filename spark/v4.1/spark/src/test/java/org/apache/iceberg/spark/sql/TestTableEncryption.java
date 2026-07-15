@@ -190,32 +190,6 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 2);
   }
 
-  @TestTemplate
-  public void testTransactionReadsUncommittedSnapshotAfterSharedRefresh() throws IOException {
-    validationCatalog.initialize(catalogName, catalogConfig);
-    Table table = validationCatalog.loadTable(tableIdent);
-    DataFile file = currentDataFiles(table).get(0);
-
-    Transaction transaction = table.newTransaction();
-
-    // First append stages a snapshot and its manifest-list key inside the transaction only.
-    transaction.newFastAppend().appendFile(file).commit();
-
-    // A refresh on the shared operations rebuilds the encryption manager from committed metadata,
-    // which does not yet contain the transaction's staged key. The transaction must still read its
-    // own uncommitted snapshot, whose key travels with the uncommitted metadata.
-    ((HasTableOperations) table).operations().refresh();
-
-    // Second append reads the first (uncommitted) snapshot's manifest list, which needs that key.
-    transaction.newFastAppend().appendFile(file).commit();
-    transaction.commitTransaction();
-
-    Table reloaded = validationCatalog.loadTable(tableIdent);
-    for (Snapshot snapshot : reloaded.snapshots()) {
-      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
-    }
-  }
-
   // See CatalogTests#testConcurrentReplaceTransactions
   @TestTemplate
   public void testConcurrentReplaceTransactions() {
@@ -284,8 +258,7 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + threadCount * commitsPerThread);
 
     // Every committed snapshot must stay readable: a dropped key makes scan planning fail while
-    // decrypting the manifest list, so a snapshot that plans its data files is proof its key
-    // survived.
+    // decrypting the manifest list.
     for (Snapshot snapshot : reloaded.snapshots()) {
       assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     }

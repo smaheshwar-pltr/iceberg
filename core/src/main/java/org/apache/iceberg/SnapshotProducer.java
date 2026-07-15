@@ -117,7 +117,9 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private final Map<String, String> manifestWriterProps;
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
-  // captured in apply() and read in commit(), both on the committing thread
+  // Set in apply() and read in commit()/addEncryptionKeys() on the same committing thread --
+  // commit() runs apply() itself (single-threaded, no executor), so the write happens-before the
+  // read and no volatile is needed. (Unlike snapshotId above, which worker threads also read.)
   private EncryptionManager applyEncryptionManager;
   private TableMetadata base;
   private boolean stageOnly = false;
