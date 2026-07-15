@@ -86,15 +86,15 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final KeyManagementClient keyManagementClient;
   private final ClientPool<IMetaStoreClient, TException> metaClients;
 
-  // Concurrent commits on a shared table refresh and rebuild the encryption state. Writes to the
-  // fields below are published under encryptionLock; the manager and file IO are volatile so a
-  // built instance is read without locking. A dedicated lock (rather than synchronizing on `this`)
-  // keeps this internal publication from contending with any external code that locks the
-  // TableOperations instance.
+  // Concurrent commits on a shared table refresh and rebuild the encryption state. All access to
+  // the encryption fields below is guarded by encryptionLock -- a dedicated lock, not `this`, so
+  // this internal locking can't contend with external code that locks the TableOperations. Only
+  // tableKeyId is volatile, for the lock-free fast path in io()/encryption() (set once from null,
+  // never reset).
   private final Object encryptionLock = new Object();
   private volatile String tableKeyId;
-  private volatile EncryptionManager encryptionManager;
-  private volatile EncryptingFileIO encryptingFileIO;
+  private EncryptionManager encryptionManager;
+  private EncryptingFileIO encryptingFileIO;
   private int encryptionDekLength;
   private List<EncryptedKey> encryptedKeys = List.of();
 
@@ -133,20 +133,13 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return fileIO;
     }
 
-    // Read the volatile once so double-checked locking returns the instance we build here, not a
-    // later re-read that a concurrent refresh could have reset to null.
-    EncryptingFileIO io = encryptingFileIO;
-    if (io == null) {
-      synchronized (encryptionLock) {
-        io = encryptingFileIO;
-        if (io == null) {
-          io = EncryptingFileIO.combine(fileIO, encryption());
-          encryptingFileIO = io;
-        }
+    synchronized (encryptionLock) {
+      if (encryptingFileIO == null) {
+        encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
       }
-    }
 
-    return io;
+      return encryptingFileIO;
+    }
   }
 
   @Override
@@ -155,34 +148,27 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return PlaintextEncryptionManager.instance();
     }
 
-    // Read the volatile once so double-checked locking returns the instance we build here, not a
-    // later re-read that a concurrent refresh could have reset to null.
-    EncryptionManager manager = encryptionManager;
-    if (manager == null) {
-      synchronized (encryptionLock) {
-        manager = encryptionManager;
-        if (manager == null) {
-          Preconditions.checkArgument(
-              keyManagementClient != null,
-              "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-              CatalogProperties.ENCRYPTION_KMS_IMPL);
+    synchronized (encryptionLock) {
+      if (encryptionManager == null) {
+        Preconditions.checkArgument(
+            keyManagementClient != null,
+            "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+            CatalogProperties.ENCRYPTION_KMS_IMPL);
 
-          Map<String, String> encryptionProperties =
-              ImmutableMap.of(
-                  TableProperties.ENCRYPTION_TABLE_KEY,
-                  tableKeyId,
-                  TableProperties.ENCRYPTION_DEK_LENGTH,
-                  String.valueOf(encryptionDekLength));
+        Map<String, String> encryptionProperties =
+            ImmutableMap.of(
+                TableProperties.ENCRYPTION_TABLE_KEY,
+                tableKeyId,
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                String.valueOf(encryptionDekLength));
 
-          manager =
-              EncryptionUtil.createEncryptionManager(
-                  encryptedKeys, encryptionProperties, keyManagementClient);
-          encryptionManager = manager;
-        }
+        encryptionManager =
+            EncryptionUtil.createEncryptionManager(
+                encryptedKeys, encryptionProperties, keyManagementClient);
       }
-    }
 
-    return manager;
+      return encryptionManager;
+    }
   }
 
   @Override
