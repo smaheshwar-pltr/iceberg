@@ -237,6 +237,7 @@ public class TestTableEncryption extends CatalogTestBase {
         .commit();
 
     List<DataFile> initialFiles = currentDataFiles(table);
+    int initialSnapshotCount = (int) Streams.stream(table.snapshots()).count();
     DataFile file = initialFiles.get(0);
 
     int threadCount = 4;
@@ -254,8 +255,12 @@ public class TestTableEncryption extends CatalogTestBase {
               }
             });
 
-    // A dropped encryption key makes scan planning fail while decrypting the manifest list.
     Table reloaded = validationCatalog.loadTable(tableIdent);
+    assertThat(reloaded.snapshots())
+        .hasSize(initialSnapshotCount + threadCount * commitsPerThread);
+
+    // Every committed snapshot must stay decryptable: a dropped key makes scan planning fail while
+    // decrypting the manifest list.
     for (Snapshot snapshot : reloaded.snapshots()) {
       assertThatCode(() -> planSnapshot(reloaded, snapshot.snapshotId()))
           .doesNotThrowAnyException();
