@@ -35,11 +35,11 @@ public class TestStandardEncryptionManagerConcurrency {
   private static final int KEYS_PER_THREAD = 200;
 
   @Test
-  public void testConcurrentKeyMintingKeepsAllKeys() throws InterruptedException {
+  public void testConcurrentKeyAdditionsKeepAllKeys() throws InterruptedException {
     StandardEncryptionManager manager =
         (StandardEncryptionManager) EncryptionTestHelpers.createEncryptionManager();
 
-    List<String> mintedKeyIds = new CopyOnWriteArrayList<>();
+    List<String> addedKeyIds = new CopyOnWriteArrayList<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch done = new CountDownLatch(THREAD_COUNT);
@@ -52,8 +52,8 @@ public class TestStandardEncryptionManagerConcurrency {
               try {
                 start.await();
                 for (int i = 0; i < KEYS_PER_THREAD; i++) {
-                  mintedKeyIds.add(manager.addManifestListKeyMetadata(keyMetadata()));
-                  // Reading keys concurrently with minting must not throw or lose entries.
+                  addedKeyIds.add(manager.addManifestListKeyMetadata(keyMetadata()));
+                  // Reading keys concurrently with additions must not throw or lose entries.
                   manager.encryptionKeys().forEach((id, key) -> {});
                 }
               } catch (Throwable e) {
@@ -71,8 +71,8 @@ public class TestStandardEncryptionManagerConcurrency {
     }
 
     assertThat(failure.get()).isNull();
-    assertThat(mintedKeyIds).hasSize(THREAD_COUNT * KEYS_PER_THREAD);
-    assertThat(manager.encryptionKeys().keySet()).containsAll(mintedKeyIds);
+    assertThat(addedKeyIds).hasSize(THREAD_COUNT * KEYS_PER_THREAD);
+    assertThat(manager.encryptionKeys().keySet()).containsAll(addedKeyIds);
   }
 
   private static NativeEncryptionKeyMetadata keyMetadata() {

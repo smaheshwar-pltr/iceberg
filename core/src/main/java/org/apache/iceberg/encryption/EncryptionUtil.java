@@ -182,6 +182,18 @@ public class EncryptionUtil {
   }
 
   /**
+   * Returns the encryption key held by the manager for the given id, or {@code null} if the manager
+   * has no such key. Avoids copying the full key map when only one key is needed.
+   */
+  public static EncryptedKey encryptionKey(EncryptionManager em, String keyId) {
+    Preconditions.checkState(
+        em instanceof StandardEncryptionManager,
+        "Retrieving encryption keys requires a StandardEncryptionManager");
+    StandardEncryptionManager sem = (StandardEncryptionManager) em;
+    return sem.encryptionKey(keyId);
+  }
+
+  /**
    * Encrypts the key metadata for a manifest list.
    *
    * @param key key encryption key bytes

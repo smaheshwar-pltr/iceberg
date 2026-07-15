@@ -159,6 +159,10 @@ public class StandardEncryptionManager implements EncryptionManager {
     return ImmutableMap.copyOf(encryptionKeys);
   }
 
+  synchronized EncryptedKey encryptionKey(String keyId) {
+    return encryptionKeys.get(keyId);
+  }
+
   synchronized String keyEncryptionKeyID() {
     // Find unexpired key encryption key
     for (String keyID : encryptionKeys.keySet()) {

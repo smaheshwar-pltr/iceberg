@@ -24,7 +24,6 @@ import static org.apache.iceberg.TableProperties.COMMIT_MIN_RETRY_WAIT_MS;
 import static org.apache.iceberg.TableProperties.COMMIT_NUM_RETRIES;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.File;
@@ -191,6 +190,32 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 2);
   }
 
+  @TestTemplate
+  public void testTransactionReadsUncommittedSnapshotAfterSharedRefresh() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    DataFile file = currentDataFiles(table).get(0);
+
+    Transaction transaction = table.newTransaction();
+
+    // First append stages a snapshot and its manifest-list key inside the transaction only.
+    transaction.newFastAppend().appendFile(file).commit();
+
+    // A refresh on the shared operations rebuilds the encryption manager from committed metadata,
+    // which does not yet contain the transaction's staged key. The transaction must still read its
+    // own uncommitted snapshot, whose key travels with the uncommitted metadata.
+    ((HasTableOperations) table).operations().refresh();
+
+    // Second append reads the first (uncommitted) snapshot's manifest list, which needs that key.
+    transaction.newFastAppend().appendFile(file).commit();
+    transaction.commitTransaction();
+
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
+  }
+
   // See CatalogTests#testConcurrentReplaceTransactions
   @TestTemplate
   public void testConcurrentReplaceTransactions() {
@@ -224,7 +249,7 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
-  public void testConcurrentAppendsPreserveEncryptionKeys() {
+  public void testConcurrentAppendsPreserveEncryptionKeys() throws IOException {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
 
@@ -256,24 +281,23 @@ public class TestTableEncryption extends CatalogTestBase {
             });
 
     Table reloaded = validationCatalog.loadTable(tableIdent);
-    assertThat(reloaded.snapshots())
-        .hasSize(initialSnapshotCount + threadCount * commitsPerThread);
+    assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + threadCount * commitsPerThread);
 
-    // Every committed snapshot must stay decryptable: a dropped key makes scan planning fail while
-    // decrypting the manifest list.
+    // Every committed snapshot must stay readable: a dropped key makes scan planning fail while
+    // decrypting the manifest list, so a snapshot that plans its data files is proof its key
+    // survived.
     for (Snapshot snapshot : reloaded.snapshots()) {
-      assertThatCode(() -> planSnapshot(reloaded, snapshot.snapshotId()))
-          .doesNotThrowAnyException();
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     }
 
     assertThat(currentDataFiles(reloaded))
         .hasSize(initialFiles.size() + threadCount * commitsPerThread);
   }
 
-  private static void planSnapshot(Table table, long snapshotId) throws IOException {
+  private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
     try (CloseableIterable<FileScanTask> tasks =
         table.newScan().useSnapshot(snapshotId).planFiles()) {
-      tasks.forEach(task -> {});
+      return ImmutableList.copyOf(tasks);
     }
   }
 

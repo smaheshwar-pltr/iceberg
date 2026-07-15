@@ -590,12 +590,13 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
       return;
     }
 
-    Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(applyEncryptionManager);
-    EncryptedKey manifestListKey = keys.get(snapshot.keyId());
+    EncryptedKey manifestListKey =
+        EncryptionUtil.encryptionKey(applyEncryptionManager, snapshot.keyId());
     Preconditions.checkState(
         manifestListKey != null, "Missing manifest list key metadata with id %s", snapshot.keyId());
 
-    EncryptedKey keyEncryptionKey = keys.get(manifestListKey.encryptedById());
+    EncryptedKey keyEncryptionKey =
+        EncryptionUtil.encryptionKey(applyEncryptionManager, manifestListKey.encryptedById());
     Preconditions.checkState(
         keyEncryptionKey != null,
         "Missing key encryption key with id %s",

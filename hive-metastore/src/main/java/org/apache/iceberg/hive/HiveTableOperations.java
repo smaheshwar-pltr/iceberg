@@ -89,7 +89,9 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   // Concurrent commits on a shared table refresh and rebuild the encryption state. Writes to the
   // fields below are published under encryptionLock; the manager and file IO are volatile so a
-  // built instance is read without locking.
+  // built instance is read without locking. A dedicated lock (rather than synchronizing on `this`)
+  // keeps this internal publication from contending with any external code that locks the
+  // TableOperations instance.
   private final Object encryptionLock = new Object();
   private volatile String tableKeyId;
   private volatile EncryptionManager encryptionManager;
@@ -132,6 +134,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return fileIO;
     }
 
+    // Read the volatile once so double-checked locking returns the instance we build here, not a
+    // later re-read that a concurrent refresh could have reset to null.
     EncryptingFileIO io = encryptingFileIO;
     if (io == null) {
       synchronized (encryptionLock) {
@@ -152,6 +156,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return PlaintextEncryptionManager.instance();
     }
 
+    // Read the volatile once so double-checked locking returns the instance we build here, not a
+    // later re-read that a concurrent refresh could have reset to null.
     EncryptionManager manager = encryptionManager;
     if (manager == null) {
       synchronized (encryptionLock) {
@@ -222,6 +228,17 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (tableKeyIdFromHMS != null) {
       checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
 
+      // Rebuild the encryption state from the refreshed metadata, but keep any keys the current
+      // manager already holds that are not yet in that metadata. Invariant: the manager holds a
+      // *superset* of current().encryptionKeys() -- the committed keys, plus keys minted by commits
+      // still in flight on this instance (e.g. snapshots staged in a transaction, or a snapshot
+      // committed concurrently and about to be rebased onto). Transaction `temp` ops read those
+      // snapshots' manifest lists through this shared manager, so dropping an in-flight key here
+      // would make an in-progress transaction fail to decrypt. SnapshotProducer persists each
+      // committed snapshot's key into its metadata, so committed keys always come back via
+      // current().encryptionKeys(); the merge below is only needed to preserve the
+      // not-yet-committed
+      // ones across this reset.
       synchronized (encryptionLock) {
         encryptionDekLength =
             (dekLengthFromHMS != null)
@@ -244,7 +261,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
           }
         }
 
-        // Force re-creation of encryption manager with updated keys
+        // Force re-creation of the encryption manager and file IO from the refreshed keys.
         encryptingFileIO = null;
         encryptionManager = null;
         tableKeyId = tableKeyIdFromHMS;
@@ -256,19 +273,18 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
-    final TableMetadata tableMetadata = metadata;
     encryptionPropsFromMetadata(metadata.properties());
 
-    String newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
+    String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);
 
-    boolean hiveEngineEnabled = hiveEngineEnabled(tableMetadata, conf);
+    boolean hiveEngineEnabled = hiveEngineEnabled(metadata, conf);
     boolean keepHiveStats = conf.getBoolean(ConfigProperties.KEEP_HIVE_STATS, false);
 
     BaseMetastoreOperations.CommitStatus commitStatus =
         BaseMetastoreOperations.CommitStatus.FAILURE;
     boolean updateHiveTable = false;
 
-    HiveLock lock = lockObject(base != null ? base : tableMetadata);
+    HiveLock lock = lockObject(base != null ? base : metadata);
     try {
       lock.lock();
 
@@ -292,14 +308,14 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       } else {
         tbl =
             newHmsTable(
-                tableMetadata.property(HiveCatalog.HMS_TABLE_OWNER, HiveHadoopUtil.currentUser()));
+                metadata.property(HiveCatalog.HMS_TABLE_OWNER, HiveHadoopUtil.currentUser()));
         LOG.debug("Committing new table: {}", fullName);
       }
 
       tbl.setSd(
           HiveOperationsBase.storageDescriptor(
-              tableMetadata.schema(),
-              tableMetadata.location(),
+              metadata.schema(),
+              metadata.location(),
               hiveEngineEnabled)); // set to pickup any schema changes
 
       String metadataLocation = tbl.getParameters().get(METADATA_LOCATION_PROP);
@@ -315,7 +331,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       if (base != null) {
         removedProps =
             base.properties().keySet().stream()
-                .filter(key -> !tableMetadata.properties().containsKey(key))
+                .filter(key -> !metadata.properties().containsKey(key))
                 .collect(Collectors.toSet());
 
         Preconditions.checkArgument(
@@ -332,7 +348,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       HMSTablePropertyHelper.updateHmsTableForIcebergTable(
           newMetadataLocation,
           tbl,
-          tableMetadata,
+          metadata,
           removedProps,
           hiveEngineEnabled,
           maxHiveTablePropertySize,
@@ -389,7 +405,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
           // issue for example, and triggers this exception. So we need double-check to make sure
           // this is really a concurrent modification. Hitting this exception means no pending
           // requests, if any, can succeed later, so it's safe to check status in strict mode
-          commitStatus = checkCommitStatusStrict(newMetadataLocation, tableMetadata);
+          commitStatus = checkCommitStatusStrict(newMetadataLocation, metadata);
           if (commitStatus == BaseMetastoreOperations.CommitStatus.FAILURE) {
             throw new CommitFailedException(
                 e, "The table %s.%s has been modified concurrently", database, tableName);
@@ -400,7 +416,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
               database,
               tableName,
               e);
-          commitStatus = checkCommitStatus(newMetadataLocation, tableMetadata);
+          commitStatus = checkCommitStatus(newMetadataLocation, metadata);
         }
 
         switch (commitStatus) {
