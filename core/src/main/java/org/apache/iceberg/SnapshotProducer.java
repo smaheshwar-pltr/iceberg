@@ -117,9 +117,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private final Map<String, String> manifestWriterProps;
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
-  // Set in apply() and read in commit()/addEncryptionKeys() on the same committing thread --
-  // commit() runs apply() itself (single-threaded, no executor), so the write happens-before the
-  // read and no volatile is needed. (Unlike snapshotId above, which worker threads also read.)
+  // The encryption manager captured while writing the manifest list in apply(), read
+  // back in commit() (addEncryptionKeys) to persist that snapshot's key. Must be the
+  // same instance that minted the key -- re-deriving via ops.encryption() in commit()
+  // could return a different manager after a concurrent refresh. apply() and commit()
+  // run on the same thread (commit() calls apply()), so no volatile is needed. Mirrors
+  // how apply() also populates the manifestLists and base fields that commit() reads.
   private EncryptionManager applyEncryptionManager;
   private TableMetadata base;
   private boolean stageOnly = false;
