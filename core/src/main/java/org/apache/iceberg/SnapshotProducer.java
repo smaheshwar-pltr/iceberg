@@ -121,7 +121,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private final Map<String, String> manifestWriterProps;
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
-  private EncryptionManager applyEncryption;
+  private EncryptionManager applyEncryptionManager;
   private TableMetadata base;
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
@@ -312,12 +312,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
-    this.applyEncryption = ops.encryption();
+    this.applyEncryptionManager = ops.encryption();
     ManifestListWriter writer =
         ManifestLists.write(
             ops.current().formatVersion(),
             manifestList,
-            applyEncryption,
+            applyEncryptionManager,
             snapshotId(),
             parentSnapshotId,
             sequenceNumber,
@@ -509,12 +509,13 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
                   if (base.snapshot(newSnapshot.snapshotId()) != null) {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
-                  } else if (stageOnly) {
-                    addEncryptionKeys(update, newSnapshot);
-                    update.addSnapshot(newSnapshot);
                   } else {
                     addEncryptionKeys(update, newSnapshot);
-                    update.setBranchSnapshot(newSnapshot, targetBranch);
+                    if (stageOnly) {
+                      update.addSnapshot(newSnapshot);
+                    } else {
+                      update.setBranchSnapshot(newSnapshot, targetBranch);
+                    }
                   }
 
                   TableMetadata updated = update.build();
@@ -583,11 +584,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   }
 
   private void addEncryptionKeys(TableMetadata.Builder update, Snapshot snapshot) {
-    if (snapshot.keyId() == null || !(applyEncryption instanceof StandardEncryptionManager)) {
+    if (snapshot.keyId() == null
+        || !(applyEncryptionManager instanceof StandardEncryptionManager)) {
       return;
     }
 
-    Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(applyEncryption);
+    Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(applyEncryptionManager);
     EncryptedKey manifestListKey = keys.get(snapshot.keyId());
     Preconditions.checkState(
         manifestListKey != null, "Missing manifest list key metadata with id %s", snapshot.keyId());
