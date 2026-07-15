@@ -121,6 +121,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private final Map<String, String> manifestWriterProps;
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
+  // captured in apply() and read in commit(), both on the committing thread
   private EncryptionManager applyEncryptionManager;
   private TableMetadata base;
   private boolean stageOnly = false;

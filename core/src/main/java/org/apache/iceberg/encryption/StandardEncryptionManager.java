@@ -31,6 +31,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
@@ -116,7 +117,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return Iterables.transform(encrypted, this::decrypt);
   }
 
-  private LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
+  private synchronized LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
     if (this.unwrappedKeyCache == null) {
       this.unwrappedKeyCache =
           Caffeine.newBuilder()
@@ -155,7 +156,7 @@ public class StandardEncryptionManager implements EncryptionManager {
   }
 
   synchronized Map<String, EncryptedKey> encryptionKeys() {
-    return SerializableMap.copyOf(encryptionKeys).immutableMap();
+    return ImmutableMap.copyOf(encryptionKeys);
   }
 
   synchronized String keyEncryptionKeyID() {

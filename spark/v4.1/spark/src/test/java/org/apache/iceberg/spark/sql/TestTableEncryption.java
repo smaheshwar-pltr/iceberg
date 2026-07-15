@@ -228,6 +228,7 @@ public class TestTableEncryption extends CatalogTestBase {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
 
+    // High retry ceiling so concurrent commits contending on one table lock do not exhaust retries.
     table
         .updateProperties()
         .set(COMMIT_NUM_RETRIES, "500")
