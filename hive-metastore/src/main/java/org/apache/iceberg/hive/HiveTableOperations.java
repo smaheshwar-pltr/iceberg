@@ -47,7 +47,6 @@ import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -88,11 +87,14 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final KeyManagementClient keyManagementClient;
   private final ClientPool<IMetaStoreClient, TException> metaClients;
 
-  private EncryptionManager encryptionManager;
-  private EncryptingFileIO encryptingFileIO;
-  private String tableKeyId;
+  // Concurrent commits on a shared table refresh and rebuild the encryption state. Writes to the
+  // fields below are published under encryptionLock; the manager and file IO are volatile so a
+  // built instance is read without locking.
+  private final Object encryptionLock = new Object();
+  private volatile String tableKeyId;
+  private volatile EncryptionManager encryptionManager;
+  private volatile EncryptingFileIO encryptingFileIO;
   private int encryptionDekLength;
-
   private List<EncryptedKey> encryptedKeys = List.of();
 
   protected HiveTableOperations(
@@ -131,7 +133,11 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     }
 
     if (encryptingFileIO == null) {
-      encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
+      synchronized (encryptionLock) {
+        if (encryptingFileIO == null) {
+          encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
+        }
+      }
     }
 
     return encryptingFileIO;
@@ -139,28 +145,30 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   @Override
   public EncryptionManager encryption() {
-    if (encryptionManager != null) {
-      return encryptionManager;
+    if (tableKeyId == null) {
+      return PlaintextEncryptionManager.instance();
     }
 
-    if (tableKeyId != null) {
+    if (encryptionManager == null) {
       Preconditions.checkArgument(
           keyManagementClient != null,
           "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
           CatalogProperties.ENCRYPTION_KMS_IMPL);
 
-      Map<String, String> encryptionProperties =
-          ImmutableMap.of(
-              TableProperties.ENCRYPTION_TABLE_KEY,
-              tableKeyId,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              String.valueOf(encryptionDekLength));
+      synchronized (encryptionLock) {
+        if (encryptionManager == null) {
+          Map<String, String> encryptionProperties =
+              ImmutableMap.of(
+                  TableProperties.ENCRYPTION_TABLE_KEY,
+                  tableKeyId,
+                  TableProperties.ENCRYPTION_DEK_LENGTH,
+                  String.valueOf(encryptionDekLength));
 
-      encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              encryptedKeys, encryptionProperties, keyManagementClient);
-    } else {
-      return PlaintextEncryptionManager.instance();
+          encryptionManager =
+              EncryptionUtil.createEncryptionManager(
+                  encryptedKeys, encryptionProperties, keyManagementClient);
+        }
+      }
     }
 
     return encryptionManager;
@@ -208,31 +216,33 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (tableKeyIdFromHMS != null) {
       checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
 
-      tableKeyId = tableKeyIdFromHMS;
-      encryptionDekLength =
-          (dekLengthFromHMS != null)
-              ? Integer.parseInt(dekLengthFromHMS)
-              : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
+      synchronized (encryptionLock) {
+        encryptionDekLength =
+            (dekLengthFromHMS != null)
+                ? Integer.parseInt(dekLengthFromHMS)
+                : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-      encryptedKeys =
-          Optional.ofNullable(current().encryptionKeys())
-              .map(Lists::newLinkedList)
-              .orElseGet(Lists::newLinkedList);
+        encryptedKeys =
+            Optional.ofNullable(current().encryptionKeys())
+                .map(Lists::newLinkedList)
+                .orElseGet(Lists::newLinkedList);
 
-      if (encryptionManager != null) {
-        Set<String> keyIdsFromMetadata =
-            encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
+        if (encryptionManager != null) {
+          Set<String> keyIdsFromMetadata =
+              encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
 
-        for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
-          if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
-            encryptedKeys.add(keyFromEM);
+          for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
+            if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
+              encryptedKeys.add(keyFromEM);
+            }
           }
         }
-      }
 
-      // Force re-creation of encryption manager with updated keys
-      encryptingFileIO = null;
-      encryptionManager = null;
+        // Force re-creation of encryption manager with updated keys
+        encryptingFileIO = null;
+        encryptionManager = null;
+        tableKeyId = tableKeyIdFromHMS;
+      }
     }
   }
 
@@ -240,25 +250,10 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
-    final TableMetadata tableMetadata;
+    final TableMetadata tableMetadata = metadata;
     encryptionPropsFromMetadata(metadata.properties());
 
-    String newMetadataLocation;
-    EncryptionManager encrManager = encryption();
-    if (encrManager instanceof StandardEncryptionManager) {
-      // Add new encryption keys to the metadata
-      TableMetadata.Builder builder = TableMetadata.buildFrom(metadata);
-      for (Map.Entry<String, EncryptedKey> entry :
-          EncryptionUtil.encryptionKeys(encrManager).entrySet()) {
-        builder.addEncryptionKey(entry.getValue());
-      }
-
-      tableMetadata = builder.build();
-    } else {
-      tableMetadata = metadata;
-    }
-
-    newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
+    String newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
 
     boolean hiveEngineEnabled = hiveEngineEnabled(tableMetadata, conf);
     boolean keepHiveStats = conf.getBoolean(ConfigProperties.KEEP_HIVE_STATS, false);
@@ -558,16 +553,18 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   private void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
-    if (tableKeyId == null) {
-      tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
-    }
+    synchronized (encryptionLock) {
+      if (tableKeyId == null) {
+        tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
+      }
 
-    if (tableKeyId != null && encryptionDekLength <= 0) {
-      encryptionDekLength =
-          PropertyUtil.propertyAsInt(
-              tableProperties,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+      if (tableKeyId != null && encryptionDekLength <= 0) {
+        encryptionDekLength =
+            PropertyUtil.propertyAsInt(
+                tableProperties,
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+      }
     }
   }
 

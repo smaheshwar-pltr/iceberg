@@ -44,6 +44,7 @@ public class StandardEncryptionManager implements EncryptionManager {
 
   private final String tableKeyId;
   private final int dataKeyLength;
+  // Commits can run concurrently on a shared manager, so access is synchronized.
   private final Map<String, EncryptedKey> encryptionKeys;
   private final KeyManagementClient kmsClient;
 
@@ -153,11 +154,11 @@ public class StandardEncryptionManager implements EncryptionManager {
     return kmsClient.unwrapKey(wrappedSecretKey, tableKeyId);
   }
 
-  Map<String, EncryptedKey> encryptionKeys() {
-    return encryptionKeys;
+  synchronized Map<String, EncryptedKey> encryptionKeys() {
+    return SerializableMap.copyOf(encryptionKeys).immutableMap();
   }
 
-  String keyEncryptionKeyID() {
+  synchronized String keyEncryptionKeyID() {
     // Find unexpired key encryption key
     for (String keyID : encryptionKeys.keySet()) {
       EncryptedKey key = encryptionKeys.get(keyID);
@@ -193,7 +194,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return System.currentTimeMillis() + testTimeShift;
   }
 
-  ByteBuffer encryptedByKey(String manifestListKeyID) {
+  synchronized ByteBuffer encryptedByKey(String manifestListKeyID) {
     EncryptedKey encryptedKeyMetadata = encryptionKeys.get(manifestListKeyID);
 
     Preconditions.checkState(
@@ -209,7 +210,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return unwrappedKeyCache().get(encryptedKeyMetadata.encryptedById());
   }
 
-  public String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
+  public synchronized String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
     String manifestListKeyID = generateKeyId();
     String keyEncryptionKeyID = keyEncryptionKeyID();
     String keyEncryptionKeyTimestamp =

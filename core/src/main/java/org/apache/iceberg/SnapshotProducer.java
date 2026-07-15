@@ -48,8 +48,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -117,6 +121,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private final Map<String, String> manifestWriterProps;
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
+  private EncryptionManager applyEncryption;
   private TableMetadata base;
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
@@ -307,11 +312,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
+    this.applyEncryption = ops.encryption();
     ManifestListWriter writer =
         ManifestLists.write(
             ops.current().formatVersion(),
             manifestList,
-            ops.encryption(),
+            applyEncryption,
             snapshotId(),
             parentSnapshotId,
             sequenceNumber,
@@ -504,8 +510,10 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
                   } else if (stageOnly) {
+                    addEncryptionKeys(update, newSnapshot);
                     update.addSnapshot(newSnapshot);
                   } else {
+                    addEncryptionKeys(update, newSnapshot);
                     update.setBranchSnapshot(newSnapshot, targetBranch);
                   }
 
@@ -572,6 +580,26 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
     } catch (Throwable e) {
       LOG.warn("Failed to notify event listeners", e);
     }
+  }
+
+  private void addEncryptionKeys(TableMetadata.Builder update, Snapshot snapshot) {
+    if (snapshot.keyId() == null || !(applyEncryption instanceof StandardEncryptionManager)) {
+      return;
+    }
+
+    Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(applyEncryption);
+    EncryptedKey manifestListKey = keys.get(snapshot.keyId());
+    Preconditions.checkState(
+        manifestListKey != null, "Missing manifest list key metadata with id %s", snapshot.keyId());
+
+    EncryptedKey keyEncryptionKey = keys.get(manifestListKey.encryptedById());
+    Preconditions.checkState(
+        keyEncryptionKey != null,
+        "Missing key encryption key with id %s",
+        manifestListKey.encryptedById());
+
+    update.addEncryptionKey(manifestListKey);
+    update.addEncryptionKey(keyEncryptionKey);
   }
 
   private void notifyListeners() {
