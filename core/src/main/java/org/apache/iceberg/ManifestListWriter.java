@@ -36,8 +36,10 @@ abstract class ManifestListWriter implements FileAppender<ManifestFile> {
   private final StandardEncryptionManager standardEncryptionManager;
   private final NativeEncryptionKeyMetadata manifestListKeyMetadata;
   private final OutputFile outputFile;
-  // Keys minted for this manifest list, cached so repeated toManifestListFile() calls are
-  // idempotent and so the caller can persist them into table metadata. Populated on first mint.
+  // Keys minted for this manifest list, stashed on first mint so the caller (via
+  // manifestListKeys()) can persist them into table metadata, and so a repeated
+  // toManifestListFile()
+  // call returns the same key id it did the first time rather than minting a divergent one.
   private StandardEncryptionManager.MintedKeys lazyManifestListKeys = null;
 
   private ManifestListWriter(

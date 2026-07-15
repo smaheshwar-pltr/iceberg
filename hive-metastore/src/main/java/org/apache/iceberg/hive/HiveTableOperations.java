@@ -22,7 +22,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
@@ -87,16 +86,19 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final KeyManagementClient keyManagementClient;
   private final ClientPool<IMetaStoreClient, TException> metaClients;
 
-  // Encryption state is derived from table metadata on demand. tableKeyId is the only mutable
-  // field:
-  // it is set once (from null) the first time an encrypted table's key id is observed, and gates
-  // the
-  // lock-free plaintext fast path in io()/encryption(). It is volatile for safe publication. The
-  // encryption manager itself is immutable and rebuilt cheaply from a metadata's encryption keys,
-  // so
-  // it needs no field, lock, or refresh bookkeeping -- keys live only in metadata.
+  // Encryption state is derived from table metadata on demand. tableKeyId is set once (from null)
+  // the first time an encrypted table's key id is observed and gates the lock-free plaintext fast
+  // path in io()/encryption(); it is volatile for safe publication and never reset. encryptionDek-
+  // Length is likewise effectively write-once from the trusted HMS value. The encryption manager is
+  // immutable and derived from a metadata's keys -- no refresh bookkeeping is needed because keys
+  // live only in metadata. It is memoized by metadata identity (cachedManager) so repeated io()/
+  // encryption() calls on the same metadata reuse one manager (and its KMS unwrap cache) instead of
+  // rebuilding; a new metadata (refresh/commit/transaction rebase) transparently rebuilds it.
   private volatile String tableKeyId;
   private volatile int encryptionDekLength;
+  private final Object managerCacheLock = new Object();
+  private TableMetadata cachedManagerMetadata;
+  private EncryptionManager cachedManager;
 
   protected HiveTableOperations(
       Configuration conf,
@@ -150,17 +152,32 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   /**
-   * Builds an {@link EncryptionManager} from the given metadata's encryption keys. Keys live only
-   * in table metadata, so the manager is immutable and derived on demand -- there is no shared
-   * mutable state to guard. Callers pass the metadata whose keys the manager must resolve: {@code
-   * current()} for a committed table, or the uncommitted metadata for staged transaction
-   * operations.
+   * Returns an {@link EncryptionManager} sourced from the given metadata's encryption keys. Keys
+   * live only in table metadata, so the manager is immutable and derived from that metadata.
+   * Callers pass the metadata whose keys the manager must resolve: {@code current()} for a
+   * committed table, or the uncommitted metadata for staged transaction operations.
+   *
+   * <p>Managers are memoized by metadata identity so that repeated calls with the same metadata
+   * reuse a single manager (and its KMS unwrap cache) rather than rebuilding it. {@code current()}
+   * returns a stable metadata instance between refreshes, so this collapses the common case to one
+   * construction per metadata version.
    */
   private EncryptionManager encryption(TableMetadata metadata) {
     if (tableKeyId == null) {
       return PlaintextEncryptionManager.instance();
     }
 
+    synchronized (managerCacheLock) {
+      if (cachedManagerMetadata != metadata) {
+        cachedManager = createEncryptionManager(metadata);
+        cachedManagerMetadata = metadata;
+      }
+
+      return cachedManager;
+    }
+  }
+
+  private EncryptionManager createEncryptionManager(TableMetadata metadata) {
     Preconditions.checkArgument(
         keyManagementClient != null,
         "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
@@ -173,8 +190,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             TableProperties.ENCRYPTION_DEK_LENGTH,
             String.valueOf(encryptionDekLength));
 
-    List<EncryptedKey> keys =
-        Optional.ofNullable(metadata).map(TableMetadata::encryptionKeys).orElseGet(List::of);
+    List<EncryptedKey> keys = metadata == null ? List.of() : metadata.encryptionKeys();
 
     return EncryptionUtil.createEncryptionManager(keys, encryptionProperties, keyManagementClient);
   }

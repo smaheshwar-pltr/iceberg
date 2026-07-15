@@ -23,6 +23,7 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -109,7 +110,9 @@ public class StandardEncryptionManager implements EncryptionManager {
       }
     }
 
-    this.encryptionKeys = SerializableMap.copyOf(keyMap);
+    // Unmodifiable view over a serializable map: immutable to callers (so the manager's key set
+    // cannot be mutated through encryptionKeys()) yet still serializable to Spark executors.
+    this.encryptionKeys = Collections.unmodifiableMap(SerializableMap.copyOf(keyMap));
   }
 
   @Override
@@ -132,31 +135,23 @@ public class StandardEncryptionManager implements EncryptionManager {
     return Iterables.transform(encrypted, this::decrypt);
   }
 
-  private LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
+  private synchronized LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
     if (this.unwrappedKeyCache == null) {
-      synchronized (this) {
-        if (this.unwrappedKeyCache == null) {
-          this.unwrappedKeyCache =
-              Caffeine.newBuilder()
-                  .expireAfterWrite(1, TimeUnit.HOURS)
-                  .build(
-                      keyId ->
-                          kmsClient.unwrapKey(
-                              encryptionKeys.get(keyId).encryptedKeyMetadata(), tableKeyId));
-        }
-      }
+      this.unwrappedKeyCache =
+          Caffeine.newBuilder()
+              .expireAfterWrite(1, TimeUnit.HOURS)
+              .build(
+                  keyId ->
+                      kmsClient.unwrapKey(
+                          encryptionKeys.get(keyId).encryptedKeyMetadata(), tableKeyId));
     }
 
     return unwrappedKeyCache;
   }
 
-  private SecureRandom workerRNG() {
+  private synchronized SecureRandom workerRNG() {
     if (this.lazyRNG == null) {
-      synchronized (this) {
-        if (this.lazyRNG == null) {
-          this.lazyRNG = new SecureRandom();
-        }
-      }
+      this.lazyRNG = new SecureRandom();
     }
 
     return lazyRNG;
