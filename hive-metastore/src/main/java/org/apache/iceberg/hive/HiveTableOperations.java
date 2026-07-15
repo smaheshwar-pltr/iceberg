@@ -132,15 +132,18 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return fileIO;
     }
 
-    if (encryptingFileIO == null) {
+    EncryptingFileIO io = encryptingFileIO;
+    if (io == null) {
       synchronized (encryptionLock) {
-        if (encryptingFileIO == null) {
-          encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
+        io = encryptingFileIO;
+        if (io == null) {
+          io = EncryptingFileIO.combine(fileIO, encryption());
+          encryptingFileIO = io;
         }
       }
     }
 
-    return encryptingFileIO;
+    return io;
   }
 
   @Override
@@ -149,14 +152,16 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return PlaintextEncryptionManager.instance();
     }
 
-    if (encryptionManager == null) {
-      Preconditions.checkArgument(
-          keyManagementClient != null,
-          "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-          CatalogProperties.ENCRYPTION_KMS_IMPL);
-
+    EncryptionManager manager = encryptionManager;
+    if (manager == null) {
       synchronized (encryptionLock) {
-        if (encryptionManager == null) {
+        manager = encryptionManager;
+        if (manager == null) {
+          Preconditions.checkArgument(
+              keyManagementClient != null,
+              "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+              CatalogProperties.ENCRYPTION_KMS_IMPL);
+
           Map<String, String> encryptionProperties =
               ImmutableMap.of(
                   TableProperties.ENCRYPTION_TABLE_KEY,
@@ -164,14 +169,15 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
                   TableProperties.ENCRYPTION_DEK_LENGTH,
                   String.valueOf(encryptionDekLength));
 
-          encryptionManager =
+          manager =
               EncryptionUtil.createEncryptionManager(
                   encryptedKeys, encryptionProperties, keyManagementClient);
+          encryptionManager = manager;
         }
       }
     }
 
-    return encryptionManager;
+    return manager;
   }
 
   @Override
