@@ -35,6 +35,8 @@ import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeStampMicroTZVector;
 import org.apache.arrow.vector.TimeStampMicroVector;
@@ -42,8 +44,6 @@ import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampNanoVector;
 import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.ValueVector;
-import org.apache.arrow.vector.VarBinaryVector;
-import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.util.DecimalUtility;
@@ -201,10 +201,10 @@ public class GenericArrowVectorAccessorFactory<
       return new DoubleAccessor<>((Float8Vector) vector);
     } else if (vector instanceof DecimalVector) {
       return new DecimalAccessor<>((DecimalVector) vector, decimalFactorySupplier.get());
-    } else if (vector instanceof VarCharVector) {
-      return new StringAccessor<>((VarCharVector) vector, stringFactorySupplier.get());
-    } else if (vector instanceof VarBinaryVector) {
-      return new BinaryAccessor<>((VarBinaryVector) vector);
+    } else if (vector instanceof LargeVarCharVector) {
+      return new StringAccessor<>((LargeVarCharVector) vector, stringFactorySupplier.get());
+    } else if (vector instanceof LargeVarBinaryVector) {
+      return new BinaryAccessor<>((LargeVarBinaryVector) vector);
     } else if (vector instanceof DateDayVector) {
       return new DateAccessor<>((DateDayVector) vector);
     } else if (vector instanceof TimeStampMicroTZVector) {
@@ -397,10 +397,10 @@ public class GenericArrowVectorAccessorFactory<
           DecimalT, Utf8StringT, ArrayT, ChildVectorT extends AutoCloseable>
       extends ArrowVectorAccessor<DecimalT, Utf8StringT, ArrayT, ChildVectorT> {
 
-    private final VarCharVector vector;
+    private final LargeVarCharVector vector;
     private final StringFactory<Utf8StringT> stringFactory;
 
-    StringAccessor(VarCharVector vector, StringFactory<Utf8StringT> stringFactory) {
+    StringAccessor(LargeVarCharVector vector, StringFactory<Utf8StringT> stringFactory) {
       super(vector);
       this.vector = vector;
       this.stringFactory = stringFactory;
@@ -444,16 +444,28 @@ public class GenericArrowVectorAccessorFactory<
           DecimalT, Utf8StringT, ArrayT, ChildVectorT extends AutoCloseable>
       extends ArrowVectorAccessor<DecimalT, Utf8StringT, ArrayT, ChildVectorT> {
 
-    private final VarBinaryVector vector;
+    private final LargeVarBinaryVector vector;
 
-    BinaryAccessor(VarBinaryVector vector) {
+    BinaryAccessor(LargeVarBinaryVector vector) {
       super(vector);
       this.vector = vector;
     }
 
     @Override
     public final byte[] getBinary(int rowId) {
-      return vector.get(rowId);
+      // Read straight from the offset and data buffers rather than calling
+      // LargeVarBinaryVector#get. Unlike VarBinaryVector, the large-vector get always consults the
+      // Arrow validity buffer, but Iceberg tracks nulls via NullabilityHolder and does not maintain
+      // that buffer when null checking is disabled. Null rows are already filtered out by the
+      // caller (see IcebergArrowColumnVector#getBinary), so a direct read is both correct and
+      // avoids that validity check.
+      long start =
+          vector.getOffsetBuffer().getLong((long) rowId * LargeVarBinaryVector.OFFSET_WIDTH);
+      long end =
+          vector.getOffsetBuffer().getLong((long) (rowId + 1) * LargeVarBinaryVector.OFFSET_WIDTH);
+      byte[] result = new byte[(int) (end - start)];
+      vector.getDataBuffer().getBytes(start, result, 0, result.length);
+      return result;
     }
   }
 
@@ -812,7 +824,7 @@ public class GenericArrowVectorAccessorFactory<
     Class<Utf8StringT> getGenericClass();
 
     /** Create a UTF8 String from the row value in the arrow vector. */
-    Utf8StringT ofRow(VarCharVector vector, int rowId);
+    Utf8StringT ofRow(LargeVarCharVector vector, int rowId);
 
     /** Create a UTF8 String from the row value in the FixedSizeBinaryVector vector. */
     default Utf8StringT ofRow(FixedSizeBinaryVector vector, int rowId) {

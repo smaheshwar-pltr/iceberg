@@ -20,7 +20,7 @@ package org.apache.iceberg.arrow.vectorized.parquet;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import org.apache.arrow.vector.BaseVariableWidthVector;
+import org.apache.arrow.vector.BaseLargeVariableWidthVector;
 import org.apache.arrow.vector.BitVectorHelper;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
@@ -142,7 +142,7 @@ public class VectorizedDictionaryEncodedParquetValuesReader
     protected void nextVal(
         FieldVector vector, Dictionary dict, int idx, int currentVal, int typeWidth) {
       ByteBuffer buffer = dict.decodeToBinary(currentVal).toByteBuffer();
-      ((BaseVariableWidthVector) vector)
+      ((BaseLargeVariableWidthVector) vector)
           .setSafe(idx, buffer, buffer.position(), buffer.remaining());
     }
   }
