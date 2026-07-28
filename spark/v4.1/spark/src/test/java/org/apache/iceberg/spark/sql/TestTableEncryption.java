@@ -274,6 +274,31 @@ public class TestTableEncryption extends CatalogTestBase {
     }
   }
 
+  
+  // A catalog can hand the same Table instance to multiple callers, so a transaction and direct
+  // commits may be interleaved on one shared instance. Every resulting snapshot must stay readable.
+  @TestTemplate
+  public void testTransactionInterleavedWithDirectCommitOnSharedTable() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    DataFile file = currentDataFiles(table).get(0);
+
+    Transaction transaction = table.newTransaction();
+    transaction.newFastAppend().appendFile(file).commit();
+
+    // A direct commit on the same instance lands between the transaction's operations.
+    table.newFastAppend().appendFile(file).commit();
+
+    transaction.newFastAppend().appendFile(file).commit();
+    transaction.commitTransaction();
+
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
+  }
+
   @TestTemplate
   public void testInsertAndDelete() {
     sql("INSERT INTO %s VALUES (4, 'd', 4.0), (5, 'e', 5.0), (6, 'f', float('NaN'))", tableName);

@@ -58,6 +58,7 @@ import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
@@ -213,19 +214,25 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (tableKeyIdFromHMS != null) {
       checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
 
-      // Rebuild the encryption state to mirror the refreshed metadata. Encryption keys travel with
-      // the metadata: SnapshotProducer persists each snapshot's manifest-list key (and its key
-      // encryption key) into the metadata it commits, and re-mints/re-attaches on every retry and
-      // transaction rebase, so current().encryptionKeys() holds every key a committed snapshot
-      // needs. We therefore reset the manager to exactly those keys without merging from the old
-      // manager.
       synchronized (encryptionLock) {
         encryptionDekLength =
             (dekLengthFromHMS != null)
                 ? Integer.parseInt(dekLengthFromHMS)
                 : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-        encryptedKeys = Optional.ofNullable(current().encryptionKeys()).orElseGet(List::of);
+        // Carry over keys minted by not-yet-committed operations on this shared instance (e.g. a
+        // staged transaction) alongside the refreshed committed keys, so in-flight reads can still
+        // decrypt.
+        List<EncryptedKey> refreshedKeys =
+            Lists.newArrayList(Optional.ofNullable(current().encryptionKeys()).orElseGet(List::of));
+        if (encryptionManager != null) {
+          Set<String> committed =
+              refreshedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
+          EncryptionUtil.encryptionKeys(encryptionManager).values().stream()
+              .filter(key -> !committed.contains(key.keyId()))
+              .forEach(refreshedKeys::add);
+        }
+        encryptedKeys = refreshedKeys;
 
         // Force re-creation of the encryption manager and file IO from the refreshed keys.
         encryptingFileIO = null;
