@@ -123,7 +123,7 @@ public class TestTableEncryption extends CatalogTestBase {
 
   private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
     try (CloseableIterable<FileScanTask> tasks =
-                 table.newScan().useSnapshot(snapshotId).planFiles()) {
+        table.newScan().useSnapshot(snapshotId).planFiles()) {
       return ImmutableList.copyOf(tasks);
     }
   }
