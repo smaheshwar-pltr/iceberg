@@ -220,21 +220,23 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
                 ? Integer.parseInt(dekLengthFromHMS)
                 : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-        // Carry over keys minted by not-yet-committed operations on this shared instance (e.g. a
-        // staged transaction) alongside the refreshed committed keys, so in-flight reads can still
-        // decrypt.
-        List<EncryptedKey> refreshedKeys =
-            Lists.newArrayList(Optional.ofNullable(current().encryptionKeys()).orElseGet(List::of));
-        if (encryptionManager != null) {
-          Set<String> committed =
-              refreshedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
-          EncryptionUtil.encryptionKeys(encryptionManager).values().stream()
-              .filter(key -> !committed.contains(key.keyId()))
-              .forEach(refreshedKeys::add);
-        }
-        encryptedKeys = refreshedKeys;
+        encryptedKeys =
+            Optional.ofNullable(current().encryptionKeys())
+                .map(Lists::newLinkedList)
+                .orElseGet(Lists::newLinkedList);
 
-        // Force re-creation of the encryption manager and file IO from the refreshed keys.
+        if (encryptionManager != null) {
+          Set<String> keyIdsFromMetadata =
+              encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
+
+          for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
+            if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
+              encryptedKeys.add(keyFromEM);
+            }
+          }
+        }
+
+        // Force re-creation of encryption manager with updated keys
         encryptingFileIO = null;
         encryptionManager = null;
         tableKeyId = tableKeyIdFromHMS;
