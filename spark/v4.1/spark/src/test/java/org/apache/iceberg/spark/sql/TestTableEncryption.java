@@ -121,6 +121,13 @@ public class TestTableEncryption extends CatalogTestBase {
         .collect(Collectors.toList());
   }
 
+  private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
+    try (CloseableIterable<FileScanTask> tasks =
+                 table.newScan().useSnapshot(snapshotId).planFiles()) {
+      return ImmutableList.copyOf(tasks);
+    }
+  }
+
   @TestTemplate
   public void testRefresh() {
     validationCatalog.initialize(catalogName, catalogConfig);
@@ -267,16 +274,6 @@ public class TestTableEncryption extends CatalogTestBase {
         .hasSize(initialFiles.size() + threadCount * commitsPerThread);
   }
 
-  private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
-    try (CloseableIterable<FileScanTask> tasks =
-        table.newScan().useSnapshot(snapshotId).planFiles()) {
-      return ImmutableList.copyOf(tasks);
-    }
-  }
-
-  
-  // A catalog can hand the same Table instance to multiple callers, so a transaction and direct
-  // commits may be interleaved on one shared instance. Every resulting snapshot must stay readable.
   @TestTemplate
   public void testTransactionInterleavedWithDirectCommitOnSharedTable() throws IOException {
     validationCatalog.initialize(catalogName, catalogConfig);
