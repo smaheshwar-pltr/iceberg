@@ -36,6 +36,11 @@ abstract class ManifestListWriter implements FileAppender<ManifestFile> {
   private final StandardEncryptionManager standardEncryptionManager;
   private final NativeEncryptionKeyMetadata manifestListKeyMetadata;
   private final OutputFile outputFile;
+  // Keys minted for this manifest list, stashed on first mint so the caller (via
+  // manifestListKeys()) can persist them into table metadata, and so a repeated
+  // toManifestListFile()
+  // call returns the same key id it did the first time rather than minting a divergent one.
+  private StandardEncryptionManager.MintedKeys lazyManifestListKeys = null;
 
   private ManifestListWriter(
       OutputFile file, EncryptionManager encryptionManager, Map<String, String> meta) {
@@ -95,13 +100,26 @@ abstract class ManifestListWriter implements FileAppender<ManifestFile> {
 
   public ManifestListFile toManifestListFile() {
     if (manifestListKeyMetadata != null && manifestListKeyMetadata.encryptionKey() != null) {
-      String manifestListKeyID =
-          standardEncryptionManager.addManifestListKeyMetadata(
-              manifestListKeyMetadata.copyWithLength(writer.length()));
-      return new BaseManifestListFile(outputFile.location(), manifestListKeyID);
+      if (lazyManifestListKeys == null) {
+        this.lazyManifestListKeys =
+            standardEncryptionManager.mintManifestListKey(
+                manifestListKeyMetadata.copyWithLength(writer.length()));
+      }
+
+      return new BaseManifestListFile(
+          outputFile.location(), lazyManifestListKeys.manifestListKey().keyId());
     } else {
       return new BaseManifestListFile(outputFile.location(), null);
     }
+  }
+
+  /**
+   * The keys minted while writing this manifest list, or {@code null} for an unencrypted manifest
+   * list. The caller must persist these into table metadata so the manifest list stays decryptable.
+   * Only valid after {@link #toManifestListFile()} has been called.
+   */
+  public StandardEncryptionManager.MintedKeys manifestListKeys() {
+    return lazyManifestListKeys;
   }
 
   static class V4Writer extends ManifestListWriter {
