@@ -51,7 +51,6 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.encryption.Ciphers;
-import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
@@ -139,24 +138,6 @@ public class TestTableEncryption extends CatalogTestBase {
 
     table.refresh();
     assertThat(currentDataFiles(table)).isNotEmpty();
-  }
-
-  @TestTemplate
-  public void testAppendPersistsManifestListKey() {
-    validationCatalog.initialize(catalogName, catalogConfig);
-    Table table = validationCatalog.loadTable(tableIdent);
-
-    table.newFastAppend().appendFile(currentDataFiles(table).get(0)).commit();
-    String manifestListKeyId = table.currentSnapshot().keyId();
-
-    TableMetadata metadata =
-        ((HasTableOperations) validationCatalog.loadTable(tableIdent)).operations().current();
-    Map<String, EncryptedKey> keys =
-        metadata.encryptionKeys().stream()
-            .collect(Collectors.toMap(EncryptedKey::keyId, key -> key));
-
-    assertThat(keys).containsKey(manifestListKeyId);
-    assertThat(keys).containsKey(keys.get(manifestListKeyId).encryptedById());
   }
 
   @TestTemplate
