@@ -20,6 +20,8 @@ package org.apache.iceberg.encryption;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import java.io.IOException;
+import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Base64;
@@ -31,6 +33,7 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
@@ -95,6 +98,10 @@ public class StandardEncryptionManager implements EncryptionManager {
     }
   }
 
+  private synchronized void writeObject(ObjectOutputStream out) throws IOException {
+    out.defaultWriteObject();
+  }
+
   @Override
   public NativeEncryptionOutputFile encrypt(OutputFile plainOutput) {
     return new StandardEncryptedOutputFile(plainOutput, dataKeyLength);
@@ -115,7 +122,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return Iterables.transform(encrypted, this::decrypt);
   }
 
-  private LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
+  private synchronized LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
     if (this.unwrappedKeyCache == null) {
       this.unwrappedKeyCache =
           Caffeine.newBuilder()
@@ -153,11 +160,11 @@ public class StandardEncryptionManager implements EncryptionManager {
     return kmsClient.unwrapKey(wrappedSecretKey, tableKeyId);
   }
 
-  Map<String, EncryptedKey> encryptionKeys() {
-    return encryptionKeys;
+  synchronized Map<String, EncryptedKey> encryptionKeys() {
+    return ImmutableMap.copyOf(encryptionKeys);
   }
 
-  String keyEncryptionKeyID() {
+  synchronized String keyEncryptionKeyID() {
     // Find unexpired key encryption key
     for (String keyID : encryptionKeys.keySet()) {
       EncryptedKey key = encryptionKeys.get(keyID);
@@ -193,7 +200,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return System.currentTimeMillis() + testTimeShift;
   }
 
-  ByteBuffer encryptedByKey(String manifestListKeyID) {
+  synchronized ByteBuffer encryptedByKey(String manifestListKeyID) {
     EncryptedKey encryptedKeyMetadata = encryptionKeys.get(manifestListKeyID);
 
     Preconditions.checkState(
@@ -209,7 +216,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return unwrappedKeyCache().get(encryptedKeyMetadata.encryptedById());
   }
 
-  public String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
+  public synchronized String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
     String manifestListKeyID = generateKeyId();
     String keyEncryptionKeyID = keyEncryptionKeyID();
     String keyEncryptionKeyTimestamp =
