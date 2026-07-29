@@ -353,7 +353,7 @@ public class TableMetadata implements Serializable {
     this.snapshotsLoaded = snapshotsSupplier == null;
     this.snapshotLog = snapshotLog;
     this.previousFiles = previousFiles;
-    this.encryptionKeys = encryptionKeys;
+    this.encryptionKeys = ImmutableList.copyOf(encryptionKeys);
 
     // changes are carried through until metadata is read from a file
     this.changes = changes;
