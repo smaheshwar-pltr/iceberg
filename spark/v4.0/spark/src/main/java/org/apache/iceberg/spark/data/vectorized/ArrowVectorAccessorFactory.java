@@ -23,8 +23,8 @@ import java.nio.ByteBuffer;
 import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.ValueVector;
-import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.iceberg.arrow.vectorized.GenericArrowVectorAccessorFactory;
 import org.apache.iceberg.util.UUIDUtil;
@@ -70,12 +70,16 @@ final class ArrowVectorAccessorFactory
     }
 
     @Override
-    public UTF8String ofRow(VarCharVector vector, int rowId) {
-      int start = vector.getStartOffset(rowId);
-      int end = vector.getEndOffset(rowId);
+    public UTF8String ofRow(LargeVarCharVector vector, int rowId) {
+      // LargeVarCharVector uses 64-bit offsets. Read them directly from the offset buffer since the
+      // typed getStartOffset/getEndOffset accessors are not public on the large-vector class. A
+      // single value cannot exceed Integer.MAX_VALUE bytes, so the length fits in an int.
+      long start = vector.getOffsetBuffer().getLong((long) rowId * LargeVarCharVector.OFFSET_WIDTH);
+      long end =
+          vector.getOffsetBuffer().getLong((long) (rowId + 1) * LargeVarCharVector.OFFSET_WIDTH);
 
       return UTF8String.fromAddress(
-          null, vector.getDataBuffer().memoryAddress() + start, end - start);
+          null, vector.getDataBuffer().memoryAddress() + start, (int) (end - start));
     }
 
     @Override

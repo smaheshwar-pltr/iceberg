@@ -31,6 +31,8 @@ import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeStampMicroTZVector;
 import org.apache.arrow.vector.TimeStampMicroVector;
@@ -309,7 +311,10 @@ public class VectorizedArrowReader implements VectorizedReader<VectorHolder> {
         this.typeWidth = len;
         break;
       case BINARY:
-        this.vec = arrowField.createVector(rootAlloc);
+        // Use a 64-bit-offset LargeVarBinaryVector so that a single batch can hold more than
+        // Integer.MAX_VALUE (~2GB) of data. A 32-bit VarBinaryVector overflows its offset buffer
+        // once the cumulative bytes in a batch exceed that limit (see #9820).
+        this.vec = newLargeVarBinaryVector();
         // TODO: Possibly use the uncompressed page size info to set the initial capacity
         vec.setInitialCapacity(batchSize * AVERAGE_VARIABLE_WIDTH_RECORD_SIZE);
         vec.allocateNewSafe();
@@ -375,6 +380,24 @@ public class VectorizedArrowReader implements VectorizedReader<VectorHolder> {
       default:
         throw new UnsupportedOperationException("Unsupported type: " + primitive);
     }
+  }
+
+  private LargeVarCharVector newLargeVarCharVector() {
+    Field field =
+        new Field(
+            icebergField.name(),
+            new FieldType(icebergField.isOptional(), ArrowType.LargeUtf8.INSTANCE, null, null),
+            null);
+    return (LargeVarCharVector) field.createVector(rootAlloc);
+  }
+
+  private LargeVarBinaryVector newLargeVarBinaryVector() {
+    Field field =
+        new Field(
+            icebergField.name(),
+            new FieldType(icebergField.isOptional(), ArrowType.LargeBinary.INSTANCE, null, null),
+            null);
+    return (LargeVarBinaryVector) field.createVector(rootAlloc);
   }
 
   @Override
@@ -629,7 +652,10 @@ public class VectorizedArrowReader implements VectorizedReader<VectorHolder> {
     }
 
     private Optional<LogicalTypeVisitorResult> allocateVectorForEnumJsonBsonString() {
-      FieldVector vector = arrowField.createVector(rootAlloc);
+      // Use a 64-bit-offset LargeVarCharVector so that a single batch can hold more than
+      // Integer.MAX_VALUE (~2GB) of data. A 32-bit VarCharVector overflows its offset buffer once
+      // the cumulative bytes in a batch exceed that limit (see #9820).
+      FieldVector vector = newLargeVarCharVector();
       // TODO: Possibly use the uncompressed page size info to set the initial capacity
       vector.setInitialCapacity(batchSize * AVERAGE_VARIABLE_WIDTH_RECORD_SIZE);
       vector.allocateNewSafe();

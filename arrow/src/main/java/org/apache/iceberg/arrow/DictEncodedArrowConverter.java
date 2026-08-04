@@ -22,20 +22,22 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.function.IntConsumer;
 import org.apache.arrow.vector.BaseFixedWidthVector;
-import org.apache.arrow.vector.BaseVariableWidthVector;
+import org.apache.arrow.vector.BaseLargeVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.DecimalVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeStampMicroTZVector;
 import org.apache.arrow.vector.TimeStampMicroVector;
 import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampNanoVector;
 import org.apache.arrow.vector.TimeStampVector;
-import org.apache.arrow.vector.VarBinaryVector;
-import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.iceberg.arrow.vectorized.ArrowVectorAccessor;
 import org.apache.iceberg.arrow.vectorized.VectorHolder;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -180,12 +182,14 @@ public class DictEncodedArrowConverter {
     return vector;
   }
 
-  private static VarCharVector toVarCharVector(
+  private static LargeVarCharVector toVarCharVector(
       VectorHolder vectorHolder, ArrowVectorAccessor<?, String, ?, ?> accessor) {
-    VarCharVector vector =
-        new VarCharVector(
+    // Use a 64-bit-offset LargeVarCharVector to match the vector allocated by the reader and to
+    // avoid overflowing the 32-bit offset buffer for large values (see #9820).
+    LargeVarCharVector vector =
+        new LargeVarCharVector(
             vectorHolder.vector().getName(),
-            ArrowSchemaUtil.convert(vectorHolder.icebergField()).getFieldType(),
+            largeFieldType(vectorHolder, ArrowType.LargeUtf8.INSTANCE),
             vectorHolder.vector().getAllocator());
 
     initVector(
@@ -195,16 +199,22 @@ public class DictEncodedArrowConverter {
     return vector;
   }
 
-  private static VarBinaryVector toVarBinaryVector(
+  private static LargeVarBinaryVector toVarBinaryVector(
       VectorHolder vectorHolder, ArrowVectorAccessor<?, String, ?, ?> accessor) {
-    VarBinaryVector vector =
-        new VarBinaryVector(
+    // Use a 64-bit-offset LargeVarBinaryVector to match the vector allocated by the reader and to
+    // avoid overflowing the 32-bit offset buffer for large values (see #9820).
+    LargeVarBinaryVector vector =
+        new LargeVarBinaryVector(
             vectorHolder.vector().getName(),
-            ArrowSchemaUtil.convert(vectorHolder.icebergField()).getFieldType(),
+            largeFieldType(vectorHolder, ArrowType.LargeBinary.INSTANCE),
             vectorHolder.vector().getAllocator());
 
     initVector(vector, vectorHolder, idx -> vector.setSafe(idx, accessor.getBinary(idx)));
     return vector;
+  }
+
+  private static FieldType largeFieldType(VectorHolder vectorHolder, ArrowType arrowType) {
+    return new FieldType(vectorHolder.icebergField().isOptional(), arrowType, null, null);
   }
 
   private static TimeMicroVector toTimeMicroVector(
@@ -226,7 +236,7 @@ public class DictEncodedArrowConverter {
   }
 
   private static void initVector(
-      BaseVariableWidthVector vector, VectorHolder vectorHolder, IntConsumer consumer) {
+      BaseLargeVariableWidthVector vector, VectorHolder vectorHolder, IntConsumer consumer) {
     vector.allocateNew(vectorHolder.vector().getValueCount());
     init(vector, vectorHolder, consumer, vectorHolder.vector().getValueCount());
   }

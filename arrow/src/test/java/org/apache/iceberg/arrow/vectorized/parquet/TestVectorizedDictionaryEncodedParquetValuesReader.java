@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.iceberg.arrow.vectorized.NullabilityHolder;
 import org.apache.parquet.column.Dictionary;
 import org.apache.parquet.column.Encoding;
@@ -60,7 +60,7 @@ public class TestVectorizedDictionaryEncodedParquetValuesReader {
         };
 
     try (RootAllocator allocator = new RootAllocator();
-        VarCharVector vector = new VarCharVector("s", allocator)) {
+        LargeVarCharVector vector = new LargeVarCharVector("s", allocator)) {
       vector.allocateNew(payload.length, 1);
 
       VectorizedDictionaryEncodedParquetValuesReader dictionaryReader =
