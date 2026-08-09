@@ -70,6 +70,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TestCatalogUtil;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdatePartitionSpec;
@@ -80,6 +81,11 @@ import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SessionCatalog;
 import org.apache.iceberg.catalog.TableCommit;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.EncryptedKey;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionTestHelpers;
+import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -3117,6 +3123,86 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
     Table reloaded = catalog.loadTable(TABLE);
     assertThat(reloaded.currentSnapshot()).isNotNull();
     assertThat(reloaded.snapshot(expectedSnapshotId)).isNotNull();
+  }
+
+  @Test
+  void encryptedAppendSerializesManifestListKeys() throws IOException {
+    HeaderValidatingAdapter adapter =
+        Mockito.spy(
+            new HeaderValidatingAdapter(
+                backendCatalog, HTTPHeaders.of(Map.of()), HTTPHeaders.of(Map.of())));
+    EncryptionManager encryption = EncryptionTestHelpers.createEncryptionManager();
+
+    try (RESTCatalog catalog =
+        catalog(
+            adapter,
+            clientBuilder ->
+                new RESTSessionCatalog(clientBuilder, null) {
+                  @Override
+                  protected RESTTableOperations newTableOps(
+                      RESTClient restClient,
+                      String path,
+                      Supplier<Map<String, String>> readHeaders,
+                      Supplier<Map<String, String>> mutationHeaders,
+                      FileIO fileIO,
+                      TableMetadata current,
+                      Set<Endpoint> supportedEndpoints) {
+                    return new RESTTableOperations(
+                        restClient,
+                        path,
+                        readHeaders,
+                        mutationHeaders,
+                        EncryptingFileIO.combine(fileIO, encryption),
+                        current,
+                        supportedEndpoints) {
+                      @Override
+                      public EncryptionManager encryption() {
+                        return encryption;
+                      }
+                    };
+                  }
+                })) {
+      if (requiresNamespaceCreate()) {
+        catalog.createNamespace(TABLE.namespace());
+      }
+
+      Table table =
+          catalog
+              .buildTable(TABLE, SCHEMA)
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .create();
+      table.newFastAppend().appendFile(FILE_A).commit();
+
+      ArgumentCaptor<HTTPRequest> requestCaptor = ArgumentCaptor.forClass(HTTPRequest.class);
+      verify(adapter)
+          .handleRequest(
+              eq(Route.UPDATE_TABLE),
+              anyMap(),
+              requestCaptor.capture(),
+              eq(LoadTableResponse.class),
+              any());
+      assertThat(requestCaptor.getValue().body()).isInstanceOf(UpdateTableRequest.class);
+      UpdateTableRequest request = (UpdateTableRequest) requestCaptor.getValue().body();
+      List<MetadataUpdate.AddSnapshot> addedSnapshots =
+          request.updates().stream()
+              .filter(MetadataUpdate.AddSnapshot.class::isInstance)
+              .map(MetadataUpdate.AddSnapshot.class::cast)
+              .collect(Collectors.toList());
+      Map<String, EncryptedKey> keys =
+          request.updates().stream()
+              .filter(MetadataUpdate.AddEncryptionKey.class::isInstance)
+              .map(MetadataUpdate.AddEncryptionKey.class::cast)
+              .map(MetadataUpdate.AddEncryptionKey::key)
+              .collect(Collectors.toMap(EncryptedKey::keyId, Function.identity()));
+
+      assertThat(addedSnapshots).hasSize(1);
+      MetadataUpdate.AddSnapshot addSnapshot = addedSnapshots.get(0);
+      String manifestListKeyID = addSnapshot.snapshot().keyId();
+      assertThat(manifestListKeyID).isNotNull();
+      assertThat(keys).hasSize(2).containsKey(manifestListKeyID);
+      assertThat(keys).containsKey(keys.get(manifestListKeyID).encryptedById());
+    }
   }
 
   @Test
