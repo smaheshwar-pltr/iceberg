@@ -93,7 +93,10 @@ public class StandardEncryptionManager implements EncryptionManager {
         this.encryptionKeys.put(
             key.keyId(),
             new BaseEncryptedKey(
-                key.keyId(), key.encryptedKeyMetadata(), key.encryptedById(), key.properties()));
+                key.keyId(),
+                ByteBuffers.copy(key.encryptedKeyMetadata()),
+                key.encryptedById(),
+                key.properties()));
       }
     }
   }
