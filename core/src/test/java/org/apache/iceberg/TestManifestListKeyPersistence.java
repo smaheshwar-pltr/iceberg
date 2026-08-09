@@ -24,7 +24,6 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptingFileIO;
@@ -51,47 +50,39 @@ class TestManifestListKeyPersistence {
   @TempDir private Path temp;
 
   @AfterEach
-  public void cleanup() {
+  void cleanup() {
     TestTables.clearTables();
   }
 
   @Test
-  void testCommittedSnapshotKeyIsInMetadata() {
+  void committedSnapshotKeyIsInMetadata() {
     TestTables.TestTable table = createEncryptedTable("mlk-basic");
-
-    table.newFastAppend().appendFile(TestBase.FILE_A).commit();
-
-    Snapshot snapshot = table.currentSnapshot();
-    assertThat(snapshot.keyId()).as("manifest list should be encrypted").isNotNull();
-
-    assertThat(keyIds(table.ops().current()))
-        .as("committed metadata must contain the snapshot's manifest list key")
-        .contains(snapshot.keyId());
-  }
-
-  @Test
-  void testCommittedSnapshotIsReadableFromCommittedKeys() {
-    TestTables.TestTable table = createEncryptedTable("mlk-reload");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).commit();
 
     TableMetadata committed = table.ops().current();
     Snapshot snapshot = table.currentSnapshot();
+    assertThat(snapshot.keyId()).as("manifest list should be encrypted").isNotNull();
 
-    // what a fresh reader does: build a manager from the committed key records alone
-    EncryptionManager reloaded =
-        EncryptionUtil.createEncryptionManager(
-            committed.encryptionKeys(), TABLE_PROPERTIES, kmsClient());
-
-    assertThat(
-            EncryptionUtil.decryptManifestListKeyMetadata(
-                new BaseManifestListFile(snapshot.manifestListLocation(), snapshot.keyId()),
-                reloaded))
-        .isNotNull();
+    EncryptedKey manifestListKey = key(committed, snapshot.keyId());
+    assertThat(manifestListKey).isNotNull();
+    assertThat(keyIds(committed))
+        .as("committed metadata must contain the snapshot's manifest list key")
+        .contains(snapshot.keyId(), manifestListKey.encryptedById());
   }
 
   @Test
-  void testStagedSnapshotKeyIsInMetadata() {
+  void committedSnapshotIsReadableFromCommittedKeys() {
+    TestTables.TestTable table = createEncryptedTable("mlk-reload");
+
+    table.newFastAppend().appendFile(TestBase.FILE_A).commit();
+
+    TableMetadata committed = table.ops().current();
+    assertReadableFromCommittedKeys(committed, table.currentSnapshot());
+  }
+
+  @Test
+  void stagedSnapshotKeyIsInMetadata() {
     TestTables.TestTable table = createEncryptedTable("mlk-staged");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).stageOnly().commit();
@@ -101,7 +92,7 @@ class TestManifestListKeyPersistence {
   }
 
   @Test
-  void testTransactionSnapshotKeysAreInMetadata() {
+  void transactionSnapshotKeysAreInMetadata() {
     TestTables.TestTable table = createEncryptedTable("mlk-transaction");
 
     Transaction transaction = table.newTransaction();
@@ -117,22 +108,20 @@ class TestManifestListKeyPersistence {
   }
 
   @Test
-  void testRetriedCommitPersistsOnlyTheCommittedSnapshotKeys() {
+  void retriedCommitPersistsReadableSnapshotKeys() {
     TestTables.TestTable table = createEncryptedTable("mlk-retry");
     ((TestTables.TestTableOperations) table.ops()).failCommits(2);
 
     table.newFastAppend().appendFile(TestBase.FILE_A).commit();
 
-    // three attempts minted three manifest list keys against one shared key encryption key
-    Set<String> generated = EncryptionUtil.encryptionKeys(table.ops().encryption()).keySet();
-    assertThat(generated).hasSize(4);
-
-    // only the committed attempt's two keys are persisted
     TableMetadata committed = table.ops().current();
+    Snapshot snapshot = table.currentSnapshot();
+    EncryptedKey manifestListKey = key(committed, snapshot.keyId());
+
+    assertThat(manifestListKey).isNotNull();
     assertThat(keyIds(committed))
-        .hasSize(2)
-        .contains(table.currentSnapshot().keyId())
-        .allMatch(generated::contains);
+        .containsExactlyInAnyOrder(snapshot.keyId(), manifestListKey.encryptedById());
+    assertReadableFromCommittedKeys(committed, snapshot);
   }
 
   private static KeyManagementClient kmsClient() {
@@ -143,6 +132,22 @@ class TestManifestListKeyPersistence {
 
   private static List<String> keyIds(TableMetadata metadata) {
     return metadata.encryptionKeys().stream().map(EncryptedKey::keyId).collect(Collectors.toList());
+  }
+
+  private static EncryptedKey key(TableMetadata metadata, String keyId) {
+    return metadata.encryptionKeys().stream()
+        .filter(key -> key.keyId().equals(keyId))
+        .findFirst()
+        .orElse(null);
+  }
+
+  private static void assertReadableFromCommittedKeys(TableMetadata committed, Snapshot snapshot) {
+    EncryptionManager reloaded =
+        EncryptionUtil.createEncryptionManager(
+            committed.encryptionKeys(), TABLE_PROPERTIES, kmsClient());
+    EncryptingFileIO reloadedIO = EncryptingFileIO.combine(new TestTables.LocalFileIO(), reloaded);
+
+    assertThat(snapshot.allManifests(reloadedIO)).isNotEmpty();
   }
 
   private TestTables.TestTable createEncryptedTable(String name) {
