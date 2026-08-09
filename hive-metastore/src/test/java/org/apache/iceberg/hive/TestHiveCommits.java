@@ -126,6 +126,24 @@ public class TestHiveCommits extends HiveTableTestBase {
   }
 
   @Test
+  void ignoresUnreferencedKeyWithoutWrappingKey() {
+    Table table = catalog.loadTable(TABLE_IDENTIFIER);
+    HiveTableOperations ops = (HiveTableOperations) ((HasTableOperations) table).operations();
+    TableMetadata base = ops.current();
+    TableMetadata updated =
+        TableMetadata.buildFrom(base)
+            .addEncryptionKey(
+                new BaseEncryptedKey("unreferenced", ByteBuffer.wrap(new byte[16]), null, Map.of()))
+            .build();
+
+    ops.commit(base, updated);
+
+    assertThat(ops.refresh().encryptionKeys())
+        .extracting(key -> key.keyId())
+        .containsExactly("unreferenced");
+  }
+
+  @Test
   public void testSuppressUnlockExceptions() {
     Table table = catalog.loadTable(TABLE_IDENTIFIER);
     HiveTableOperations ops = (HiveTableOperations) ((HasTableOperations) table).operations();

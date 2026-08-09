@@ -240,11 +240,9 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   /** Validates that newly added snapshots retain the keys required to read their manifest lists. */
   private void checkManifestListKeysArePresent(TableMetadata metadata) {
-    Set<String> keyIds =
-        metadata.encryptionKeys().stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
-    Map<String, String> wrappedBy =
+    Map<String, EncryptedKey> keysById =
         metadata.encryptionKeys().stream()
-            .collect(Collectors.toMap(EncryptedKey::keyId, EncryptedKey::encryptedById));
+            .collect(Collectors.toMap(EncryptedKey::keyId, key -> key));
 
     for (MetadataUpdate change : metadata.changes()) {
       if (!(change instanceof MetadataUpdate.AddSnapshot addSnapshot)) {
@@ -261,14 +259,15 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
         continue;
       }
 
-      if (!keyIds.contains(keyId)) {
+      EncryptedKey manifestListKey = keysById.get(keyId);
+      if (manifestListKey == null) {
         throw new CommitFailedException(
             "Cannot commit snapshot %s to %s.%s: manifest list key %s is missing from table metadata",
             snapshot.snapshotId(), database, tableName, keyId);
       }
 
-      String keyEncryptionKeyId = wrappedBy.get(keyId);
-      if (!keyIds.contains(keyEncryptionKeyId)) {
+      String keyEncryptionKeyId = manifestListKey.encryptedById();
+      if (!keysById.containsKey(keyEncryptionKeyId)) {
         throw new CommitFailedException(
             "Cannot commit snapshot %s to %s.%s: key encryption key %s is missing from table metadata",
             snapshot.snapshotId(), database, tableName, keyEncryptionKeyId);
