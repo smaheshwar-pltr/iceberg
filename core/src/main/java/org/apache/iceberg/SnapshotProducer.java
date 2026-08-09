@@ -46,8 +46,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -65,6 +68,7 @@ import org.apache.iceberg.metrics.MetricsReporter;
 import org.apache.iceberg.metrics.Timer.Timed;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
@@ -114,6 +118,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
   private TableMetadata base;
+  private List<EncryptedKey> manifestListKeys = ImmutableList.of();
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
   private SnapshotAncestryValidator snapshotAncestryValidator =
@@ -303,11 +308,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
+    EncryptionManager encryption = ops.encryption();
     ManifestListWriter writer =
         ManifestLists.write(
             ops.current().formatVersion(),
             manifestList,
-            ops.encryption(),
+            encryption,
             snapshotId(),
             parentSnapshotId,
             sequenceNumber,
@@ -354,6 +360,9 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           replacedRecords);
     }
 
+    String manifestListKeyId = writer.toManifestListFile().encryptionKeyID();
+    this.manifestListKeys = manifestListKeys(encryption, manifestListKeyId);
+
     return new BaseSnapshot(
         sequenceNumber,
         snapshotId(),
@@ -365,7 +374,29 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         manifestList.location(),
         nextRowId,
         assignedRows,
-        writer.toManifestListFile().encryptionKeyID());
+        manifestListKeyId);
+  }
+
+  /**
+   * The manifest list key and the key encryption key that wraps it, which must be committed
+   * alongside the snapshot that references them or the snapshot cannot be read.
+   */
+  private static List<EncryptedKey> manifestListKeys(EncryptionManager encryption, String keyId) {
+    if (keyId == null) {
+      return ImmutableList.of();
+    }
+
+    Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(encryption);
+    EncryptedKey manifestListKey = keys.get(keyId);
+    Preconditions.checkState(
+        manifestListKey != null, "Cannot find manifest list key metadata with id %s", keyId);
+    EncryptedKey keyEncryptionKey = keys.get(manifestListKey.encryptedById());
+    Preconditions.checkState(
+        keyEncryptionKey != null,
+        "Cannot find key encryption key with id %s",
+        manifestListKey.encryptedById());
+
+    return ImmutableList.of(manifestListKey, keyEncryptionKey);
   }
 
   private void runValidations(Snapshot parentSnapshot) {
@@ -493,16 +524,23 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
             .countAttempts(commitMetrics().attempts())
             .run(
                 taskOps -> {
+                  // this attempt writes its own manifest list, so discard the keys of the last one
+                  this.manifestListKeys = ImmutableList.of();
                   Snapshot newSnapshot = apply();
                   newSnapshotId.set(newSnapshot.snapshotId());
                   TableMetadata.Builder update = TableMetadata.buildFrom(base);
                   if (base.snapshot(newSnapshot.snapshotId()) != null) {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
-                  } else if (stageOnly) {
-                    update.addSnapshot(newSnapshot);
                   } else {
-                    update.setBranchSnapshot(newSnapshot, targetBranch);
+                    // the new snapshot's manifest list is unreadable unless the keys that encrypt
+                    // it are committed with it
+                    manifestListKeys.forEach(update::addEncryptionKey);
+                    if (stageOnly) {
+                      update.addSnapshot(newSnapshot);
+                    } else {
+                      update.setBranchSnapshot(newSnapshot, targetBranch);
+                    }
                   }
 
                   TableMetadata updated = update.build();
