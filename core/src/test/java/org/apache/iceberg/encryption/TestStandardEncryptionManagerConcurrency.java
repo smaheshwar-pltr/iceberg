@@ -159,6 +159,26 @@ class TestStandardEncryptionManagerConcurrency {
   }
 
   @Test
+  void managerCopiesInputKeyMetadata() {
+    UnitestKMS kms = new UnitestKMS();
+    kms.initialize(Map.of());
+    byte[] metadata = {1, 2, 3};
+    EncryptedKey inputKey =
+        new BaseEncryptedKey(
+            "key-id",
+            ByteBuffer.wrap(metadata),
+            UnitestKMS.MASTER_KEY_NAME1,
+            Map.of(StandardEncryptionManager.KEY_TIMESTAMP, "0"));
+    StandardEncryptionManager manager =
+        new StandardEncryptionManager(List.of(inputKey), UnitestKMS.MASTER_KEY_NAME1, 16, kms);
+
+    inputKey.encryptedKeyMetadata().put(0, (byte) 4);
+
+    assertThat(manager.encryptionKeys().get("key-id").encryptedKeyMetadata())
+        .isEqualTo(ByteBuffer.wrap(new byte[] {1, 2, 3}));
+  }
+
+  @Test
   void manifestListDecryptionDoesNotCopyAllKeys() {
     UnitestKMS kms = new UnitestKMS();
     kms.initialize(Map.of());
