@@ -66,7 +66,7 @@ public class BaseTransaction implements Transaction {
   private final String tableName;
   private final TableOperations ops;
   private final TransactionTable transactionTable;
-  private final TableOperations transactionOps;
+  private final TransactionTableOperations transactionOps;
   private final List<PendingUpdate> updates;
   private final Set<String> deletedFiles =
       Sets.newHashSet(); // keep track of files deleted in the most recent commit
@@ -445,6 +445,9 @@ public class BaseTransaction implements Transaction {
       // use refreshed the metadata
       this.base = underlyingOps.current();
       this.current = underlyingOps.current();
+      // the staged metadata the updates were applied to is gone, so anything derived from it -
+      // notably the encryption keys that resolve a snapshot's manifest list - must be rebuilt
+      transactionOps.resetTempOps();
       for (PendingUpdate update : updates) {
         // re-commit each update in the chain to apply it and update current
         try {
@@ -482,6 +485,10 @@ public class BaseTransaction implements Transaction {
 
   public class TransactionTableOperations implements TableOperations {
     private TableOperations tempOps = ops.temp(current);
+
+    private void resetTempOps() {
+      this.tempOps = ops.temp(current);
+    }
 
     @Override
     public TableMetadata current() {
