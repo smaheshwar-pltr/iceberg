@@ -38,6 +38,8 @@ import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.LocationProviders;
+import org.apache.iceberg.MetadataUpdate;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
@@ -236,6 +238,47 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     }
   }
 
+  /**
+   * A snapshot whose manifest list is encrypted is unreadable unless the manifest list key and the
+   * key encryption key that wraps it are in the same metadata. Keys are minted into the shared
+   * encryption manager while the manifest list is written and only copied into metadata here, so a
+   * concurrent refresh that replaces the manager in between drops them. Fail the commit instead of
+   * writing a snapshot that can never be decrypted; the retry re-writes the manifest list and
+   * usually succeeds.
+   */
+  private void checkManifestListKeysArePresent(TableMetadata metadata) {
+    Set<String> keyIds =
+        metadata.encryptionKeys().stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
+    Map<String, String> wrappedBy =
+        metadata.encryptionKeys().stream()
+            .collect(Collectors.toMap(EncryptedKey::keyId, EncryptedKey::encryptedById));
+
+    for (MetadataUpdate change : metadata.changes()) {
+      if (!(change instanceof MetadataUpdate.AddSnapshot)) {
+        continue;
+      }
+
+      Snapshot snapshot = ((MetadataUpdate.AddSnapshot) change).snapshot();
+      String keyId = snapshot.keyId();
+      if (keyId == null) {
+        continue;
+      }
+
+      if (!keyIds.contains(keyId)) {
+        throw new CommitFailedException(
+            "Cannot commit snapshot %s to %s.%s: manifest list key %s was lost by a concurrent refresh",
+            snapshot.snapshotId(), database, tableName, keyId);
+      }
+
+      String keyEncryptionKeyId = wrappedBy.get(keyId);
+      if (!keyIds.contains(keyEncryptionKeyId)) {
+        throw new CommitFailedException(
+            "Cannot commit snapshot %s to %s.%s: key encryption key %s was lost by a concurrent refresh",
+            snapshot.snapshotId(), database, tableName, keyEncryptionKeyId);
+      }
+    }
+  }
+
   @SuppressWarnings({"checkstyle:CyclomaticComplexity", "MethodLength"})
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
@@ -254,6 +297,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       }
 
       tableMetadata = builder.build();
+      checkManifestListKeysArePresent(tableMetadata);
     } else {
       tableMetadata = metadata;
     }
