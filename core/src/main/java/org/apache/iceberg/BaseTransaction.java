@@ -445,8 +445,7 @@ public class BaseTransaction implements Transaction {
       // use refreshed the metadata
       this.base = underlyingOps.current();
       this.current = underlyingOps.current();
-      // the staged metadata the updates were applied to is gone, so anything derived from it -
-      // notably the encryption keys that resolve a snapshot's manifest list - must be rebuilt
+      // rebuild temporary operations against the refreshed metadata before replaying updates
       transactionOps.resetTempOps();
       for (PendingUpdate update : updates) {
         // re-commit each update in the chain to apply it and update current

@@ -121,7 +121,7 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
-  public void testTransactionInterleavedWithDirectCommitOnSharedTable() throws IOException {
+  void transactionInterleavedWithDirectCommitPreservesEncryptionKeys() throws IOException {
     validationCatalog.initialize(catalogName, catalogConfig);
 
     Table table = validationCatalog.loadTable(tableIdent);
@@ -136,6 +136,7 @@ public class TestTableEncryption extends CatalogTestBase {
     transaction.newFastAppend().appendFile(file).commit();
     transaction.commitTransaction();
 
+    validationCatalog.invalidateTable(tableIdent);
     Table reloaded = validationCatalog.loadTable(tableIdent);
     for (Snapshot snapshot : reloaded.snapshots()) {
       assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();

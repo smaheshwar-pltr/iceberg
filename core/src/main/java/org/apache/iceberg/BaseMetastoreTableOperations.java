@@ -235,27 +235,9 @@ public abstract class BaseMetastoreTableOperations extends BaseMetastoreOperatio
     return LocationProviders.locationsFor(current().location(), current().properties());
   }
 
-  /**
-   * Returns an {@link EncryptionManager} that can resolve the encryption keys of the given
-   * metadata, which may not be committed yet.
-   */
-  protected EncryptionManager encryption(TableMetadata metadata) {
-    return encryption();
-  }
-
-  /** Returns a {@link FileIO} that encrypts and decrypts using the given manager. */
-  protected FileIO io(EncryptionManager encryption) {
-    return io();
-  }
-
   @Override
   public TableOperations temp(TableMetadata uncommittedMetadata) {
     return new TableOperations() {
-      // built once and shared: each manager copies the metadata's keys and owns its own cache of
-      // keys unwrapped by the KMS
-      private EncryptionManager lazyEncryption = null;
-      private FileIO lazyIO = null;
-
       @Override
       public TableMetadata current() {
         return uncommittedMetadata;
@@ -285,21 +267,13 @@ public abstract class BaseMetastoreTableOperations extends BaseMetastoreOperatio
       }
 
       @Override
-      public synchronized FileIO io() {
-        if (lazyIO == null) {
-          this.lazyIO = BaseMetastoreTableOperations.this.io(encryption());
-        }
-
-        return lazyIO;
+      public FileIO io() {
+        return BaseMetastoreTableOperations.this.io();
       }
 
       @Override
-      public synchronized EncryptionManager encryption() {
-        if (lazyEncryption == null) {
-          this.lazyEncryption = BaseMetastoreTableOperations.this.encryption(uncommittedMetadata);
-        }
-
-        return lazyEncryption;
+      public EncryptionManager encryption() {
+        return BaseMetastoreTableOperations.this.encryption();
       }
 
       @Override

@@ -36,7 +36,9 @@ import org.apache.iceberg.BaseMetastoreOperations;
 import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
+import org.apache.iceberg.LocationProviders;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptingFileIO;
@@ -44,7 +46,6 @@ import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -52,6 +53,7 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.hadoop.ConfigProperties;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
@@ -135,36 +137,32 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   public EncryptionManager encryption() {
     if (encryptionManager == null && tableKeyId != null) {
-      encryptionManager = createEncryptionManager(encryptedKeys);
+      encryptionManager = createEncryptionManager(encryptedKeys, tableKeyId, encryptionDekLength);
     }
 
     return encryptionManager != null ? encryptionManager : PlaintextEncryptionManager.instance();
   }
 
-  /**
-   * Uncommitted metadata carries keys that the committed table does not have yet, so a staged
-   * snapshot's manifest list is only readable through a manager built from that metadata.
-   */
-  @Override
-  protected EncryptionManager encryption(TableMetadata metadata) {
-    // a table created inside a transaction is not in the metastore yet, so its key id is only
-    // available from the uncommitted metadata
-    encryptionPropsFromMetadata(metadata.properties());
-    if (tableKeyId == null) {
+  private EncryptionManager encryptionFor(TableMetadata metadata) {
+    String encryptionKeyId =
+        tableKeyId != null
+            ? tableKeyId
+            : metadata.property(TableProperties.ENCRYPTION_TABLE_KEY, null);
+    if (encryptionKeyId == null) {
       return PlaintextEncryptionManager.instance();
     }
 
-    return createEncryptionManager(metadata.encryptionKeys());
+    int dataKeyLength =
+        encryptionDekLength > 0
+            ? encryptionDekLength
+            : metadata.propertyAsInt(
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+    return createEncryptionManager(metadata.encryptionKeys(), encryptionKeyId, dataKeyLength);
   }
 
-  @Override
-  protected FileIO io(EncryptionManager encryption) {
-    return encryption instanceof StandardEncryptionManager
-        ? EncryptingFileIO.combine(fileIO, encryption)
-        : fileIO;
-  }
-
-  private EncryptionManager createEncryptionManager(List<EncryptedKey> keys) {
+  private EncryptionManager createEncryptionManager(
+      List<EncryptedKey> keys, String encryptionKeyId, int dataKeyLength) {
     Preconditions.checkArgument(
         keyManagementClient != null,
         "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
@@ -173,9 +171,9 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     Map<String, String> encryptionProperties =
         ImmutableMap.of(
             TableProperties.ENCRYPTION_TABLE_KEY,
-            tableKeyId,
+            encryptionKeyId,
             TableProperties.ENCRYPTION_DEK_LENGTH,
-            String.valueOf(encryptionDekLength));
+            String.valueOf(dataKeyLength));
 
     return EncryptionUtil.createEncryptionManager(keys, encryptionProperties, keyManagementClient);
   }
@@ -437,6 +435,59 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   public ClientPool<IMetaStoreClient, TException> metaClients() {
     return metaClients;
+  }
+
+  @Override
+  public TableOperations temp(TableMetadata uncommittedMetadata) {
+    EncryptionManager tempEncryption = encryptionFor(uncommittedMetadata);
+    FileIO tempFileIO =
+        tempEncryption == PlaintextEncryptionManager.instance()
+            ? fileIO
+            : EncryptingFileIO.combine(fileIO, tempEncryption);
+
+    return new TableOperations() {
+      @Override
+      public TableMetadata current() {
+        return uncommittedMetadata;
+      }
+
+      @Override
+      public TableMetadata refresh() {
+        throw new UnsupportedOperationException(
+            "Cannot call refresh on temporary table operations");
+      }
+
+      @Override
+      public void commit(TableMetadata base, TableMetadata metadata) {
+        throw new UnsupportedOperationException("Cannot call commit on temporary table operations");
+      }
+
+      @Override
+      public String metadataFileLocation(String fileName) {
+        return HiveTableOperations.this.metadataFileLocation(uncommittedMetadata, fileName);
+      }
+
+      @Override
+      public LocationProvider locationProvider() {
+        return LocationProviders.locationsFor(
+            uncommittedMetadata.location(), uncommittedMetadata.properties());
+      }
+
+      @Override
+      public FileIO io() {
+        return tempFileIO;
+      }
+
+      @Override
+      public EncryptionManager encryption() {
+        return tempEncryption;
+      }
+
+      @Override
+      public long newSnapshotId() {
+        return HiveTableOperations.this.newSnapshotId();
+      }
+    };
   }
 
   /**
