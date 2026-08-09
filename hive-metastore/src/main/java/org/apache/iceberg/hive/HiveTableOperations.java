@@ -245,10 +245,11 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             .collect(Collectors.toMap(EncryptedKey::keyId, key -> key));
 
     for (MetadataUpdate change : metadata.changes()) {
-      if (!(change instanceof MetadataUpdate.AddSnapshot addSnapshot)) {
+      if (!(change instanceof MetadataUpdate.AddSnapshot)) {
         continue;
       }
 
+      MetadataUpdate.AddSnapshot addSnapshot = (MetadataUpdate.AddSnapshot) change;
       Snapshot snapshot = addSnapshot.snapshot();
       if (metadata.snapshot(snapshot.snapshotId()) == null) {
         continue;

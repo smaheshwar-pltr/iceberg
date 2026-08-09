@@ -713,6 +713,7 @@ public class TestHiveCommits extends HiveTableTestBase {
     Snapshot snapshot = mock(Snapshot.class);
     when(snapshot.snapshotId()).thenReturn(100L);
     when(snapshot.sequenceNumber()).thenReturn(base.nextSequenceNumber());
+    when(snapshot.timestampMillis()).thenReturn(base.lastUpdatedMillis() + 1);
     when(snapshot.keyId()).thenReturn(keyId);
     return snapshot;
   }
