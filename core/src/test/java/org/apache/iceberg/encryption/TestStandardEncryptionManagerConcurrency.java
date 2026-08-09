@@ -32,6 +32,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.iceberg.ManifestListFile;
 import org.junit.jupiter.api.Test;
 
 class TestStandardEncryptionManagerConcurrency {
@@ -131,6 +132,23 @@ class TestStandardEncryptionManagerConcurrency {
     StandardEncryptionManager manager = newManager(new UnitestKMS());
     String firstKey = manager.addManifestListKeyMetadata(keyMetadata());
     Map<String, EncryptedKey> snapshot = manager.encryptionKeys();
+    EncryptedKey manifestListKey = snapshot.get(firstKey);
+    EncryptedKey keyEncryptionKey = snapshot.get(manifestListKey.encryptedById());
+    byte metadataByte = manifestListKey.encryptedKeyMetadata().get(0);
+    String keyTimestamp =
+        keyEncryptionKey.properties().get(StandardEncryptionManager.KEY_TIMESTAMP);
+
+    manifestListKey.encryptedKeyMetadata().put(0, (byte) (metadataByte + 1));
+    keyEncryptionKey.properties().put(StandardEncryptionManager.KEY_TIMESTAMP, "modified");
+
+    Map<String, EncryptedKey> current = manager.encryptionKeys();
+    assertThat(current.get(firstKey).encryptedKeyMetadata().get(0)).isEqualTo(metadataByte);
+    assertThat(
+            current
+                .get(manifestListKey.encryptedById())
+                .properties()
+                .get(StandardEncryptionManager.KEY_TIMESTAMP))
+        .isEqualTo(keyTimestamp);
 
     String secondKey = manager.addManifestListKeyMetadata(keyMetadata());
 
@@ -138,6 +156,44 @@ class TestStandardEncryptionManagerConcurrency {
     assertThatThrownBy(snapshot::clear)
         .isInstanceOf(UnsupportedOperationException.class)
         .hasMessage(null);
+  }
+
+  @Test
+  void manifestListDecryptionDoesNotCopyAllKeys() {
+    UnitestKMS kms = new UnitestKMS();
+    kms.initialize(Map.of());
+    StandardEncryptionManager manager =
+        new StandardEncryptionManager(List.of(), UnitestKMS.MASTER_KEY_NAME1, 16, kms) {
+          @Override
+          synchronized Map<String, EncryptedKey> encryptionKeys() {
+            throw new AssertionError("Manifest list decryption must not copy all encryption keys");
+          }
+        };
+    String keyId = manager.addManifestListKeyMetadata(keyMetadata());
+
+    ByteBuffer decrypted =
+        EncryptionUtil.decryptManifestListKeyMetadata(manifestList(keyId), manager);
+
+    assertThat(decrypted).isEqualTo(keyMetadata().buffer());
+  }
+
+  private static ManifestListFile manifestList(String keyId) {
+    return new ManifestListFile() {
+      @Override
+      public String location() {
+        return "manifest-list.avro";
+      }
+
+      @Override
+      public String encryptionKeyID() {
+        return keyId;
+      }
+
+      @Override
+      public ByteBuffer decryptKeyMetadata(EncryptionManager encryptionManager) {
+        return EncryptionUtil.decryptManifestListKeyMetadata(this, encryptionManager);
+      }
+    };
   }
 
   private static StandardEncryptionManager newManager(UnitestKMS kms) {
