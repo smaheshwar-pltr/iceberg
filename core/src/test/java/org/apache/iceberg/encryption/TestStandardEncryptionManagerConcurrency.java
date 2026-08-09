@@ -19,133 +19,156 @@
 package org.apache.iceberg.encryption;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.nio.ByteBuffer;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.Callable;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.junit.jupiter.api.Test;
 
-public class TestStandardEncryptionManagerConcurrency {
+class TestStandardEncryptionManagerConcurrency {
 
-  private static final int THREADS = 4;
-  private static final int KEYS_PER_THREAD = 50;
-  private static final int ROUNDS = 300;
+  private static final long WAIT_SECONDS = 10;
 
   @Test
-  public void testConcurrentMintingIsThreadSafe() throws Exception {
-    StandardEncryptionManager manager = newManager();
-
-    List<String> keyIds = Lists.newArrayList();
-    for (List<String> perThread :
-        runConcurrently(
+  void concurrentMintingCreatesOneKeyEncryptionKey() throws Exception {
+    BlockingKms kms = new BlockingKms();
+    StandardEncryptionManager manager = newManager(kms);
+    AtomicReference<String> firstKey = new AtomicReference<>();
+    AtomicReference<String> secondKey = new AtomicReference<>();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    CountDownLatch secondStarted = new CountDownLatch(1);
+    Thread first =
+        new Thread(
+            () ->
+                capture(
+                    () -> firstKey.set(manager.addManifestListKeyMetadata(keyMetadata())),
+                    failure));
+    Thread second =
+        new Thread(
             () -> {
-              List<String> ids = Lists.newArrayList();
-              for (int i = 0; i < KEYS_PER_THREAD; i++) {
-                ids.add(manager.addManifestListKeyMetadata(keyMetadata()));
-                manager.encryptionKeys().forEach((id, key) -> {}); // concurrent read must not throw
-              }
-              return ids;
-            })) {
-      keyIds.addAll(perThread);
+              secondStarted.countDown();
+              capture(
+                  () -> secondKey.set(manager.addManifestListKeyMetadata(keyMetadata())), failure);
+            });
+
+    first.start();
+    kms.awaitWrap();
+    second.start();
+    assertThat(secondStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+
+    try {
+      awaitBlocked(second);
+      assertThat(kms.wrapCalls()).isEqualTo(1);
+    } finally {
+      kms.releaseWrap();
+      join(first);
+      join(second);
     }
 
-    // No lost updates or duplicate ids under concurrency, and every minted key resolves.
-    assertThat(Set.copyOf(keyIds)).hasSize(THREADS * KEYS_PER_THREAD);
-    for (String keyId : keyIds) {
-      assertThat(manager.encryptedByKey(keyId)).isNotNull();
-    }
-
-    // keyEncryptionKeyID()'s check-then-mint is atomic: exactly one key encryption key is created.
-    long kekCount =
-        manager.encryptionKeys().values().stream()
-            .filter(key -> key.encryptedById().equals(UnitestKMS.MASTER_KEY_NAME1))
-            .count();
-    assertThat(kekCount).isEqualTo(1L);
+    assertThat(failure.get()).isNull();
+    assertThat(manager.encryptionKeys()).containsKeys(firstKey.get(), secondKey.get()).hasSize(3);
+    assertThat(
+            manager.encryptionKeys().values().stream()
+                .filter(key -> UnitestKMS.MASTER_KEY_NAME1.equals(key.encryptedById()))
+                .count())
+        .isEqualTo(1L);
   }
 
   @Test
-  public void testConcurrentSerializationWhileMintingStaysConsistent() throws Exception {
-    StandardEncryptionManager manager = newManager();
-    List<String> seeded = Lists.newArrayList();
-    for (int i = 0; i < 10; i++) {
-      seeded.add(manager.addManifestListKeyMetadata(keyMetadata()));
-    }
-
+  void serializationWaitsForCompleteKeyMint() throws Exception {
+    BlockingKms kms = new BlockingKms();
+    StandardEncryptionManager manager = newManager(kms);
+    AtomicReference<String> keyId = new AtomicReference<>();
+    AtomicReference<StandardEncryptionManager> serialized = new AtomicReference<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
-    CountDownLatch start = new CountDownLatch(1);
+    CountDownLatch serializationStarted = new CountDownLatch(1);
     Thread minter =
         new Thread(
+            () ->
+                capture(
+                    () -> keyId.set(manager.addManifestListKeyMetadata(keyMetadata())), failure));
+    Thread serializer =
+        new Thread(
             () -> {
-              try {
-                start.await();
-                for (int i = 0; i < ROUNDS; i++) {
-                  manager.addManifestListKeyMetadata(keyMetadata());
-                }
-              } catch (Throwable t) {
-                failure.compareAndSet(null, t);
-              }
+              serializationStarted.countDown();
+              capture(() -> serialized.set(roundTrip(manager)), failure);
             });
 
     minter.start();
-    start.countDown();
-    // writeObject is synchronized, so serialization never traverses the key map mid-put: every
-    // round trip is a complete, still-functional snapshot rather than a corrupt stream.
-    for (int i = 0; i < ROUNDS; i++) {
-      assertThat(roundTrip(manager).encryptionKeys().keySet()).containsAll(seeded);
-    }
-    minter.join(TimeUnit.SECONDS.toMillis(30));
+    kms.awaitWrap();
+    serializer.start();
+    assertThat(serializationStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
-    assertThat(minter.isAlive()).isFalse();
+    try {
+      awaitBlocked(serializer);
+      assertThat(serialized.get()).isNull();
+    } finally {
+      kms.releaseWrap();
+      join(minter);
+      join(serializer);
+    }
+
     assertThat(failure.get()).isNull();
+    EncryptedKey manifestListKey = serialized.get().encryptionKeys().get(keyId.get());
+    assertThat(manifestListKey).isNotNull();
+    assertThat(serialized.get().encryptionKeys())
+        .containsKey(manifestListKey.encryptedById())
+        .hasSize(2);
+    assertThat(serialized.get().encryptedByKey(keyId.get())).isNotNull();
   }
 
-  private static StandardEncryptionManager newManager() {
-    return (StandardEncryptionManager) EncryptionTestHelpers.createEncryptionManager();
+  @Test
+  void encryptionKeysReturnsImmutableSnapshot() {
+    StandardEncryptionManager manager = newManager(new UnitestKMS());
+    String firstKey = manager.addManifestListKeyMetadata(keyMetadata());
+    Map<String, EncryptedKey> snapshot = manager.encryptionKeys();
+
+    String secondKey = manager.addManifestListKeyMetadata(keyMetadata());
+
+    assertThat(snapshot).containsKey(firstKey).doesNotContainKey(secondKey).hasSize(2);
+    assertThatThrownBy(snapshot::clear).isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  private static StandardEncryptionManager newManager(UnitestKMS kms) {
+    kms.initialize(Map.of());
+    return new StandardEncryptionManager(List.of(), UnitestKMS.MASTER_KEY_NAME1, 16, kms);
   }
 
   private static NativeEncryptionKeyMetadata keyMetadata() {
     return new StandardKeyMetadata(new byte[16], new byte[16]);
   }
 
-  private static List<List<String>> runConcurrently(Callable<List<String>> task) throws Exception {
-    ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+  private static void capture(ThrowingRunnable action, AtomicReference<Throwable> failure) {
     try {
-      CyclicBarrier barrier = new CyclicBarrier(THREADS);
-      List<Future<List<String>>> futures = Lists.newArrayList();
-      for (int t = 0; t < THREADS; t++) {
-        futures.add(
-            pool.submit(
-                () -> {
-                  barrier.await();
-                  return task.call();
-                }));
-      }
-
-      List<List<String>> results = Lists.newArrayList();
-      for (Future<List<String>> future : futures) {
-        try {
-          results.add(future.get(60, TimeUnit.SECONDS));
-        } catch (ExecutionException e) {
-          throw new AssertionError("Concurrent task failed", e.getCause());
-        }
-      }
-      return results;
-    } finally {
-      pool.shutdownNow();
+      action.run();
+    } catch (Throwable t) {
+      failure.compareAndSet(null, t);
     }
+  }
+
+  private static void awaitBlocked(Thread thread) {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
+    while (thread.isAlive()
+        && thread.getState() != Thread.State.BLOCKED
+        && System.nanoTime() < deadline) {
+      Thread.yield();
+    }
+
+    assertThat(thread.getState()).isEqualTo(Thread.State.BLOCKED);
+  }
+
+  private static void join(Thread thread) throws InterruptedException {
+    thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
+    assertThat(thread.isAlive()).isFalse();
   }
 
   @SuppressWarnings("unchecked")
@@ -154,9 +177,49 @@ public class TestStandardEncryptionManagerConcurrency {
     try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
       out.writeObject(value);
     }
+
     try (ObjectInputStream in =
         new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
       return (T) in.readObject();
+    }
+  }
+
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    void run() throws Exception;
+  }
+
+  private static class BlockingKms extends UnitestKMS {
+    private final AtomicInteger wrapCalls = new AtomicInteger();
+    private transient CountDownLatch wrapEntered = new CountDownLatch(1);
+    private transient CountDownLatch allowWrap = new CountDownLatch(1);
+
+    @Override
+    public ByteBuffer wrapKey(ByteBuffer key, String wrappingKeyId) {
+      wrapCalls.incrementAndGet();
+      wrapEntered.countDown();
+      try {
+        if (!allowWrap.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
+          throw new AssertionError("Timed out waiting to release key wrapping");
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("Interrupted while waiting to wrap key", e);
+      }
+
+      return super.wrapKey(key, wrappingKeyId);
+    }
+
+    private void awaitWrap() throws InterruptedException {
+      assertThat(wrapEntered.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+    }
+
+    private void releaseWrap() {
+      allowWrap.countDown();
+    }
+
+    private int wrapCalls() {
+      return wrapCalls.get();
     }
   }
 }
