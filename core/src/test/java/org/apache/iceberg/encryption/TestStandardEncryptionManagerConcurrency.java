@@ -135,7 +135,9 @@ class TestStandardEncryptionManagerConcurrency {
     String secondKey = manager.addManifestListKeyMetadata(keyMetadata());
 
     assertThat(snapshot).containsKey(firstKey).doesNotContainKey(secondKey).hasSize(2);
-    assertThatThrownBy(snapshot::clear).isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(snapshot::clear)
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessage(null);
   }
 
   private static StandardEncryptionManager newManager(UnitestKMS kms) {
