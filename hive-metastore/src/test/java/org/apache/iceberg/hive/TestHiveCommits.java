@@ -28,16 +28,24 @@ import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.File;
+import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.BaseEncryptedKey;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -52,6 +60,70 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.platform.commons.support.ReflectionSupport;
 
 public class TestHiveCommits extends HiveTableTestBase {
+
+  @Test
+  void rejectsMissingManifestListKeyBeforePersisting() throws TException, InterruptedException {
+    Table table = catalog.loadTable(TABLE_IDENTIFIER);
+    HiveTableOperations ops = (HiveTableOperations) ((HasTableOperations) table).operations();
+    TableMetadata base = ops.current();
+    int metadataFiles = metadataFileCount(base);
+    Snapshot snapshot = snapshotWithKey(base, "missing-mlk");
+    TableMetadata updated = TableMetadata.buildFrom(base).addSnapshot(snapshot).build();
+    HiveTableOperations spyOps = spy(ops);
+
+    assertThatThrownBy(() -> spyOps.commit(base, updated))
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessage(
+            "Cannot commit snapshot %s to %s.%s: manifest list key missing-mlk is missing from table metadata",
+            snapshot.snapshotId(), TABLE_IDENTIFIER.namespace(), TABLE_IDENTIFIER.name());
+
+    verify(spyOps, never()).persistTable(any(), anyBoolean(), any());
+    assertThat(metadataFileCount(base)).isEqualTo(metadataFiles);
+    assertThat(ops.refresh().metadataFileLocation()).isEqualTo(base.metadataFileLocation());
+  }
+
+  @Test
+  void rejectsMissingKeyEncryptionKeyBeforePersisting() throws TException, InterruptedException {
+    Table table = catalog.loadTable(TABLE_IDENTIFIER);
+    HiveTableOperations ops = (HiveTableOperations) ((HasTableOperations) table).operations();
+    TableMetadata base = ops.current();
+    int metadataFiles = metadataFileCount(base);
+    Snapshot snapshot = snapshotWithKey(base, "mlk");
+    TableMetadata updated =
+        TableMetadata.buildFrom(base)
+            .addEncryptionKey(
+                new BaseEncryptedKey("mlk", ByteBuffer.wrap(new byte[16]), "missing-kek", Map.of()))
+            .addSnapshot(snapshot)
+            .build();
+    HiveTableOperations spyOps = spy(ops);
+
+    assertThatThrownBy(() -> spyOps.commit(base, updated))
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessage(
+            "Cannot commit snapshot %s to %s.%s: key encryption key missing-kek is missing from table metadata",
+            snapshot.snapshotId(), TABLE_IDENTIFIER.namespace(), TABLE_IDENTIFIER.name());
+
+    verify(spyOps, never()).persistTable(any(), anyBoolean(), any());
+    assertThat(metadataFileCount(base)).isEqualTo(metadataFiles);
+    assertThat(ops.refresh().metadataFileLocation()).isEqualTo(base.metadataFileLocation());
+  }
+
+  @Test
+  void ignoresAddedSnapshotRemovedFromFinalMetadata() {
+    Table table = catalog.loadTable(TABLE_IDENTIFIER);
+    HiveTableOperations ops = (HiveTableOperations) ((HasTableOperations) table).operations();
+    TableMetadata base = ops.current();
+    Snapshot snapshot = snapshotWithKey(base, "missing-mlk");
+    TableMetadata updated =
+        TableMetadata.buildFrom(base)
+            .addSnapshot(snapshot)
+            .removeSnapshots(List.of(snapshot.snapshotId()))
+            .build();
+
+    ops.commit(base, updated);
+
+    assertThat(ops.refresh().snapshot(snapshot.snapshotId())).isNull();
+  }
 
   @Test
   public void testSuppressUnlockExceptions() {
@@ -617,5 +689,13 @@ public class TestHiveCommits extends HiveTableTestBase {
         .getParentFile()
         .listFiles(file -> file.getName().endsWith("metadata.json"))
         .length;
+  }
+
+  private static Snapshot snapshotWithKey(TableMetadata base, String keyId) {
+    Snapshot snapshot = mock(Snapshot.class);
+    when(snapshot.snapshotId()).thenReturn(100L);
+    when(snapshot.sequenceNumber()).thenReturn(base.nextSequenceNumber());
+    when(snapshot.keyId()).thenReturn(keyId);
+    return snapshot;
   }
 }

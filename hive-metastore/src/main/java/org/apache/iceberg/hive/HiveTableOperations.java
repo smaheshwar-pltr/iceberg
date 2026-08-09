@@ -238,14 +238,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     }
   }
 
-  /**
-   * A snapshot whose manifest list is encrypted is unreadable unless the manifest list key and the
-   * key encryption key that wraps it are in the same metadata. Keys are minted into the shared
-   * encryption manager while the manifest list is written and only copied into metadata here, so a
-   * concurrent refresh that replaces the manager in between drops them. Fail the commit instead of
-   * writing a snapshot that can never be decrypted; the retry re-writes the manifest list and
-   * usually succeeds.
-   */
+  /** Validates that newly added snapshots retain the keys required to read their manifest lists. */
   private void checkManifestListKeysArePresent(TableMetadata metadata) {
     Set<String> keyIds =
         metadata.encryptionKeys().stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
@@ -254,11 +247,15 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             .collect(Collectors.toMap(EncryptedKey::keyId, EncryptedKey::encryptedById));
 
     for (MetadataUpdate change : metadata.changes()) {
-      if (!(change instanceof MetadataUpdate.AddSnapshot)) {
+      if (!(change instanceof MetadataUpdate.AddSnapshot addSnapshot)) {
         continue;
       }
 
-      Snapshot snapshot = ((MetadataUpdate.AddSnapshot) change).snapshot();
+      Snapshot snapshot = addSnapshot.snapshot();
+      if (metadata.snapshot(snapshot.snapshotId()) == null) {
+        continue;
+      }
+
       String keyId = snapshot.keyId();
       if (keyId == null) {
         continue;
@@ -266,14 +263,14 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
       if (!keyIds.contains(keyId)) {
         throw new CommitFailedException(
-            "Cannot commit snapshot %s to %s.%s: manifest list key %s was lost by a concurrent refresh",
+            "Cannot commit snapshot %s to %s.%s: manifest list key %s is missing from table metadata",
             snapshot.snapshotId(), database, tableName, keyId);
       }
 
       String keyEncryptionKeyId = wrappedBy.get(keyId);
       if (!keyIds.contains(keyEncryptionKeyId)) {
         throw new CommitFailedException(
-            "Cannot commit snapshot %s to %s.%s: key encryption key %s was lost by a concurrent refresh",
+            "Cannot commit snapshot %s to %s.%s: key encryption key %s is missing from table metadata",
             snapshot.snapshotId(), database, tableName, keyEncryptionKeyId);
       }
     }
@@ -297,11 +294,11 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       }
 
       tableMetadata = builder.build();
-      checkManifestListKeysArePresent(tableMetadata);
     } else {
       tableMetadata = metadata;
     }
 
+    checkManifestListKeysArePresent(tableMetadata);
     newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
 
     boolean hiveEngineEnabled = hiveEngineEnabled(tableMetadata, conf);
