@@ -22,7 +22,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
@@ -37,9 +36,7 @@ import org.apache.iceberg.BaseMetastoreOperations;
 import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
-import org.apache.iceberg.LocationProviders;
 import org.apache.iceberg.TableMetadata;
-import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptingFileIO;
@@ -47,6 +44,7 @@ import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -54,11 +52,9 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.hadoop.ConfigProperties;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
@@ -138,31 +134,50 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   @Override
   public EncryptionManager encryption() {
-    if (encryptionManager != null) {
-      return encryptionManager;
+    if (encryptionManager == null && tableKeyId != null) {
+      encryptionManager = createEncryptionManager(encryptedKeys);
     }
 
-    if (tableKeyId != null) {
-      Preconditions.checkArgument(
-          keyManagementClient != null,
-          "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-          CatalogProperties.ENCRYPTION_KMS_IMPL);
+    return encryptionManager != null ? encryptionManager : PlaintextEncryptionManager.instance();
+  }
 
-      Map<String, String> encryptionProperties =
-          ImmutableMap.of(
-              TableProperties.ENCRYPTION_TABLE_KEY,
-              tableKeyId,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              String.valueOf(encryptionDekLength));
-
-      encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              encryptedKeys, encryptionProperties, keyManagementClient);
-    } else {
+  /**
+   * Uncommitted metadata carries keys that the committed table does not have yet, so a staged
+   * snapshot's manifest list is only readable through a manager built from that metadata.
+   */
+  @Override
+  protected EncryptionManager encryption(TableMetadata metadata) {
+    // a table created inside a transaction is not in the metastore yet, so its key id is only
+    // available from the uncommitted metadata
+    encryptionPropsFromMetadata(metadata.properties());
+    if (tableKeyId == null) {
       return PlaintextEncryptionManager.instance();
     }
 
-    return encryptionManager;
+    return createEncryptionManager(metadata.encryptionKeys());
+  }
+
+  @Override
+  protected FileIO io(EncryptionManager encryption) {
+    return encryption instanceof StandardEncryptionManager
+        ? EncryptingFileIO.combine(fileIO, encryption)
+        : fileIO;
+  }
+
+  private EncryptionManager createEncryptionManager(List<EncryptedKey> keys) {
+    Preconditions.checkArgument(
+        keyManagementClient != null,
+        "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+        CatalogProperties.ENCRYPTION_KMS_IMPL);
+
+    Map<String, String> encryptionProperties =
+        ImmutableMap.of(
+            TableProperties.ENCRYPTION_TABLE_KEY,
+            tableKeyId,
+            TableProperties.ENCRYPTION_DEK_LENGTH,
+            String.valueOf(encryptionDekLength));
+
+    return EncryptionUtil.createEncryptionManager(keys, encryptionProperties, keyManagementClient);
   }
 
   @Override
@@ -213,23 +228,9 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
               ? Integer.parseInt(dekLengthFromHMS)
               : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-      encryptedKeys =
-          Optional.ofNullable(current().encryptionKeys())
-              .map(Lists::newLinkedList)
-              .orElseGet(Lists::newLinkedList);
+      encryptedKeys = current().encryptionKeys();
 
-      if (encryptionManager != null) {
-        Set<String> keyIdsFromMetadata =
-            encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
-
-        for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
-          if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
-            encryptedKeys.add(keyFromEM);
-          }
-        }
-      }
-
-      // Force re-creation of encryption manager with updated keys
+      // re-create the encryption manager with the refreshed keys
       encryptingFileIO = null;
       encryptionManager = null;
     }
@@ -436,54 +437,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   public ClientPool<IMetaStoreClient, TException> metaClients() {
     return metaClients;
-  }
-
-  @Override
-  public TableOperations temp(TableMetadata uncommittedMetadata) {
-    return new TableOperations() {
-      @Override
-      public TableMetadata current() {
-        return uncommittedMetadata;
-      }
-
-      @Override
-      public TableMetadata refresh() {
-        throw new UnsupportedOperationException(
-            "Cannot call refresh on temporary table operations");
-      }
-
-      @Override
-      public void commit(TableMetadata base, TableMetadata metadata) {
-        throw new UnsupportedOperationException("Cannot call commit on temporary table operations");
-      }
-
-      @Override
-      public String metadataFileLocation(String fileName) {
-        return HiveTableOperations.this.metadataFileLocation(uncommittedMetadata, fileName);
-      }
-
-      @Override
-      public LocationProvider locationProvider() {
-        return LocationProviders.locationsFor(
-            uncommittedMetadata.location(), uncommittedMetadata.properties());
-      }
-
-      @Override
-      public FileIO io() {
-        HiveTableOperations.this.encryptionPropsFromMetadata(uncommittedMetadata.properties());
-        return HiveTableOperations.this.io();
-      }
-
-      @Override
-      public EncryptionManager encryption() {
-        return HiveTableOperations.this.encryption();
-      }
-
-      @Override
-      public long newSnapshotId() {
-        return HiveTableOperations.this.newSnapshotId();
-      }
-    };
   }
 
   /**
