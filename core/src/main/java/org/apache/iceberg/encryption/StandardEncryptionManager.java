@@ -161,7 +161,23 @@ public class StandardEncryptionManager implements EncryptionManager {
   }
 
   synchronized Map<String, EncryptedKey> encryptionKeys() {
-    return ImmutableMap.copyOf(encryptionKeys);
+    ImmutableMap.Builder<String, EncryptedKey> snapshot =
+        ImmutableMap.builderWithExpectedSize(encryptionKeys.size());
+    for (EncryptedKey key : encryptionKeys.values()) {
+      snapshot.put(
+          key.keyId(),
+          new BaseEncryptedKey(
+              key.keyId(),
+              ByteBuffers.copy(key.encryptedKeyMetadata()),
+              key.encryptedById(),
+              key.properties()));
+    }
+
+    return snapshot.build();
+  }
+
+  synchronized EncryptedKey encryptionKey(String keyId) {
+    return encryptionKeys.get(keyId);
   }
 
   synchronized String keyEncryptionKeyID() {
