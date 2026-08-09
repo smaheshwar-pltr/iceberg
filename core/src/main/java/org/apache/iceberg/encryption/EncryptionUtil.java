@@ -148,14 +148,12 @@ public class EncryptionUtil {
         "Snapshot key metadata encryption requires a StandardEncryptionManager");
     StandardEncryptionManager sem = (StandardEncryptionManager) em;
     String manifestListKeyId = manifestList.encryptionKeyID();
-    Map<String, EncryptedKey> encryptionKeys = sem.encryptionKeys();
-    EncryptedKey manifestListKey = encryptionKeys.get(manifestListKeyId);
+    EncryptedKey manifestListKey = sem.encryptionKey(manifestListKeyId);
     ByteBuffer encryptedKeyMetadata = manifestListKey.encryptedKeyMetadata();
     String keyEncryptionKeyID = manifestListKey.encryptedById();
     ByteBuffer keyEncryptionKey = sem.encryptedByKey(manifestListKeyId);
     String keyEncryptionKeyTimestamp =
-        encryptionKeys
-            .get(keyEncryptionKeyID)
+        sem.encryptionKey(keyEncryptionKeyID)
             .properties()
             .get(StandardEncryptionManager.KEY_TIMESTAMP);
     Preconditions.checkState(
