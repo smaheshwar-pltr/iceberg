@@ -148,14 +148,12 @@ public class EncryptionUtil {
         "Snapshot key metadata encryption requires a StandardEncryptionManager");
     StandardEncryptionManager sem = (StandardEncryptionManager) em;
     String manifestListKeyId = manifestList.encryptionKeyID();
-    Map<String, EncryptedKey> encryptionKeys = sem.encryptionKeys();
-    EncryptedKey manifestListKey = encryptionKeys.get(manifestListKeyId);
+    EncryptedKey manifestListKey = sem.encryptionKey(manifestListKeyId);
     ByteBuffer encryptedKeyMetadata = manifestListKey.encryptedKeyMetadata();
     String keyEncryptionKeyID = manifestListKey.encryptedById();
     ByteBuffer keyEncryptionKey = sem.encryptedByKey(manifestListKeyId);
     String keyEncryptionKeyTimestamp =
-        encryptionKeys
-            .get(keyEncryptionKeyID)
+        sem.encryptionKey(keyEncryptionKeyID)
             .properties()
             .get(StandardEncryptionManager.KEY_TIMESTAMP);
     Preconditions.checkState(
@@ -173,6 +171,15 @@ public class EncryptionUtil {
     return ByteBuffer.wrap(decryptedKeyMetadata);
   }
 
+  /**
+   * Returns a mutable point-in-time copy of the standard encryption manager's key registry.
+   *
+   * <p>Changes to the returned map or its detached key values do not affect the manager.
+   *
+   * @param em the table's encryption manager
+   * @return a mutable detached copy of the encryption-key registry
+   * @throws IllegalStateException if the manager is not a {@link StandardEncryptionManager}
+   */
   public static Map<String, EncryptedKey> encryptionKeys(EncryptionManager em) {
     Preconditions.checkState(
         em instanceof StandardEncryptionManager,
