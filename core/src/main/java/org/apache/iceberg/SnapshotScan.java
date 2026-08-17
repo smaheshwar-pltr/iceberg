@@ -82,7 +82,7 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
 
   protected Map<Integer, PartitionSpec> specs() {
     Map<Integer, PartitionSpec> specs = table().specs();
-    // requires latest schema
+    // the table's specs are already bound to the scan's schema
     if (!useSnapshotSchema()
         || snapshotId() == null
         || tableSchema().sameSchema(table().schema())) {
