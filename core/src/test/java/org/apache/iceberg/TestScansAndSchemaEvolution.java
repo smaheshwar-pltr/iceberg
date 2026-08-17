@@ -318,6 +318,27 @@ public class TestScansAndSchemaEvolution {
   }
 
   @TestTemplate
+  public void testColumnDropWithoutNewSnapshot() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table.newAppend().appendFile(createDataFile("one")).appendFile(createDataFile("two")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // drop a column without committing a snapshot, so the table's snapshot still uses the old
+    // schema while the table itself uses the new one
+    table.updateSchema().deleteColumn("data").commit();
+
+    List<FileScanTask> tasks =
+        Lists.newArrayList(
+            table
+                .newScan()
+                .useSnapshot(snapshotId)
+                .filter(Expressions.equal("data", "xyz"))
+                .planFiles());
+    assertThat(tasks).hasSize(2);
+  }
+
+  @TestTemplate
   public void testAddColumnWithDefaultValueAndQuery() throws IOException {
     assumeThat(V3_AND_ABOVE).as("Default values require v3+").contains(formatVersion);
     Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
