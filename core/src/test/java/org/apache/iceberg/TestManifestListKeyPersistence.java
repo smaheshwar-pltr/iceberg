@@ -112,6 +112,7 @@ class TestManifestListKeyPersistence {
         .snapshots()
         .forEach(
             snapshot -> {
+              assertSnapshotKeysCommitted(committed, snapshot);
               assertThat(snapshot.allManifests(table.io())).isNotEmpty();
               assertReadableFromCommittedKeys(committed, snapshot);
             });

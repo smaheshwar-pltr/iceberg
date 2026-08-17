@@ -271,6 +271,7 @@ public class TestTableEncryption extends CatalogTestBase {
     Table reloaded = validationCatalog.loadTable(tableIdent);
     assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + 3);
     for (Snapshot snapshot : reloaded.snapshots()) {
+      assertSnapshotHasEncryptionKeys(reloaded, snapshot);
       assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     }
 
@@ -301,18 +302,7 @@ public class TestTableEncryption extends CatalogTestBase {
 
       Snapshot snapshot = reloaded.currentSnapshot();
       assertThat(snapshot).isNotNull();
-      assertThat(snapshot.keyId()).isNotNull();
-
-      TableMetadata metadata = ((HasTableOperations) reloaded).operations().current();
-      EncryptedKey manifestListKey =
-          metadata.encryptionKeys().stream()
-              .filter(key -> key.keyId().equals(snapshot.keyId()))
-              .findFirst()
-              .orElse(null);
-
-      assertThat(manifestListKey).isNotNull();
-      assertThat(metadata.encryptionKeys())
-          .anyMatch(key -> key.keyId().equals(manifestListKey.encryptedById()));
+      assertSnapshotHasEncryptionKeys(reloaded, snapshot);
       assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     } finally {
       validationCatalog.dropTable(created);
