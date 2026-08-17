@@ -41,11 +41,10 @@ class TestStandardEncryptionManagerConcurrency {
   @Test
   void concurrentMintingCreatesOneKeyEncryptionKey() throws Exception {
     BlockingKms kms = new BlockingKms();
-    StandardEncryptionManager manager = newManager(kms);
+    InvocationTrackingManager manager = newInvocationTrackingManager(kms);
     AtomicReference<String> firstKey = new AtomicReference<>();
     AtomicReference<String> secondKey = new AtomicReference<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
-    CountDownLatch secondStarted = new CountDownLatch(1);
     Thread first =
         new Thread(
             () ->
@@ -54,17 +53,16 @@ class TestStandardEncryptionManagerConcurrency {
                     failure));
     Thread second =
         new Thread(
-            () -> {
-              secondStarted.countDown();
-              capture(
-                  () -> secondKey.set(manager.addManifestListKeyMetadata(keyMetadata())), failure);
-            });
+            () ->
+                capture(
+                    () -> secondKey.set(manager.addManifestListKeyMetadata(keyMetadata())),
+                    failure));
 
     first.start();
     try {
       kms.awaitWrap();
       second.start();
-      assertThat(secondStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+      manager.awaitAddInvocations();
     } finally {
       kms.releaseWrap();
       join(first);
@@ -83,24 +81,19 @@ class TestStandardEncryptionManagerConcurrency {
   @Test
   void serializationDoesNotExposeIncompleteKeyRegistry() throws Exception {
     BlockingKms kms = new BlockingKms();
-    StandardEncryptionManager manager = newManager(kms);
+    InvocationTrackingManager manager = newInvocationTrackingManager(kms);
     AtomicReference<StandardEncryptionManager> serialized = new AtomicReference<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
-    CountDownLatch serializationStarted = new CountDownLatch(1);
     Thread minter =
         new Thread(() -> capture(() -> manager.addManifestListKeyMetadata(keyMetadata()), failure));
     Thread serializer =
-        new Thread(
-            () -> {
-              serializationStarted.countDown();
-              capture(() -> serialized.set(roundTrip(manager)), failure);
-            });
+        new Thread(() -> capture(() -> serialized.set(roundTrip(manager)), failure));
 
     minter.start();
     try {
       kms.awaitWrap();
       serializer.start();
-      assertThat(serializationStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+      manager.awaitSerializationInvocation();
     } finally {
       kms.releaseWrap();
       join(minter);
@@ -114,24 +107,19 @@ class TestStandardEncryptionManagerConcurrency {
   @Test
   void snapshotDoesNotExposeIncompleteKeyRegistry() throws Exception {
     BlockingKms kms = new BlockingKms();
-    StandardEncryptionManager manager = newManager(kms);
+    InvocationTrackingManager manager = newInvocationTrackingManager(kms);
     AtomicReference<Map<String, EncryptedKey>> snapshot = new AtomicReference<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
-    CountDownLatch snapshotStarted = new CountDownLatch(1);
     Thread minter =
         new Thread(() -> capture(() -> manager.addManifestListKeyMetadata(keyMetadata()), failure));
     Thread reader =
-        new Thread(
-            () -> {
-              snapshotStarted.countDown();
-              capture(() -> snapshot.set(manager.encryptionKeys()), failure);
-            });
+        new Thread(() -> capture(() -> snapshot.set(manager.encryptionKeys()), failure));
 
     minter.start();
     try {
       kms.awaitWrap();
       reader.start();
-      assertThat(snapshotStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+      manager.awaitSnapshotInvocation();
     } finally {
       kms.releaseWrap();
       join(minter);
@@ -230,6 +218,10 @@ class TestStandardEncryptionManagerConcurrency {
         List.of(), UnitestKMS.MASTER_KEY_NAME1, 16, initializedKms(kms));
   }
 
+  private static InvocationTrackingManager newInvocationTrackingManager(UnitestKMS kms) {
+    return new InvocationTrackingManager(initializedKms(kms));
+  }
+
   private static UnitestKMS initializedKms() {
     return initializedKms(new UnitestKMS());
   }
@@ -244,6 +236,7 @@ class TestStandardEncryptionManagerConcurrency {
   }
 
   private static void assertCompleteKeyPairs(Map<String, EncryptedKey> keys) {
+    assertThat(keys).isNotEmpty();
     keys.values().stream()
         .filter(key -> !UnitestKMS.MASTER_KEY_NAME1.equals(key.encryptedById()))
         .forEach(key -> assertThat(keys).containsKey(key.encryptedById()));
@@ -311,6 +304,48 @@ class TestStandardEncryptionManagerConcurrency {
 
     private int wrapCalls() {
       return wrapCalls.get();
+    }
+  }
+
+  private static class InvocationTrackingManager extends StandardEncryptionManager {
+    private final transient CountDownLatch addInvocations = new CountDownLatch(2);
+    private final transient CountDownLatch snapshotInvocation = new CountDownLatch(1);
+    private final transient CountDownLatch serializationInvocation = new CountDownLatch(1);
+
+    private InvocationTrackingManager(UnitestKMS kms) {
+      super(List.of(), UnitestKMS.MASTER_KEY_NAME1, 16, kms);
+    }
+
+    @Override
+    public String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
+      addInvocations.countDown();
+      return super.addManifestListKeyMetadata(keyMetadata);
+    }
+
+    @Override
+    Map<String, EncryptedKey> encryptionKeys() {
+      if (snapshotInvocation != null) {
+        snapshotInvocation.countDown();
+      }
+
+      return super.encryptionKeys();
+    }
+
+    private Object writeReplace() {
+      serializationInvocation.countDown();
+      return this;
+    }
+
+    private void awaitAddInvocations() throws InterruptedException {
+      assertThat(addInvocations.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+    }
+
+    private void awaitSnapshotInvocation() throws InterruptedException {
+      assertThat(snapshotInvocation.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+    }
+
+    private void awaitSerializationInvocation() throws InterruptedException {
+      assertThat(serializationInvocation.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     }
   }
 
