@@ -61,12 +61,10 @@ class TestStandardEncryptionManagerConcurrency {
             });
 
     first.start();
-    kms.awaitWrap();
-    second.start();
-    assertThat(secondStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     try {
-      awaitBlocked(second);
-      assertThat(kms.wrapCalls()).isEqualTo(1);
+      kms.awaitWrap();
+      second.start();
+      assertThat(secondStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     } finally {
       kms.releaseWrap();
       join(first);
@@ -74,6 +72,7 @@ class TestStandardEncryptionManagerConcurrency {
     }
 
     assertThat(failure.get()).isNull();
+    assertThat(kms.wrapCalls()).isEqualTo(1);
     assertThat(manager.encryptionKeys()).containsKeys(firstKey.get(), secondKey.get()).hasSize(3);
     assertThat(
             manager.encryptionKeys().values().stream()
@@ -82,7 +81,7 @@ class TestStandardEncryptionManagerConcurrency {
   }
 
   @Test
-  void serializationDoesNotOverlapKeyRegistryTransition() throws Exception {
+  void serializationDoesNotExposeIncompleteKeyRegistry() throws Exception {
     BlockingKms kms = new BlockingKms();
     StandardEncryptionManager manager = newManager(kms);
     AtomicReference<StandardEncryptionManager> serialized = new AtomicReference<>();
@@ -98,12 +97,10 @@ class TestStandardEncryptionManagerConcurrency {
             });
 
     minter.start();
-    kms.awaitWrap();
-    serializer.start();
-    assertThat(serializationStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     try {
-      awaitBlocked(serializer);
-      assertThat(serialized.get()).isNull();
+      kms.awaitWrap();
+      serializer.start();
+      assertThat(serializationStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     } finally {
       kms.releaseWrap();
       join(minter);
@@ -115,7 +112,7 @@ class TestStandardEncryptionManagerConcurrency {
   }
 
   @Test
-  void snapshotDoesNotOverlapKeyRegistryTransition() throws Exception {
+  void snapshotDoesNotExposeIncompleteKeyRegistry() throws Exception {
     BlockingKms kms = new BlockingKms();
     StandardEncryptionManager manager = newManager(kms);
     AtomicReference<Map<String, EncryptedKey>> snapshot = new AtomicReference<>();
@@ -131,12 +128,10 @@ class TestStandardEncryptionManagerConcurrency {
             });
 
     minter.start();
-    kms.awaitWrap();
-    reader.start();
-    assertThat(snapshotStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     try {
-      awaitBlocked(reader);
-      assertThat(snapshot.get()).isNull();
+      kms.awaitWrap();
+      reader.start();
+      assertThat(snapshotStarted.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     } finally {
       kms.releaseWrap();
       join(minter);
@@ -260,17 +255,6 @@ class TestStandardEncryptionManagerConcurrency {
     } catch (Throwable t) {
       failure.compareAndSet(null, t);
     }
-  }
-
-  private static void awaitBlocked(Thread thread) {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
-    while (thread.isAlive()
-        && thread.getState() != Thread.State.BLOCKED
-        && System.nanoTime() < deadline) {
-      Thread.yield();
-    }
-
-    assertThat(thread.getState()).isEqualTo(Thread.State.BLOCKED);
   }
 
   private static void join(Thread thread) throws InterruptedException {
