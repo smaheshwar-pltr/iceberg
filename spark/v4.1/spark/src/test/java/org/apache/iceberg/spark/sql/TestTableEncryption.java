@@ -59,7 +59,9 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.EncryptedKey;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.NativeEncryptionOutputFile;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
@@ -319,6 +321,36 @@ public class TestTableEncryption extends CatalogTestBase {
         .isInstanceOfSatisfying(
             NativeEncryptionOutputFile.class,
             output -> assertThat(output.keyMetadata().encryptionKey().remaining()).isEqualTo(32));
+  }
+
+  @TestTemplate
+  void catalogMasterKeyControlsTemporaryEncryption() {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    TableOperations ops = ((HasTableOperations) table).operations();
+    TableMetadata staged =
+        TableMetadata.buildFrom(ops.current())
+            .setProperties(
+                Map.of(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2))
+            .build();
+
+    assertThat(ops.temp(staged).encryption())
+        .isInstanceOfSatisfying(
+            StandardEncryptionManager.class,
+            encryption -> {
+              NativeEncryptionOutputFile output =
+                  encryption.encrypt(
+                      localOutput(table.location() + "/catalog-master-key-precedence"));
+              String manifestListKeyId =
+                  encryption.addManifestListKeyMetadata(output.keyMetadata());
+              Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(encryption);
+              EncryptedKey manifestListKey = keys.get(manifestListKeyId);
+
+              assertThat(manifestListKey).isNotNull();
+              EncryptedKey keyEncryptionKey = keys.get(manifestListKey.encryptedById());
+              assertThat(keyEncryptionKey).isNotNull();
+              assertThat(keyEncryptionKey.encryptedById()).isEqualTo(UnitestKMS.MASTER_KEY_NAME1);
+            });
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions
