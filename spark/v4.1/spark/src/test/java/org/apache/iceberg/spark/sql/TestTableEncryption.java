@@ -19,6 +19,7 @@
 package org.apache.iceberg.spark.sql;
 
 import static org.apache.iceberg.Files.localInput;
+import static org.apache.iceberg.Files.localOutput;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -52,9 +53,13 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableOperations;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.EncryptedKey;
+import org.apache.iceberg.encryption.NativeEncryptionOutputFile;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
@@ -242,6 +247,78 @@ public class TestTableEncryption extends CatalogTestBase {
     }
 
     assertThat(currentDataFiles(reloaded)).hasSize(initialFiles.size() + 2);
+  }
+
+  @TestTemplate
+  void transactionRebasePreservesManifestListKeys() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    List<DataFile> initialFiles = currentDataFiles(table);
+    int initialSnapshotCount = (int) Streams.stream(table.snapshots()).count();
+    DataFile file = initialFiles.get(0);
+
+    Transaction transaction = table.newTransaction();
+    transaction.newFastAppend().appendFile(file).commit();
+
+    table.newFastAppend().appendFile(file).commit();
+
+    transaction.newFastAppend().appendFile(file).commit();
+    transaction.commitTransaction();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + 3);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
+
+    assertThat(currentDataFiles(reloaded)).hasSize(initialFiles.size() + 3);
+  }
+
+  @TestTemplate
+  void encryptedCreateTransactionUsesStagedMetadata() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table source = validationCatalog.loadTable(tableIdent);
+    DataFile file = currentDataFiles(source).get(0);
+    TableIdentifier created =
+        TableIdentifier.of(tableIdent.namespace(), tableIdent.name() + "_create_transaction");
+
+    try {
+      Transaction transaction =
+          validationCatalog
+              .buildTable(created, source.schema())
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .createTransaction();
+      transaction.newFastAppend().appendFile(file).commit();
+      transaction.commitTransaction();
+
+      validationCatalog.invalidateTable(created);
+      Table reloaded = validationCatalog.loadTable(created);
+      assertThat(reloaded.snapshots()).hasSize(1);
+      assertThat(planSnapshot(reloaded, reloaded.currentSnapshot().snapshotId())).isNotEmpty();
+    } finally {
+      validationCatalog.dropTable(created);
+    }
+  }
+
+  @TestTemplate
+  void stagedDataKeyLengthControlsTemporaryEncryption() {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    TableOperations ops = ((HasTableOperations) table).operations();
+    TableMetadata staged =
+        TableMetadata.buildFrom(ops.current())
+            .setProperties(Map.of(TableProperties.ENCRYPTION_DEK_LENGTH, "32"))
+            .build();
+
+    assertThat(
+            ops.temp(staged)
+                .encryption()
+                .encrypt(localOutput(table.location() + "/staged-data-key-length")))
+        .isInstanceOfSatisfying(
+            NativeEncryptionOutputFile.class,
+            output -> assertThat(output.keyMetadata().encryptionKey().remaining()).isEqualTo(32));
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions

@@ -136,31 +136,45 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   @Override
   public EncryptionManager encryption() {
-    if (encryptionManager != null) {
-      return encryptionManager;
+    if (encryptionManager == null && tableKeyId != null) {
+      encryptionManager = createEncryptionManager(encryptedKeys, tableKeyId, encryptionDekLength);
     }
 
-    if (tableKeyId != null) {
-      Preconditions.checkArgument(
-          keyManagementClient != null,
-          "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-          CatalogProperties.ENCRYPTION_KMS_IMPL);
+    return encryptionManager != null ? encryptionManager : PlaintextEncryptionManager.instance();
+  }
 
-      Map<String, String> encryptionProperties =
-          ImmutableMap.of(
-              TableProperties.ENCRYPTION_TABLE_KEY,
-              tableKeyId,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              String.valueOf(encryptionDekLength));
-
-      encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              encryptedKeys, encryptionProperties, keyManagementClient);
-    } else {
+  private EncryptionManager encryptionFor(TableMetadata metadata) {
+    // Keep the master-key trust anchor in HMS. All other state must come from the metadata that the
+    // temporary operations represent so transaction updates observe their own staged properties.
+    String encryptionKeyId =
+        tableKeyId != null
+            ? tableKeyId
+            : metadata.property(TableProperties.ENCRYPTION_TABLE_KEY, null);
+    if (encryptionKeyId == null) {
       return PlaintextEncryptionManager.instance();
     }
 
-    return encryptionManager;
+    int dataKeyLength =
+        metadata.propertyAsInt(
+            TableProperties.ENCRYPTION_DEK_LENGTH, TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+    return createEncryptionManager(metadata.encryptionKeys(), encryptionKeyId, dataKeyLength);
+  }
+
+  private EncryptionManager createEncryptionManager(
+      List<EncryptedKey> keys, String encryptionKeyId, int dataKeyLength) {
+    Preconditions.checkArgument(
+        keyManagementClient != null,
+        "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+        CatalogProperties.ENCRYPTION_KMS_IMPL);
+
+    Map<String, String> encryptionProperties =
+        ImmutableMap.of(
+            TableProperties.ENCRYPTION_TABLE_KEY,
+            encryptionKeyId,
+            TableProperties.ENCRYPTION_DEK_LENGTH,
+            String.valueOf(dataKeyLength));
+
+    return EncryptionUtil.createEncryptionManager(keys, encryptionProperties, keyManagementClient);
   }
 
   @Override
@@ -426,6 +440,9 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   public TableOperations temp(TableMetadata uncommittedMetadata) {
     return new TableOperations() {
+      private EncryptionManager tempEncryption = null;
+      private FileIO tempFileIO = null;
+
       @Override
       public TableMetadata current() {
         return uncommittedMetadata;
@@ -454,14 +471,27 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       }
 
       @Override
-      public FileIO io() {
-        HiveTableOperations.this.encryptionPropsFromMetadata(uncommittedMetadata.properties());
-        return HiveTableOperations.this.io();
+      public synchronized FileIO io() {
+        if (tempFileIO == null) {
+          EncryptionManager encryption = encryption();
+          tempFileIO =
+              encryption == PlaintextEncryptionManager.instance()
+                  ? fileIO
+                  : EncryptingFileIO.combine(fileIO, encryption);
+        }
+
+        return tempFileIO;
       }
 
       @Override
-      public EncryptionManager encryption() {
-        return HiveTableOperations.this.encryption();
+      public synchronized EncryptionManager encryption() {
+        // A standard manager copies every retained key, so avoid rebuilding the staged key history
+        // after transaction updates that do not use encryption or file access.
+        if (tempEncryption == null) {
+          tempEncryption = encryptionFor(uncommittedMetadata);
+        }
+
+        return tempEncryption;
       }
 
       @Override

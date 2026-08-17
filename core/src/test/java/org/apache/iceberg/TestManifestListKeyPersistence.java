@@ -32,6 +32,7 @@ import org.apache.iceberg.encryption.EncryptionTestHelpers;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.UnitestKMS;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.junit.jupiter.api.AfterEach;
@@ -94,6 +95,28 @@ class TestManifestListKeyPersistence {
     assertReadableFromCommittedKeys(committed, snapshot);
   }
 
+  @Test
+  void transactionRebasePreservesManifestListKeys() {
+    TestTables.TestTable table = createEncryptedTable("mlk-rebase");
+    Transaction transaction = table.newTransaction();
+    transaction.newFastAppend().appendFile(TestBase.FILE_A).commit();
+    List<String> stagedKeyIds = keyIds(((BaseTransaction) transaction).currentMetadata());
+
+    table.newFastAppend().appendFile(TestBase.FILE_B).commit();
+    transaction.commitTransaction();
+
+    TableMetadata committed = table.ops().current();
+    assertThat(committed.snapshots()).hasSize(2);
+    assertThat(keyIds(committed)).doesNotContainAnyElementsOf(stagedKeyIds);
+    committed
+        .snapshots()
+        .forEach(
+            snapshot -> {
+              assertThat(snapshot.allManifests(table.io())).isNotEmpty();
+              assertReadableFromCommittedKeys(committed, snapshot);
+            });
+  }
+
   private static KeyManagementClient kmsClient() {
     return EncryptionUtil.createKmsClient(
         ImmutableMap.of(
@@ -130,18 +153,69 @@ class TestManifestListKeyPersistence {
   }
 
   private TestTables.TestTable createEncryptedTable(String name) {
-    EncryptionManager encryption = EncryptionTestHelpers.createEncryptionManager();
+    EncryptionManager initialEncryption = EncryptionTestHelpers.createEncryptionManager();
     File dir = temp.resolve(name).toFile();
+    FileIO plainFileIO = new TestTables.LocalFileIO();
     TestTables.TestTableOperations ops =
         new TestTables.TestTableOperations(
-            name, dir, EncryptingFileIO.combine(new TestTables.LocalFileIO(), encryption)) {
+            name, dir, EncryptingFileIO.combine(plainFileIO, initialEncryption)) {
+          private EncryptionManager currentEncryption = initialEncryption;
+          private FileIO currentFileIO = EncryptingFileIO.combine(plainFileIO, currentEncryption);
+
           @Override
           public EncryptionManager encryption() {
-            return encryption;
+            return currentEncryption;
+          }
+
+          @Override
+          public FileIO io() {
+            return currentFileIO;
+          }
+
+          @Override
+          public void commit(TableMetadata base, TableMetadata metadata) {
+            super.commit(base, metadata);
+            this.currentEncryption =
+                EncryptionUtil.createEncryptionManager(
+                    current().encryptionKeys(), TABLE_PROPERTIES, kmsClient());
+            this.currentFileIO = EncryptingFileIO.combine(plainFileIO, currentEncryption);
+          }
+
+          @Override
+          public TableOperations temp(TableMetadata uncommittedMetadata) {
+            return metadataScopedTemp(this, uncommittedMetadata, plainFileIO);
           }
         };
 
     return TestTables.create(
         dir, name, TestBase.SCHEMA, TestBase.SPEC, SortOrder.unsorted(), 3, ops);
+  }
+
+  private static TableOperations metadataScopedTemp(
+      TableOperations outer, TableMetadata metadata, FileIO plainFileIO) {
+    EncryptionManager encryption =
+        EncryptionUtil.createEncryptionManager(
+            metadata.encryptionKeys(), TABLE_PROPERTIES, kmsClient());
+    FileIO encryptedFileIO = EncryptingFileIO.combine(plainFileIO, encryption);
+
+    return new StaticTableOperations(
+        metadata,
+        encryptedFileIO,
+        LocationProviders.locationsFor(metadata.location(), metadata.properties())) {
+      @Override
+      public EncryptionManager encryption() {
+        return encryption;
+      }
+
+      @Override
+      public String metadataFileLocation(String fileName) {
+        return outer.metadataFileLocation(fileName);
+      }
+
+      @Override
+      public long newSnapshotId() {
+        return outer.newSnapshotId();
+      }
+    };
   }
 }
