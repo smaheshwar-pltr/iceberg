@@ -54,6 +54,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
@@ -132,6 +133,21 @@ public class TestTableEncryption extends CatalogTestBase {
         table.newScan().useSnapshot(snapshotId).planFiles()) {
       return ImmutableList.copyOf(tasks);
     }
+  }
+
+  private static void assertSnapshotHasEncryptionKeys(Table table, Snapshot snapshot) {
+    assertThat(snapshot.keyId()).as("manifest list key ID").isNotNull();
+    TableMetadata metadata = ((HasTableOperations) table).operations().current();
+    EncryptedKey manifestListKey =
+        metadata.encryptionKeys().stream()
+            .filter(key -> key.keyId().equals(snapshot.keyId()))
+            .findFirst()
+            .orElse(null);
+    assertThat(manifestListKey).as("manifest list key").isNotNull();
+
+    assertThat(metadata.encryptionKeys())
+        .as("wrapping key")
+        .anyMatch(key -> key.keyId().equals(manifestListKey.encryptedById()));
   }
 
   @TestTemplate
@@ -221,6 +237,7 @@ public class TestTableEncryption extends CatalogTestBase {
     Table reloaded = validationCatalog.loadTable(tableIdent);
     assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + 2);
     for (Snapshot snapshot : reloaded.snapshots()) {
+      assertSnapshotHasEncryptionKeys(reloaded, snapshot);
       assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     }
 
