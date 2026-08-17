@@ -19,7 +19,6 @@
 package org.apache.iceberg.spark.sql;
 
 import static org.apache.iceberg.Files.localInput;
-import static org.apache.iceberg.TableProperties.COMMIT_NUM_RETRIES;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -27,6 +26,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumFileSystem;
@@ -72,10 +73,12 @@ import org.junit.jupiter.api.TestTemplate;
 import org.mockito.internal.util.collections.Iterables;
 
 public class TestTableEncryption extends CatalogTestBase {
+  private static final int INTERLEAVING_TIMEOUT_SECONDS = 30;
+
   private static Map<String, String> appendCatalogEncryptionProperties(Map<String, String> props) {
     Map<String, String> newProps = Maps.newHashMap();
     newProps.putAll(props);
-    newProps.put(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getCanonicalName());
+    newProps.put(CatalogProperties.ENCRYPTION_KMS_IMPL, CoordinatedKMS.class.getName());
     return newProps;
   }
 
@@ -92,6 +95,7 @@ public class TestTableEncryption extends CatalogTestBase {
 
   @BeforeEach
   public void createTables() {
+    CoordinatedKMS.reset();
     sql(
         "CREATE TABLE %s (id bigint, data string, float float) USING iceberg "
             + "TBLPROPERTIES ( "
@@ -103,6 +107,7 @@ public class TestTableEncryption extends CatalogTestBase {
 
   @AfterEach
   public void removeTables() {
+    CoordinatedKMS.reset();
     sql("DROP TABLE IF EXISTS %s", tableName);
   }
 
@@ -182,68 +187,44 @@ public class TestTableEncryption extends CatalogTestBase {
 
   @TestTemplate
   void concurrentAppendsPreserveManifestListKeys() throws Exception {
-    // This is the supported end-to-end reproduction: concurrent Hive commits previously left
-    // snapshots whose encrypted manifest lists could not be planned after a catalog reload.
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
     List<DataFile> initialFiles = currentDataFiles(table);
     int initialSnapshotCount = (int) Streams.stream(table.snapshots()).count();
-    int commitsPerThread = 10;
-    int totalCommits = 2 * commitsPerThread;
 
-    // One commit may be overtaken by every commit from the competing thread.
-    table.updateProperties().set(COMMIT_NUM_RETRIES, String.valueOf(commitsPerThread)).commit();
-
-    CountDownLatch ready = new CountDownLatch(2);
-    CountDownLatch start = new CountDownLatch(1);
+    CoordinatedKMS.blockNextTwoUnwraps();
     ExecutorService executor = Executors.newFixedThreadPool(2);
-    List<Future<?>> appends =
-        List.of(
-            executor.submit(
-                () ->
-                    appendConcurrently(table, initialFiles.get(0), commitsPerThread, ready, start)),
-            executor.submit(
-                () ->
-                    appendConcurrently(
-                        table, initialFiles.get(0), commitsPerThread, ready, start)));
-
     try {
-      assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
-      start.countDown();
-      for (Future<?> append : appends) {
-        append.get(3, TimeUnit.MINUTES);
-      }
+      Future<?> firstAppend =
+          executor.submit(() -> table.newFastAppend().appendFile(initialFiles.get(0)).commit());
+      CoordinatedKMS.awaitFirstUnwrap();
+
+      Future<?> secondAppend =
+          executor.submit(() -> table.newFastAppend().appendFile(initialFiles.get(0)).commit());
+      CoordinatedKMS.awaitSecondUnwrap();
+
+      // The second append has refreshed the shared operations and captured a replacement manager.
+      // Let the first append mint and commit its key through the now-retired manager.
+      CoordinatedKMS.releaseFirstUnwrap();
+      firstAppend.get(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+      CoordinatedKMS.releaseSecondUnwrap();
+      secondAppend.get(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     } finally {
-      start.countDown();
+      CoordinatedKMS.reset();
       executor.shutdownNow();
-      assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+      assertThat(executor.awaitTermination(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+          .isTrue();
     }
 
     validationCatalog.invalidateTable(tableIdent);
     Table reloaded = validationCatalog.loadTable(tableIdent);
-    assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + totalCommits);
+    assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + 2);
     for (Snapshot snapshot : reloaded.snapshots()) {
       assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     }
 
-    assertThat(currentDataFiles(reloaded)).hasSize(initialFiles.size() + totalCommits);
-  }
-
-  private static void appendConcurrently(
-      Table table, DataFile file, int commitCount, CountDownLatch ready, CountDownLatch start) {
-    ready.countDown();
-    try {
-      if (!start.await(10, TimeUnit.SECONDS)) {
-        throw new AssertionError("Timed out waiting to start concurrent appends");
-      }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new AssertionError("Interrupted while waiting to start concurrent appends", e);
-    }
-
-    for (int index = 0; index < commitCount; index++) {
-      table.newFastAppend().appendFile(file).commit();
-    }
+    assertThat(currentDataFiles(reloaded)).hasSize(initialFiles.size() + 2);
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions
@@ -455,5 +436,107 @@ public class TestTableEncryption extends CatalogTestBase {
     stream.read(magic);
     stream.close();
     assertThat(magic).isEqualTo(Ciphers.GCM_STREAM_MAGIC_STRING.getBytes(StandardCharsets.UTF_8));
+  }
+
+  public static class CoordinatedKMS extends UnitestKMS {
+    private static volatile UnwrapInterleaving interleaving;
+
+    static void blockNextTwoUnwraps() {
+      if (interleaving != null) {
+        throw new IllegalStateException("An unwrap interleaving is already active");
+      }
+
+      interleaving = new UnwrapInterleaving();
+    }
+
+    static void awaitFirstUnwrap() {
+      currentInterleaving().awaitFirstUnwrap();
+    }
+
+    static void awaitSecondUnwrap() {
+      currentInterleaving().awaitSecondUnwrap();
+    }
+
+    static void releaseFirstUnwrap() {
+      currentInterleaving().releaseFirstUnwrap();
+    }
+
+    static void releaseSecondUnwrap() {
+      currentInterleaving().releaseSecondUnwrap();
+    }
+
+    static void reset() {
+      UnwrapInterleaving current = interleaving;
+      if (current != null) {
+        current.releaseFirstUnwrap();
+        current.releaseSecondUnwrap();
+        interleaving = null;
+      }
+    }
+
+    @Override
+    public ByteBuffer unwrapKey(ByteBuffer wrappedKey, String wrappingKeyId) {
+      UnwrapInterleaving current = interleaving;
+      if (current != null) {
+        current.blockNextUnwrap();
+      }
+
+      return super.unwrapKey(wrappedKey, wrappingKeyId);
+    }
+
+    private static UnwrapInterleaving currentInterleaving() {
+      UnwrapInterleaving current = interleaving;
+      if (current == null) {
+        throw new IllegalStateException("No unwrap interleaving is active");
+      }
+
+      return current;
+    }
+  }
+
+  private static class UnwrapInterleaving {
+    private final AtomicInteger unwrapCalls = new AtomicInteger();
+    private final CountDownLatch firstUnwrapEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseFirstUnwrap = new CountDownLatch(1);
+    private final CountDownLatch secondUnwrapEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseSecondUnwrap = new CountDownLatch(1);
+
+    private void blockNextUnwrap() {
+      int call = unwrapCalls.incrementAndGet();
+      if (call == 1) {
+        firstUnwrapEntered.countDown();
+        await(releaseFirstUnwrap, "release the first key unwrap");
+      } else if (call == 2) {
+        secondUnwrapEntered.countDown();
+        await(releaseSecondUnwrap, "release the second key unwrap");
+      }
+    }
+
+    private void awaitFirstUnwrap() {
+      await(firstUnwrapEntered, "the first key unwrap");
+    }
+
+    private void awaitSecondUnwrap() {
+      await(secondUnwrapEntered, "the second key unwrap");
+    }
+
+    private void releaseFirstUnwrap() {
+      releaseFirstUnwrap.countDown();
+    }
+
+    private void releaseSecondUnwrap() {
+      releaseSecondUnwrap.countDown();
+    }
+
+    private static void await(CountDownLatch latch, String action) {
+      try {
+        if (!latch.await(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+          throw new AssertionError("Timed out waiting for " + action);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("Interrupted while waiting for " + action, e);
+      }
+    }
   }
 }

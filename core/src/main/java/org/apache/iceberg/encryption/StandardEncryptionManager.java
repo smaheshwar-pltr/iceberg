@@ -25,7 +25,6 @@ import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Base64;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -179,31 +178,6 @@ public class StandardEncryptionManager implements EncryptionManager {
     synchronized (this) {
       EncryptedKey key = encryptionKeys.get(keyId);
       return key != null ? copyKey(key) : null;
-    }
-  }
-
-  Map<String, EncryptedKey> manifestListEncryptionKeys(String manifestListKeyId) {
-    synchronized (this) {
-      EncryptedKey manifestListKey = encryptionKeys.get(manifestListKeyId);
-      Preconditions.checkState(
-          manifestListKey != null,
-          "Cannot find manifest list key metadata with id %s",
-          manifestListKeyId);
-      Preconditions.checkArgument(
-          !manifestListKey.encryptedById().equals(tableKeyId),
-          "%s is a key encryption key, not manifest list key metadata",
-          manifestListKeyId);
-
-      EncryptedKey keyEncryptionKey = encryptionKeys.get(manifestListKey.encryptedById());
-      Preconditions.checkState(
-          keyEncryptionKey != null,
-          "Cannot find key encryption key with id %s",
-          manifestListKey.encryptedById());
-
-      Map<String, EncryptedKey> keys = Maps.newLinkedHashMap();
-      keys.put(manifestListKey.keyId(), copyKey(manifestListKey));
-      keys.put(keyEncryptionKey.keyId(), copyKey(keyEncryptionKey));
-      return Collections.unmodifiableMap(keys);
     }
   }
 

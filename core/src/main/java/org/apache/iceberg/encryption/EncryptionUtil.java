@@ -189,30 +189,6 @@ public class EncryptionUtil {
   }
 
   /**
-   * Returns an unmodifiable map containing detached copies of a manifest list key and the key
-   * encryption key that wraps it.
-   *
-   * <p>The detached key values remain mutable, but changes to them do not affect the manager. The
-   * encryption manager must be a {@link StandardEncryptionManager}.
-   *
-   * @param em the table's encryption manager
-   * @param manifestListKeyId a manifest list key ID
-   * @return an unmodifiable map of the manifest list key and its key encryption key, keyed by ID
-   * @throws IllegalStateException if the encryption manager is not a {@link
-   *     StandardEncryptionManager} or either key cannot be found
-   * @throws IllegalArgumentException if the ID is null or identifies a key encryption key
-   */
-  public static Map<String, EncryptedKey> manifestListEncryptionKeys(
-      EncryptionManager em, String manifestListKeyId) {
-    Preconditions.checkState(
-        em instanceof StandardEncryptionManager,
-        "Retrieving manifest list encryption keys requires a StandardEncryptionManager");
-    Preconditions.checkArgument(manifestListKeyId != null, "Invalid manifest list key ID: null");
-    StandardEncryptionManager sem = (StandardEncryptionManager) em;
-    return sem.manifestListEncryptionKeys(manifestListKeyId);
-  }
-
-  /**
    * Encrypts the key metadata for a manifest list.
    *
    * @param key key encryption key bytes

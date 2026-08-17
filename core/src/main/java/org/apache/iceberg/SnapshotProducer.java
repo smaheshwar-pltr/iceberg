@@ -365,8 +365,23 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     ManifestListFile manifestListFile = writer.toManifestListFile();
     if (manifestListFile.encryptionKeyID() != null) {
+      String manifestListKeyID = manifestListFile.encryptionKeyID();
+      Map<String, EncryptedKey> encryptionKeys = EncryptionUtil.encryptionKeys(encryption);
+      EncryptedKey manifestListKey = encryptionKeys.get(manifestListKeyID);
+      Preconditions.checkState(
+          manifestListKey != null,
+          "Cannot find manifest list key metadata with id %s",
+          manifestListKeyID);
+
+      String keyEncryptionKeyID = manifestListKey.encryptedById();
+      EncryptedKey keyEncryptionKey = encryptionKeys.get(keyEncryptionKeyID);
+      Preconditions.checkState(
+          keyEncryptionKey != null,
+          "Cannot find key encryption key with id %s",
+          keyEncryptionKeyID);
+
       this.manifestListKeys =
-          EncryptionUtil.manifestListEncryptionKeys(encryption, manifestListFile.encryptionKeyID());
+          ImmutableMap.of(manifestListKeyID, manifestListKey, keyEncryptionKeyID, keyEncryptionKey);
     }
 
     return new BaseSnapshot(

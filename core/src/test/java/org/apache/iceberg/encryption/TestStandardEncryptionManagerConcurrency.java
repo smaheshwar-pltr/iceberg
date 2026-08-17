@@ -19,7 +19,6 @@
 package org.apache.iceberg.encryption;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -206,42 +205,6 @@ class TestStandardEncryptionManagerConcurrency {
     loadingKms.mutateUnwrapBuffer();
 
     assertThat(reloaded.encryptedByKey(manifestListKeyId)).isEqualTo(loadedKey);
-  }
-
-  @Test
-  void manifestListEncryptionKeysReturnsOnlyRequestedPair() {
-    StandardEncryptionManager manager = newManager(new UnitestKMS());
-    String firstKeyId = manager.addManifestListKeyMetadata(keyMetadata());
-    String secondKeyId = manager.addManifestListKeyMetadata(keyMetadata());
-
-    Map<String, EncryptedKey> keys =
-        EncryptionUtil.manifestListEncryptionKeys(manager, secondKeyId);
-    EncryptedKey manifestListKey = keys.get(secondKeyId);
-    EncryptedKey keyEncryptionKey = keys.get(manifestListKey.encryptedById());
-    byte metadataByte = manifestListKey.encryptedKeyMetadata().get(0);
-    String keyTimestamp =
-        keyEncryptionKey.properties().get(StandardEncryptionManager.KEY_TIMESTAMP);
-
-    assertThat(keys)
-        .hasSize(2)
-        .containsKey(manifestListKey.encryptedById())
-        .doesNotContainKey(firstKeyId);
-    assertThatThrownBy(keys::clear)
-        .isInstanceOf(UnsupportedOperationException.class)
-        .hasMessage(null);
-
-    manifestListKey.encryptedKeyMetadata().put(0, (byte) (metadataByte + 1));
-    keyEncryptionKey.properties().put(StandardEncryptionManager.KEY_TIMESTAMP, "modified");
-
-    Map<String, EncryptedKey> current =
-        EncryptionUtil.manifestListEncryptionKeys(manager, secondKeyId);
-    assertThat(current.get(secondKeyId).encryptedKeyMetadata().get(0)).isEqualTo(metadataByte);
-    assertThat(
-            current
-                .get(manifestListKey.encryptedById())
-                .properties()
-                .get(StandardEncryptionManager.KEY_TIMESTAMP))
-        .isEqualTo(keyTimestamp);
   }
 
   @Test
