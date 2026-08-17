@@ -46,8 +46,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -114,6 +117,10 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
   private TableMetadata base;
+  // Retain the keys produced while writing this attempt's manifest list so commit can persist the
+  // same keys. Other attempt-local outputs, such as manifests and the snapshot ID, are retained
+  // too.
+  private Map<String, EncryptedKey> manifestListKeys = Map.of();
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
   private SnapshotAncestryValidator snapshotAncestryValidator =
@@ -291,6 +298,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
   @Override
   public Snapshot apply() {
+    this.manifestListKeys = Map.of();
     refresh();
     Snapshot parentSnapshot = SnapshotUtil.latestSnapshot(base, targetBranch);
 
@@ -303,11 +311,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
+    EncryptionManager encryption = ops.encryption();
     ManifestListWriter writer =
         ManifestLists.write(
             ops.current().formatVersion(),
             manifestList,
-            ops.encryption(),
+            encryption,
             snapshotId(),
             parentSnapshotId,
             sequenceNumber,
@@ -354,6 +363,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           replacedRecords);
     }
 
+    ManifestListFile manifestListFile = writer.toManifestListFile();
+    if (manifestListFile.encryptionKeyID() != null) {
+      this.manifestListKeys =
+          EncryptionUtil.manifestListEncryptionKeys(encryption, manifestListFile.encryptionKeyID());
+    }
+
     return new BaseSnapshot(
         sequenceNumber,
         snapshotId(),
@@ -365,7 +380,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         manifestList.location(),
         nextRowId,
         assignedRows,
-        writer.toManifestListFile().encryptionKeyID());
+        manifestListFile.encryptionKeyID());
   }
 
   private void runValidations(Snapshot parentSnapshot) {
@@ -499,10 +514,13 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
                   if (base.snapshot(newSnapshot.snapshotId()) != null) {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
-                  } else if (stageOnly) {
-                    update.addSnapshot(newSnapshot);
                   } else {
-                    update.setBranchSnapshot(newSnapshot, targetBranch);
+                    manifestListKeys.values().forEach(update::addEncryptionKey);
+                    if (stageOnly) {
+                      update.addSnapshot(newSnapshot);
+                    } else {
+                      update.setBranchSnapshot(newSnapshot, targetBranch);
+                    }
                   }
 
                   TableMetadata updated = update.build();

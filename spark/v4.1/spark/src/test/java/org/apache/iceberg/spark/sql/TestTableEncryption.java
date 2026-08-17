@@ -19,15 +19,22 @@
 package org.apache.iceberg.spark.sql;
 
 import static org.apache.iceberg.Files.localInput;
+import static org.apache.iceberg.TableProperties.COMMIT_NUM_RETRIES;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumFileSystem;
@@ -41,11 +48,13 @@ import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.UnitestKMS;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
@@ -106,9 +115,18 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   private static List<DataFile> currentDataFiles(Table table) {
-    return Streams.stream(table.newScan().planFiles())
-        .map(FileScanTask::file)
-        .collect(Collectors.toList());
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
+      return Streams.stream(tasks).map(FileScanTask::file).collect(Collectors.toList());
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to close planned files", e);
+    }
+  }
+
+  private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(snapshotId).planFiles()) {
+      return ImmutableList.copyOf(tasks);
+    }
   }
 
   @TestTemplate
@@ -160,6 +178,72 @@ public class TestTableEncryption extends CatalogTestBase {
     transaction.commitTransaction();
 
     assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 2);
+  }
+
+  @TestTemplate
+  void concurrentAppendsPreserveManifestListKeys() throws Exception {
+    // This is the supported end-to-end reproduction: concurrent Hive commits previously left
+    // snapshots whose encrypted manifest lists could not be planned after a catalog reload.
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    List<DataFile> initialFiles = currentDataFiles(table);
+    int initialSnapshotCount = (int) Streams.stream(table.snapshots()).count();
+    int commitsPerThread = 10;
+    int totalCommits = 2 * commitsPerThread;
+
+    // One commit may be overtaken by every commit from the competing thread.
+    table.updateProperties().set(COMMIT_NUM_RETRIES, String.valueOf(commitsPerThread)).commit();
+
+    CountDownLatch ready = new CountDownLatch(2);
+    CountDownLatch start = new CountDownLatch(1);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    List<Future<?>> appends =
+        List.of(
+            executor.submit(
+                () ->
+                    appendConcurrently(table, initialFiles.get(0), commitsPerThread, ready, start)),
+            executor.submit(
+                () ->
+                    appendConcurrently(
+                        table, initialFiles.get(0), commitsPerThread, ready, start)));
+
+    try {
+      assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+      start.countDown();
+      for (Future<?> append : appends) {
+        append.get(3, TimeUnit.MINUTES);
+      }
+    } finally {
+      start.countDown();
+      executor.shutdownNow();
+      assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+    }
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + totalCommits);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
+
+    assertThat(currentDataFiles(reloaded)).hasSize(initialFiles.size() + totalCommits);
+  }
+
+  private static void appendConcurrently(
+      Table table, DataFile file, int commitCount, CountDownLatch ready, CountDownLatch start) {
+    ready.countDown();
+    try {
+      if (!start.await(10, TimeUnit.SECONDS)) {
+        throw new AssertionError("Timed out waiting to start concurrent appends");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError("Interrupted while waiting to start concurrent appends", e);
+    }
+
+    for (int index = 0; index < commitCount; index++) {
+      table.newFastAppend().appendFile(file).commit();
+    }
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions
