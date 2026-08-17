@@ -83,7 +83,7 @@ MLK is still being encrypted.
 - Remove Hive's commit-time copy of ambient manager keys and refresh-time carry-forward of
   uncommitted manager state. Refreshed encryption state now comes from committed metadata.
 
-The registry snapshot is O(number of retained keys) once per encrypted snapshot commit. A targeted
+The registry snapshot is O(number of retained keys) once per encrypted snapshot attempt. A targeted
 cross-package lookup would avoid that cost but would require new public API; this stack favors API
 compatibility and bounded review scope.
 
