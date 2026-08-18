@@ -44,7 +44,9 @@ import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.DataTableScan;
 import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileMetadata;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.MetadataTableUtils;
@@ -53,7 +55,10 @@ import org.apache.iceberg.Scan;
 import org.apache.iceberg.ScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TableScan;
+import org.apache.iceberg.TableScanContext;
+import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.SessionCatalog;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.expressions.Expressions;
@@ -210,6 +215,59 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
     @Override
     public TestPlanningBehavior.Builder apply(TestPlanningBehavior.Builder builder) {
       return this.configurer.apply(builder);
+    }
+  }
+
+  private enum ScanTaskResponseMode
+      implements Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> {
+    SYNCHRONOUS(TestPlanningBehavior.Builder::synchronous),
+    ASYNCHRONOUS(TestPlanningBehavior.Builder::asynchronous),
+    PAGINATED(TestPlanningBehavior.Builder::synchronousWithPagination);
+
+    private final Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> configurer;
+
+    ScanTaskResponseMode(
+        Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> configurer) {
+      this.configurer = configurer;
+    }
+
+    @Override
+    public TestPlanningBehavior.Builder apply(TestPlanningBehavior.Builder builder) {
+      return this.configurer.apply(builder);
+    }
+  }
+
+  private static class CustomScanTable extends BaseTable {
+    private final boolean useSnapshotSchema;
+
+    private CustomScanTable(BaseTable table, boolean useSnapshotSchema) {
+      super(table.operations(), table.name(), table.reporter());
+      this.useSnapshotSchema = useSnapshotSchema;
+    }
+
+    @Override
+    public TableScan newScan() {
+      return new CustomDataTableScan(this, schema(), TableScanContext.empty(), useSnapshotSchema);
+    }
+  }
+
+  private static class CustomDataTableScan extends DataTableScan {
+    private final boolean useSnapshotSchema;
+
+    private CustomDataTableScan(
+        Table table, Schema schema, TableScanContext context, boolean useSnapshotSchema) {
+      super(table, schema, context);
+      this.useSnapshotSchema = useSnapshotSchema;
+    }
+
+    @Override
+    protected boolean useSnapshotSchema() {
+      return useSnapshotSchema;
+    }
+
+    @Override
+    protected TableScan newRefinedScan(Table table, Schema schema, TableScanContext context) {
+      return new CustomDataTableScan(table, schema, context, useSnapshotSchema);
     }
   }
 
@@ -683,6 +741,17 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
         .isEqualTo(100L);
   }
 
+  @Test
+  void synchronousScanPlanningWithZeroMinRowsRequested() throws IOException {
+    configurePlanningBehavior(TestPlanningBehavior.Builder::synchronous);
+    Table table = restTableFor(restCatalog, "zero_min_rows_requested_table");
+    setParserContext(table);
+
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().minRowsRequested(0L).planFiles()) {
+      assertThat(tasks).isEmpty();
+    }
+  }
+
   @ParameterizedTest
   @EnumSource(PlanningMode.class)
   void remoteScanPlanningDeletesCancellation(
@@ -912,6 +981,299 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
       assertThat(request.useSnapshotSchema())
           .as("useRef() with a branch should not use snapshot schema")
           .isFalse();
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void rejectsCustomScanThatCannotHonorRequestedSchema(boolean useSnapshotSchema) {
+    TableIdentifier identifier = TableIdentifier.of(NS, "unsupported_custom_scan");
+    backendCatalog.createNamespace(NS);
+    Table table = backendCatalog.buildTable(identifier, SCHEMA).withPartitionSpec(SPEC).create();
+    table.newAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.updateSchema().addColumn("new_col", Types.IntegerType.get()).commit();
+
+    CustomScanTable customTable = new CustomScanTable((BaseTable) table, true);
+    Catalog catalog = Mockito.mock(Catalog.class);
+    Mockito.when(catalog.loadTable(identifier)).thenReturn(customTable);
+    PlanTableScanRequest request =
+        PlanTableScanRequest.builder()
+            .withSnapshotId(snapshotId)
+            .withUseSnapshotSchema(useSnapshotSchema)
+            .build();
+
+    assertThatThrownBy(
+            () ->
+                CatalogHandlers.planTableScan(
+                    catalog, identifier, request, scan -> false, scan -> 100))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessageContaining("cannot plan snapshot");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void plansWithCompatibleCustomScan(boolean useSnapshotSchema) {
+    TableIdentifier identifier = TableIdentifier.of(NS, "compatible_custom_scan");
+    backendCatalog.createNamespace(NS);
+    Table table = backendCatalog.buildTable(identifier, SCHEMA).withPartitionSpec(SPEC).create();
+    table.newAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.updateSchema().addColumn("new_col", Types.IntegerType.get()).commit();
+    table.newAppend().appendFile(FILE_B).commit();
+
+    CustomScanTable customTable = new CustomScanTable((BaseTable) table, useSnapshotSchema);
+    Catalog catalog = Mockito.mock(Catalog.class);
+    Mockito.when(catalog.loadTable(identifier)).thenReturn(customTable);
+    PlanTableScanRequest request =
+        PlanTableScanRequest.builder()
+            .withSnapshotId(snapshotId)
+            .withUseSnapshotSchema(useSnapshotSchema)
+            .build();
+
+    PlanTableScanResponse response =
+        CatalogHandlers.planTableScan(catalog, identifier, request, scan -> false, scan -> 100);
+
+    assertThat(response.fileScanTasks())
+        .singleElement()
+        .satisfies(
+            task -> {
+              if (useSnapshotSchema) {
+                assertThat(task.schema().findField("new_col")).isNull();
+              } else {
+                assertThat(task.schema().findField("new_col")).isNotNull();
+              }
+            });
+  }
+
+  @Test
+  void remoteSnapshotScanUsesSnapshotSchemaAfterSchemaEvolution() throws IOException {
+    configurePlanningBehavior(TestPlanningBehavior.Builder::synchronous);
+    Schema schema =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "data", Types.StringType.get()));
+    PartitionSpec spec = PartitionSpec.builderFor(schema).identity("id").build();
+    TableIdentifier identifier = TableIdentifier.of(NS, "snapshot_schema_after_evolution");
+
+    restCatalog.createNamespace(NS);
+    Table table = restCatalog.buildTable(identifier, schema).withPartitionSpec(spec).create();
+    DataFile file =
+        DataFiles.builder(spec)
+            .withPath("/path/to/current-snapshot.parquet")
+            .withPartitionPath("id=1")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    table.newAppend().appendFile(file).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    setParserContext(table);
+
+    table.updateSchema().updateColumn("id", Types.LongType.get()).commit();
+    table.refresh();
+    assertThat(table.currentSnapshot().snapshotId()).isEqualTo(snapshotId);
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(snapshotId).filter(Expressions.equal("id", 1)).planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .singleElement()
+          .satisfies(
+              task -> {
+                assertThat(task.schema().findField("id").type()).isEqualTo(Types.IntegerType.get());
+                assertThat(task.file().partition().get(0, Integer.class)).isEqualTo(1);
+              });
+    }
+  }
+
+  @Test
+  void remoteSnapshotScanUsesSnapshotSchemaWhenMainHasNoSnapshot() throws IOException {
+    configurePlanningBehavior(TestPlanningBehavior.Builder::synchronous);
+    Table table = createTableWithScanPlanning(restCatalog, "snapshot_schema_without_main_snapshot");
+    String branch = "test-branch";
+
+    table.newAppend().appendFile(FILE_A).toBranch(branch).commit();
+    table.refresh();
+    assertThat(table.currentSnapshot()).isNull();
+    long snapshotId = table.snapshot(branch).snapshotId();
+    setParserContext(table);
+
+    table.updateSchema().deleteColumn("id").commit();
+    table.refresh();
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(snapshotId).filter(Expressions.equal("id", 1)).planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .singleElement()
+          .satisfies(task -> assertThat(task.schema().findField("id")).isNotNull());
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(ScanTaskResponseMode.class)
+  void remoteSnapshotScanSerializesPartitionsUsingSnapshotSchema(
+      Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode)
+      throws IOException {
+    configurePlanningBehavior(planMode);
+    Schema schema =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "data", Types.StringType.get()));
+    PartitionSpec spec = PartitionSpec.builderFor(schema).identity("id").build();
+    TableIdentifier identifier = TableIdentifier.of(NS, "snapshot_partition_type_evolution");
+
+    restCatalog.createNamespace(NS);
+    Table table = restCatalog.buildTable(identifier, schema).withPartitionSpec(spec).create();
+    DataFile oldFile =
+        DataFiles.builder(spec)
+            .withPath("/path/to/old.parquet")
+            .withPartitionPath("id=1")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    DataFile secondOldFile =
+        DataFiles.builder(spec)
+            .withPath("/path/to/second-old.parquet")
+            .withPartitionPath("id=2")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    table.newAppend().appendFile(oldFile).appendFile(secondOldFile).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    setParserContext(table);
+
+    table.updateSchema().updateColumn("id", Types.LongType.get()).commit();
+    PartitionSpec updatedSpec = table.spec();
+    DataFile newFile =
+        DataFiles.builder(updatedSpec)
+            .withPath("/path/to/new.parquet")
+            .withPartitionPath("id=3")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    table.newAppend().appendFile(newFile).commit();
+    table.refresh();
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(snapshotId).planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .extracting(task -> task.file().partition().get(0, Integer.class))
+          .containsExactlyInAnyOrder(1, 2);
+    }
+  }
+
+  @Test
+  void remoteBranchScanUsesCurrentSchemaWhenMainHasNoSnapshot() throws IOException {
+    configurePlanningBehavior(TestPlanningBehavior.Builder::synchronous);
+    Table table = createTableWithScanPlanning(restCatalog, "branch_schema_without_main_snapshot");
+    String branch = "test-branch";
+
+    table.newAppend().appendFile(FILE_A).toBranch(branch).commit();
+    table.refresh();
+    assertThat(table.currentSnapshot()).isNull();
+
+    table.updateSchema().addColumn("new_col", Types.IntegerType.get()).commit();
+    table.refresh();
+    setParserContext(table);
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useRef(branch).filter(Expressions.isNull("new_col")).planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .singleElement()
+          .satisfies(task -> assertThat(task.schema().findField("new_col")).isNotNull());
+    }
+  }
+
+  @Test
+  void remoteBranchScanPreservesSchemaIfBranchIsRemovedBeforePlanning() throws IOException {
+    configurePlanningBehavior(TestPlanningBehavior.Builder::synchronous);
+    TableIdentifier identifier = TableIdentifier.of(NS, "removed_branch_scan");
+    Table table = createTableWithScanPlanning(restCatalog, identifier);
+    String branch = "test-branch";
+
+    table.newAppend().appendFile(FILE_A).toBranch(branch).commit();
+    table.refresh();
+    long snapshotId = table.snapshot(branch).snapshotId();
+
+    table.updateSchema().addColumn("new_col", Types.IntegerType.get()).commit();
+    table.refresh();
+    setParserContext(table);
+
+    TableScan branchScan = table.newScan().useRef(branch).filter(Expressions.isNull("new_col"));
+    table.manageSnapshots().removeBranch(branch).commit();
+
+    try (CloseableIterable<FileScanTask> tasks = branchScan.planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .singleElement()
+          .satisfies(task -> assertThat(task.schema().findField("new_col")).isNotNull());
+    }
+
+    restCatalog.invalidateTable(identifier);
+    PlanTableScanRequest forwardedRequest =
+        PlanTableScanRequest.builder()
+            .withSnapshotId(snapshotId)
+            .withUseSnapshotSchema(false)
+            .withFilter(Expressions.isNull("new_col"))
+            .build();
+    PlanTableScanResponse forwardedResponse =
+        CatalogHandlers.planTableScan(
+            restCatalog, identifier, forwardedRequest, scan -> false, scan -> 100);
+    PlanTableScanRequest innerRequest = captureLastPlanRequest();
+    assertThat(innerRequest.useSnapshotSchema()).isFalse();
+    assertThat(innerRequest.select()).contains("new_col");
+    assertThat(forwardedResponse.planStatus()).isEqualTo(PlanStatus.COMPLETED);
+  }
+
+  @Test
+  void remoteScanSerializesDeleteFilesFromAnotherSpec() throws IOException {
+    configurePlanningBehavior(TestPlanningBehavior.Builder::synchronous);
+    Schema schema =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.required(2, "data", Types.StringType.get()));
+    PartitionSpec oldSpec = PartitionSpec.unpartitioned();
+    TableIdentifier identifier = TableIdentifier.of(NS, "delete_file_from_another_spec");
+
+    restCatalog.createNamespace(NS);
+    Table table =
+        restCatalog
+            .buildTable(identifier, schema)
+            .withPartitionSpec(oldSpec)
+            .withProperty(TableProperties.FORMAT_VERSION, "2")
+            .create();
+    table.updateSpec().addField("data").commit();
+    PartitionSpec dataSpec = table.spec();
+    DataFile dataFile =
+        DataFiles.builder(dataSpec)
+            .withPath("/path/to/data-with-new-spec.parquet")
+            .withPartitionPath("data=value")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    DeleteFile deleteFile =
+        FileMetadata.deleteFileBuilder(oldSpec)
+            .ofEqualityDeletes(1)
+            .withPath("/path/to/delete-with-old-spec.parquet")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    table.newAppend().appendFile(dataFile).commit();
+    table.newRowDelta().addDeletes(deleteFile).commit();
+    setParserContext(table);
+
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
+      assertThat(Lists.newArrayList(tasks))
+          .singleElement()
+          .satisfies(
+              task -> {
+                assertThat(task.spec().specId()).isEqualTo(dataSpec.specId());
+                assertThat(task.deletes())
+                    .singleElement()
+                    .satisfies(
+                        delete -> {
+                          assertThat(delete.specId()).isEqualTo(oldSpec.specId());
+                          assertThat(delete.location()).isEqualTo(deleteFile.location());
+                        });
+              });
     }
   }
 

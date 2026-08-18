@@ -32,6 +32,7 @@ import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataTableScan;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
@@ -110,7 +111,7 @@ class RESTTableScan extends DataTableScan {
     this.supportedEndpoints = supportedEndpoints;
     this.parserContext =
         ParserContext.builder()
-            .add("specsById", table.specs())
+            .add("specsById", specs())
             .add("caseSensitive", context().caseSensitive())
             .build();
     this.catalogProperties = catalogProperties;
@@ -138,6 +139,26 @@ class RESTTableScan extends DataTableScan {
   }
 
   @Override
+  protected Map<Integer, PartitionSpec> specs() {
+    Map<Integer, PartitionSpec> specs = table().specs();
+    Schema scanSchema = tableSchema();
+    if (scanSchema.sameSchema(table().schema())) {
+      return specs;
+    }
+
+    ImmutableMap.Builder<Integer, PartitionSpec> reboundSpecs =
+        ImmutableMap.builderWithExpectedSize(specs.size());
+    specs.forEach(
+        (specId, spec) -> reboundSpecs.put(specId, spec.toUnbound().bind(scanSchema, true)));
+    return reboundSpecs.build();
+  }
+
+  @Override
+  protected boolean useSnapshotSchema() {
+    return useSnapshotSchema;
+  }
+
+  @Override
   public TableScan useRef(String name) {
     SnapshotRef ref = table().refs().get(name);
     this.useSnapshotSchema = ref != null && ref.isTag();
@@ -146,7 +167,11 @@ class RESTTableScan extends DataTableScan {
 
   @Override
   public TableScan useSnapshot(long snapshotId) {
-    this.useSnapshotSchema = true;
+    return useSnapshot(snapshotId, true);
+  }
+
+  TableScan useSnapshot(long snapshotId, boolean shouldUseSnapshotSchema) {
+    this.useSnapshotSchema = shouldUseSnapshotSchema;
     return super.useSnapshot(snapshotId);
   }
 

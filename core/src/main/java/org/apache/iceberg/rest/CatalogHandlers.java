@@ -49,6 +49,8 @@ import java.util.stream.Collectors;
 import org.apache.iceberg.BaseMetadataTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.BaseTransaction;
+import org.apache.iceberg.DataTableScan;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.MetadataUpdate.UpgradeFormatVersion;
@@ -56,11 +58,13 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.RetryableValidationException;
 import org.apache.iceberg.Scan;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableScan;
+import org.apache.iceberg.TableScanContext;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdateRequirement;
 import org.apache.iceberg.catalog.Catalog;
@@ -76,6 +80,7 @@ import org.apache.iceberg.exceptions.NoSuchViewException;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
@@ -102,6 +107,7 @@ import org.apache.iceberg.rest.responses.LoadViewResponse;
 import org.apache.iceberg.rest.responses.PlanTableScanResponse;
 import org.apache.iceberg.rest.responses.UpdateNamespacePropertiesResponse;
 import org.apache.iceberg.util.Pair;
+import org.apache.iceberg.util.SnapshotUtil;
 import org.apache.iceberg.util.Tasks;
 import org.apache.iceberg.view.BaseView;
 import org.apache.iceberg.view.SQLViewRepresentation;
@@ -842,7 +848,8 @@ public class CatalogHandlers {
       TableScan tableScan = table.newScan();
 
       if (request.snapshotId() != null) {
-        tableScan = tableScan.useSnapshot(request.snapshotId());
+        long snapshotId = request.snapshotId();
+        tableScan = scanSnapshot(table, tableScan, snapshotId, request.useSnapshotSchema());
       }
 
       // Apply filters and projections using common method
@@ -881,7 +888,7 @@ public class CatalogHandlers {
             .withPlanStatus(PlanStatus.COMPLETED)
             .withPlanId(planId)
             .withFileScanTasks(initial.first())
-            .withSpecsById(table.specs());
+            .withSpecsById(specsForTasks(table, initial.first()));
 
     if (!nextPlanTasks.isEmpty()) {
       builder.withPlanTasks(nextPlanTasks);
@@ -911,7 +918,7 @@ public class CatalogHandlers {
         .withPlanStatus(PlanStatus.COMPLETED)
         .withFileScanTasks(initial.first())
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(initial.second()))
-        .withSpecsById(table.specs())
+        .withSpecsById(specsForTasks(table, initial.first()))
         .build();
   }
 
@@ -932,7 +939,7 @@ public class CatalogHandlers {
     return FetchScanTasksResponse.builder()
         .withFileScanTasks(fileScanTasks)
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(planTask))
-        .withSpecsById(table.specs())
+        .withSpecsById(specsForTasks(table, fileScanTasks))
         .build();
   }
 
@@ -976,6 +983,91 @@ public class CatalogHandlers {
     configuredScan = configuredScan.caseSensitive(request.caseSensitive());
 
     return configuredScan;
+  }
+
+  private static TableScan scanSnapshot(
+      Table table, TableScan tableScan, long snapshotId, boolean useSnapshotSchema) {
+    if (tableScan instanceof RESTTableScan restTableScan) {
+      return restTableScan.useSnapshot(snapshotId, useSnapshotSchema);
+    }
+
+    if (isDefaultDataTableScan(tableScan)) {
+      if (!useSnapshotSchema || requiresSnapshotSpecRebinding(table, snapshotId)) {
+        return newDataTableScan(table, useSnapshotSchema).useSnapshot(snapshotId);
+      }
+
+      return tableScan.useSnapshot(snapshotId);
+    }
+
+    if (useSnapshotSchema
+        && tableScan instanceof DataTableScan
+        && requiresSnapshotSpecRebinding(table, snapshotId)) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "Scan %s cannot plan snapshot %s with its snapshot schema",
+              tableScan.getClass().getName(), snapshotId));
+    }
+
+    TableScan snapshotScan = tableScan.useSnapshot(snapshotId);
+    if (!useSnapshotSchema && !snapshotScan.schema().sameSchema(table.schema())) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "Scan %s cannot plan snapshot %s with the current table schema",
+              tableScan.getClass().getName(), snapshotId));
+    }
+
+    return snapshotScan;
+  }
+
+  private static boolean requiresSnapshotSpecRebinding(Table table, long snapshotId) {
+    Snapshot currentSnapshot = table.currentSnapshot();
+    return (currentSnapshot == null || currentSnapshot.snapshotId() == snapshotId)
+        && !SnapshotUtil.schemaFor(table, snapshotId).sameSchema(table.schema());
+  }
+
+  private static boolean isDefaultDataTableScan(TableScan scan) {
+    return scan.getClass().equals(DataTableScan.class);
+  }
+
+  private static TableScan newDataTableScan(Table table, boolean useSnapshotSchema) {
+    TableScan scan =
+        new SchemaAwareDataTableScan(
+            table, table.schema(), TableScanContext.empty(), useSnapshotSchema);
+    if (table instanceof BaseTable baseTable) {
+      scan = scan.metricsReporter(baseTable.reporter());
+    }
+
+    return scan;
+  }
+
+  private static Map<Integer, PartitionSpec> specsForTasks(Table table, List<FileScanTask> tasks) {
+    if (tasks == null) {
+      return Collections.emptyMap();
+    }
+
+    Map<Integer, PartitionSpec> specsById = Maps.newHashMap();
+    for (FileScanTask task : tasks) {
+      specsById.put(task.spec().specId(), task.spec());
+      for (DeleteFile delete : task.deletes()) {
+        specsById.computeIfAbsent(
+            delete.specId(),
+            specId -> {
+              PartitionSpec spec = table.specs().get(specId);
+              Preconditions.checkArgument(spec != null, "Cannot find partition spec %s", specId);
+              return spec.toUnbound().bind(task.spec().schema(), true);
+            });
+      }
+    }
+
+    return specsById;
+  }
+
+  private static Map<Integer, PartitionSpec> rebindSpecs(
+      Map<Integer, PartitionSpec> specs, Schema schema) {
+    ImmutableMap.Builder<Integer, PartitionSpec> reboundSpecs =
+        ImmutableMap.builderWithExpectedSize(specs.size());
+    specs.forEach((specId, spec) -> reboundSpecs.put(specId, spec.toUnbound().bind(schema, true)));
+    return reboundSpecs.build();
   }
 
   /**
@@ -1055,5 +1147,35 @@ public class CatalogHandlers {
                 IN_MEMORY_PLANNING_STATE.markAsyncPlanAsComplete(asyncPlanId);
               }
             });
+  }
+
+  private static final class SchemaAwareDataTableScan extends DataTableScan {
+    private final boolean useSnapshotSchema;
+
+    private SchemaAwareDataTableScan(
+        Table table, Schema schema, TableScanContext context, boolean useSnapshotSchema) {
+      super(table, schema, context);
+      this.useSnapshotSchema = useSnapshotSchema;
+    }
+
+    @Override
+    protected boolean useSnapshotSchema() {
+      return useSnapshotSchema;
+    }
+
+    @Override
+    protected Map<Integer, PartitionSpec> specs() {
+      Map<Integer, PartitionSpec> specs = table().specs();
+      if (!useSnapshotSchema || tableSchema().sameSchema(table().schema())) {
+        return specs;
+      }
+
+      return rebindSpecs(specs, tableSchema());
+    }
+
+    @Override
+    protected TableScan newRefinedScan(Table table, Schema schema, TableScanContext context) {
+      return new SchemaAwareDataTableScan(table, schema, context, useSnapshotSchema);
+    }
   }
 }
