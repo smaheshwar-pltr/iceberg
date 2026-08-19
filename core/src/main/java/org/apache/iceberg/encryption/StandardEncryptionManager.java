@@ -20,11 +20,10 @@ package org.apache.iceberg.encryption;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
-import java.io.IOException;
-import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -36,11 +35,9 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
-import org.apache.iceberg.util.SerializableMap;
 
 public class StandardEncryptionManager implements EncryptionManager {
-  // Keep the UID computed before this class gained synchronization helpers so serialized managers
-  // remain compatible.
+  // Preserve the UID used by released 1.11.0 managers so existing serialized instances load.
   private static final long serialVersionUID = -5497522897222558303L;
 
   // Maximal lifespan of key encryption keys is 2 years according to NIST SP 800-57 (PART 1 REV. 5,
@@ -50,12 +47,15 @@ public class StandardEncryptionManager implements EncryptionManager {
 
   private final String tableKeyId;
   private final int dataKeyLength;
-  private final Map<String, EncryptedKey> encryptionKeys;
   private final KeyManagementClient kmsClient;
 
-  // used in key encryption key rotation unitests
-  private long testTimeShift;
+  // Registry maps and their values are never mutated after publication.
+  private volatile Map<String, EncryptedKey> encryptionKeys;
 
+  // used in key encryption key rotation unitests
+  private volatile long testTimeShift;
+
+  private transient volatile Object keyCreationLock = new Object();
   private transient volatile LoadingCache<String, ByteBuffer> unwrappedKeyCache;
   private transient volatile SecureRandom lazyRNG = null;
 
@@ -90,20 +90,14 @@ public class StandardEncryptionManager implements EncryptionManager {
     this.dataKeyLength = dataKeyLength;
     this.testTimeShift = 0;
 
-    this.encryptionKeys = SerializableMap.copyOf(Maps.newLinkedHashMap());
+    Map<String, EncryptedKey> initialKeys = new LinkedHashMap<>();
     if (keys != null) {
       for (EncryptedKey key : keys) {
-        this.encryptionKeys.put(key.keyId(), copyKey(key));
+        initialKeys.put(key.keyId(), copyKey(key));
       }
     }
-  }
 
-  private void writeObject(ObjectOutputStream out) throws IOException {
-    // Key registry mutations use the same monitor. Hold it while serializing so a stream cannot
-    // contain a manifest-list key without the key-encryption key that wraps it.
-    synchronized (this) {
-      out.defaultWriteObject();
-    }
+    this.encryptionKeys = initialKeys;
   }
 
   @Override
@@ -127,27 +121,54 @@ public class StandardEncryptionManager implements EncryptionManager {
   }
 
   private LoadingCache<String, ByteBuffer> unwrappedKeyCache() {
-    synchronized (this) {
-      if (this.unwrappedKeyCache == null) {
-        this.unwrappedKeyCache =
-            Caffeine.newBuilder()
-                .expireAfterWrite(1, TimeUnit.HOURS)
-                .build(
-                    keyId ->
-                        ByteBuffers.copy(
-                            kmsClient.unwrapKey(encryptedKeyMetadata(keyId), tableKeyId)));
+    LoadingCache<String, ByteBuffer> cache = this.unwrappedKeyCache;
+    if (cache == null) {
+      synchronized (this) {
+        cache = this.unwrappedKeyCache;
+        if (cache == null) {
+          cache =
+              Caffeine.newBuilder()
+                  .expireAfterWrite(1, TimeUnit.HOURS)
+                  .build(
+                      keyId ->
+                          ByteBuffers.copy(
+                              kmsClient.unwrapKey(encryptedKeyMetadata(keyId), tableKeyId)));
+          this.unwrappedKeyCache = cache;
+        }
       }
-
-      return unwrappedKeyCache;
     }
+
+    return cache;
+  }
+
+  private Object keyCreationLock() {
+    Object lock = this.keyCreationLock;
+    if (lock == null) {
+      synchronized (this) {
+        lock = this.keyCreationLock;
+        if (lock == null) {
+          lock = new Object();
+          this.keyCreationLock = lock;
+        }
+      }
+    }
+
+    return lock;
   }
 
   private SecureRandom workerRNG() {
-    if (this.lazyRNG == null) {
-      this.lazyRNG = new SecureRandom();
+    SecureRandom random = this.lazyRNG;
+    if (random == null) {
+      synchronized (this) {
+        random = this.lazyRNG;
+        if (random == null) {
+          random = new SecureRandom();
+          this.lazyRNG = random;
+        }
+      }
     }
 
-    return lazyRNG;
+    return random;
   }
 
   /**
@@ -167,35 +188,23 @@ public class StandardEncryptionManager implements EncryptionManager {
   }
 
   Map<String, EncryptedKey> encryptionKeys() {
-    synchronized (this) {
-      Map<String, EncryptedKey> snapshot = Maps.newLinkedHashMap();
-      encryptionKeys.forEach((keyId, key) -> snapshot.put(keyId, copyKey(key)));
-      return snapshot;
-    }
+    Map<String, EncryptedKey> snapshot = new LinkedHashMap<>();
+    encryptionKeys.forEach((keyId, key) -> snapshot.put(keyId, copyKey(key)));
+    return snapshot;
   }
 
   EncryptedKey encryptionKey(String keyId) {
-    synchronized (this) {
-      EncryptedKey key = encryptionKeys.get(keyId);
-      return key != null ? copyKey(key) : null;
-    }
+    EncryptedKey key = encryptionKeys.get(keyId);
+    return key != null ? copyKey(key) : null;
   }
 
   String keyEncryptionKeyID() {
-    synchronized (this) {
-      // Find unexpired key encryption key
-      for (String keyID : encryptionKeys.keySet()) {
-        EncryptedKey key = encryptionKeys.get(keyID);
-        if (key.encryptedById().equals(tableKeyId)) { // this is a key encryption key
-          String timestampProperty = key.properties().get(KEY_TIMESTAMP);
-          long keyTimestamp = Long.parseLong(timestampProperty);
-          if (currentTimeMillis() - keyTimestamp < KEY_ENCRYPTION_KEY_LIFESPAN_MS) {
-            return keyID;
-          }
-        }
+    synchronized (keyCreationLock()) {
+      String existingKeyId = findUnexpiredKeyEncryptionKey();
+      if (existingKeyId != null) {
+        return existingKeyId;
       }
 
-      // No unexpired key encryption keys; create one
       ByteBuffer unwrapped = newKey();
       ByteBuffer wrapped = kmsClient.wrapKey(ByteBuffers.copy(unwrapped), tableKeyId);
       Map<String, String> properties = Maps.newHashMap();
@@ -203,19 +212,31 @@ public class StandardEncryptionManager implements EncryptionManager {
       EncryptedKey key =
           new BaseEncryptedKey(generateKeyId(), ByteBuffers.copy(wrapped), tableKeyId, properties);
 
-      // update internal tracking
+      // The new ID is not visible to callers yet, so populate the cache before publishing the
+      // stable registry snapshot.
       unwrappedKeyCache().put(key.keyId(), ByteBuffers.copy(unwrapped));
-      encryptionKeys.put(key.keyId(), key);
-
+      addEncryptionKey(key);
       return key.keyId();
     }
   }
 
+  private String findUnexpiredKeyEncryptionKey() {
+    for (EncryptedKey key : encryptionKeys.values()) {
+      if (key.encryptedById().equals(tableKeyId)) {
+        String timestampProperty = key.properties().get(KEY_TIMESTAMP);
+        long keyTimestamp = Long.parseLong(timestampProperty);
+        if (currentTimeMillis() - keyTimestamp < KEY_ENCRYPTION_KEY_LIFESPAN_MS) {
+          return key.keyId();
+        }
+      }
+    }
+
+    return null;
+  }
+
   // For key rotation tests
   void setTestTimeShift(long shift) {
-    synchronized (this) {
-      testTimeShift = shift;
-    }
+    this.testTimeShift = shift;
   }
 
   private long currentTimeMillis() {
@@ -223,36 +244,28 @@ public class StandardEncryptionManager implements EncryptionManager {
   }
 
   ByteBuffer encryptedByKey(String manifestListKeyID) {
-    String keyEncryptionKeyID;
-    synchronized (this) {
-      EncryptedKey encryptedKeyMetadata = encryptionKeys.get(manifestListKeyID);
+    EncryptedKey encryptedKeyMetadata = encryptionKeys.get(manifestListKeyID);
 
-      Preconditions.checkState(
-          encryptedKeyMetadata != null,
-          "Cannot find manifest list key metadata with id %s",
-          manifestListKeyID);
+    Preconditions.checkState(
+        encryptedKeyMetadata != null,
+        "Cannot find manifest list key metadata with id %s",
+        manifestListKeyID);
 
-      Preconditions.checkArgument(
-          !encryptedKeyMetadata.encryptedById().equals(tableKeyId),
-          "%s is a key encryption key, not manifest list key metadata",
-          manifestListKeyID);
+    Preconditions.checkArgument(
+        !encryptedKeyMetadata.encryptedById().equals(tableKeyId),
+        "%s is a key encryption key, not manifest list key metadata",
+        manifestListKeyID);
 
-      keyEncryptionKeyID = encryptedKeyMetadata.encryptedById();
-    }
-
-    return unwrappedKey(keyEncryptionKeyID);
+    return unwrappedKey(encryptedKeyMetadata.encryptedById());
   }
 
   public String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
     String manifestListKeyID = generateKeyId();
-    String keyEncryptionKeyID;
-    String keyEncryptionKeyTimestamp;
-    synchronized (this) {
-      keyEncryptionKeyID = keyEncryptionKeyID();
-      keyEncryptionKeyTimestamp =
-          encryptionKeys.get(keyEncryptionKeyID).properties().get(KEY_TIMESTAMP);
-    }
-
+    String keyEncryptionKeyID = keyEncryptionKeyID();
+    EncryptedKey keyEncryptionKey = encryptionKeys.get(keyEncryptionKeyID);
+    Preconditions.checkState(
+        keyEncryptionKey != null, "Cannot find key encryption key with id %s", keyEncryptionKeyID);
+    String keyEncryptionKeyTimestamp = keyEncryptionKey.properties().get(KEY_TIMESTAMP);
     ByteBuffer encryptedKeyMetadata =
         EncryptionUtil.encryptManifestListKeyMetadata(
             unwrappedKey(keyEncryptionKeyID), keyEncryptionKeyTimestamp, keyMetadata);
@@ -260,11 +273,14 @@ public class StandardEncryptionManager implements EncryptionManager {
         new BaseEncryptedKey(
             manifestListKeyID, ByteBuffers.copy(encryptedKeyMetadata), keyEncryptionKeyID, null);
 
-    synchronized (this) {
-      encryptionKeys.put(key.keyId(), key);
-    }
-
+    addEncryptionKey(key);
     return manifestListKeyID;
+  }
+
+  private synchronized void addEncryptionKey(EncryptedKey key) {
+    Map<String, EncryptedKey> updated = new LinkedHashMap<>(encryptionKeys);
+    updated.put(key.keyId(), copyKey(key));
+    this.encryptionKeys = updated;
   }
 
   private String generateKeyId() {
@@ -280,9 +296,9 @@ public class StandardEncryptionManager implements EncryptionManager {
   }
 
   private ByteBuffer encryptedKeyMetadata(String keyId) {
-    synchronized (this) {
-      return ByteBuffers.copy(encryptionKeys.get(keyId).encryptedKeyMetadata());
-    }
+    EncryptedKey key = encryptionKeys.get(keyId);
+    Preconditions.checkState(key != null, "Cannot find encryption key with id %s", keyId);
+    return ByteBuffers.copy(key.encryptedKeyMetadata());
   }
 
   private ByteBuffer unwrappedKey(String keyId) {
