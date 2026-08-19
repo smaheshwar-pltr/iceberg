@@ -24,7 +24,9 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
@@ -39,15 +41,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-/**
- * Verifies the metadata updates produced by {@link SnapshotProducer} with a test-injected standard
- * encryption manager. Hive integration coverage verifies the supported catalog path.
- */
 class TestManifestListKeyPersistence {
   private static final Map<String, String> TABLE_PROPERTIES =
       ImmutableMap.of(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1);
 
   @TempDir private Path temp;
+  private List<String> committedEncryptionKeyUpdates = List.of();
 
   @AfterEach
   void cleanup() {
@@ -63,6 +62,9 @@ class TestManifestListKeyPersistence {
     TableMetadata committed = table.ops().current();
     Snapshot snapshot = table.currentSnapshot();
     assertSnapshotKeysCommitted(committed, snapshot);
+    EncryptedKey manifestListKey = key(committed, snapshot.keyId());
+    assertThat(committedEncryptionKeyUpdates)
+        .containsExactly(manifestListKey.encryptedById(), manifestListKey.keyId());
     assertReadableFromCommittedKeys(committed, snapshot);
   }
 
@@ -100,14 +102,12 @@ class TestManifestListKeyPersistence {
     TestTables.TestTable table = createEncryptedTable("mlk-rebase");
     Transaction transaction = table.newTransaction();
     transaction.newFastAppend().appendFile(TestBase.FILE_A).commit();
-    List<String> stagedKeyIds = keyIds(((BaseTransaction) transaction).currentMetadata());
 
     table.newFastAppend().appendFile(TestBase.FILE_B).commit();
     transaction.commitTransaction();
 
     TableMetadata committed = table.ops().current();
     assertThat(committed.snapshots()).hasSize(2);
-    assertThat(keyIds(committed)).doesNotContainAnyElementsOf(stagedKeyIds);
     committed
         .snapshots()
         .forEach(
@@ -116,6 +116,7 @@ class TestManifestListKeyPersistence {
               assertThat(snapshot.allManifests(table.io())).isNotEmpty();
               assertReadableFromCommittedKeys(committed, snapshot);
             });
+    assertThat(keyIds(committed)).containsExactlyInAnyOrderElementsOf(snapshotKeyIds(committed));
   }
 
   private static KeyManagementClient kmsClient() {
@@ -128,11 +129,29 @@ class TestManifestListKeyPersistence {
     return metadata.encryptionKeys().stream().map(EncryptedKey::keyId).collect(Collectors.toList());
   }
 
+  private static List<String> addedEncryptionKeyIds(TableMetadata metadata) {
+    return metadata.changes().stream()
+        .filter(MetadataUpdate.AddEncryptionKey.class::isInstance)
+        .map(MetadataUpdate.AddEncryptionKey.class::cast)
+        .map(update -> update.key().keyId())
+        .collect(Collectors.toList());
+  }
+
   private static EncryptedKey key(TableMetadata metadata, String keyId) {
     return metadata.encryptionKeys().stream()
         .filter(key -> key.keyId().equals(keyId))
         .findFirst()
         .orElse(null);
+  }
+
+  private static Set<String> snapshotKeyIds(TableMetadata metadata) {
+    return metadata.snapshots().stream()
+        .flatMap(
+            snapshot -> {
+              EncryptedKey manifestListKey = key(metadata, snapshot.keyId());
+              return Stream.of(snapshot.keyId(), manifestListKey.encryptedById());
+            })
+        .collect(Collectors.toSet());
   }
 
   private static void assertSnapshotKeysCommitted(TableMetadata metadata, Snapshot snapshot) {
@@ -175,6 +194,8 @@ class TestManifestListKeyPersistence {
 
           @Override
           public void commit(TableMetadata base, TableMetadata metadata) {
+            TestManifestListKeyPersistence.this.committedEncryptionKeyUpdates =
+                addedEncryptionKeyIds(metadata);
             super.commit(base, metadata);
             this.currentEncryption =
                 EncryptionUtil.createEncryptionManager(
@@ -194,9 +215,18 @@ class TestManifestListKeyPersistence {
 
   private static TableOperations metadataScopedTemp(
       TableOperations outer, TableMetadata metadata, FileIO plainFileIO) {
+    Map<String, String> stagedEncryptionProperties =
+        ImmutableMap.of(
+            TableProperties.ENCRYPTION_TABLE_KEY,
+            UnitestKMS.MASTER_KEY_NAME1,
+            TableProperties.ENCRYPTION_DEK_LENGTH,
+            String.valueOf(
+                metadata.propertyAsInt(
+                    TableProperties.ENCRYPTION_DEK_LENGTH,
+                    TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT)));
     EncryptionManager encryption =
         EncryptionUtil.createEncryptionManager(
-            metadata.encryptionKeys(), TABLE_PROPERTIES, kmsClient());
+            metadata.encryptionKeys(), stagedEncryptionProperties, kmsClient());
     FileIO encryptedFileIO = EncryptingFileIO.combine(plainFileIO, encryption);
 
     return new StaticTableOperations(

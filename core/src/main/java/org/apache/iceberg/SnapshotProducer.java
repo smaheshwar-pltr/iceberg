@@ -117,10 +117,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
   private TableMetadata base;
-  // Retain the keys produced while writing this attempt's manifest list so commit can persist the
-  // same keys. Other attempt-local outputs, such as manifests and the snapshot ID, are retained
-  // too.
-  private Map<String, EncryptedKey> manifestListKeys = Map.of();
+  // Keep the wrapping key before the manifest-list key so both updates precede the snapshot.
+  private List<EncryptedKey> manifestListKeys = List.of();
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
   private SnapshotAncestryValidator snapshotAncestryValidator =
@@ -298,7 +296,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
   @Override
   public Snapshot apply() {
-    this.manifestListKeys = Map.of();
+    this.manifestListKeys = List.of();
     refresh();
     Snapshot parentSnapshot = SnapshotUtil.latestSnapshot(base, targetBranch);
 
@@ -380,8 +378,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           "Cannot find key encryption key with id %s",
           keyEncryptionKeyID);
 
-      this.manifestListKeys =
-          ImmutableMap.of(manifestListKeyID, manifestListKey, keyEncryptionKeyID, keyEncryptionKey);
+      this.manifestListKeys = List.of(keyEncryptionKey, manifestListKey);
     }
 
     return new BaseSnapshot(
@@ -530,7 +527,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
                   } else {
-                    manifestListKeys.values().forEach(update::addEncryptionKey);
+                    manifestListKeys.forEach(update::addEncryptionKey);
                     if (stageOnly) {
                       update.addSnapshot(newSnapshot);
                     } else {

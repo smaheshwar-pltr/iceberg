@@ -45,6 +45,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
@@ -59,9 +60,7 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.EncryptedKey;
-import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.NativeEncryptionOutputFile;
-import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
@@ -257,14 +256,18 @@ public class TestTableEncryption extends CatalogTestBase {
     Table table = validationCatalog.loadTable(tableIdent);
     List<DataFile> initialFiles = currentDataFiles(table);
     int initialSnapshotCount = (int) Streams.stream(table.snapshots()).count();
-    DataFile file = initialFiles.get(0);
+    DataFile thirdFile =
+        DataFiles.builder(table.spec())
+            .copy(initialFiles.get(0))
+            .withPath(table.location() + "/rebase-third.parquet")
+            .build();
 
     Transaction transaction = table.newTransaction();
-    transaction.newFastAppend().appendFile(file).commit();
+    transaction.newFastAppend().appendFile(initialFiles.get(0)).commit();
 
-    table.newFastAppend().appendFile(file).commit();
+    table.newFastAppend().appendFile(initialFiles.get(1)).commit();
 
-    transaction.newFastAppend().appendFile(file).commit();
+    transaction.newFastAppend().appendFile(thirdFile).commit();
     transaction.commitTransaction();
 
     validationCatalog.invalidateTable(tableIdent);
@@ -329,33 +332,19 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
-  void catalogMasterKeyControlsTemporaryEncryption() {
+  void rejectsStagedMasterKeyChangeBeforeWriting() {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
-    TableOperations ops = ((HasTableOperations) table).operations();
-    TableMetadata staged =
-        TableMetadata.buildFrom(ops.current())
-            .setProperties(
-                Map.of(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2))
-            .build();
+    DataFile file = currentDataFiles(table).get(0);
+    Transaction transaction = table.newTransaction();
+    transaction
+        .updateProperties()
+        .set(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
+        .commit();
 
-    assertThat(ops.temp(staged).encryption())
-        .isInstanceOfSatisfying(
-            StandardEncryptionManager.class,
-            encryption -> {
-              NativeEncryptionOutputFile output =
-                  encryption.encrypt(
-                      localOutput(table.location() + "/catalog-master-key-precedence"));
-              String manifestListKeyId =
-                  encryption.addManifestListKeyMetadata(output.keyMetadata());
-              Map<String, EncryptedKey> keys = EncryptionUtil.encryptionKeys(encryption);
-              EncryptedKey manifestListKey = keys.get(manifestListKeyId);
-
-              assertThat(manifestListKey).isNotNull();
-              EncryptedKey keyEncryptionKey = keys.get(manifestListKey.encryptedById());
-              assertThat(keyEncryptionKey).isNotNull();
-              assertThat(keyEncryptionKey.encryptedById()).isEqualTo(UnitestKMS.MASTER_KEY_NAME1);
-            });
+    assertThatThrownBy(() -> transaction.newFastAppend().appendFile(file).commit())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot add, remove, or modify encryption key ID for an existing table");
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions
@@ -446,7 +435,8 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThatThrownBy(
             () -> sql("ALTER TABLE %s UNSET TBLPROPERTIES (`encryption.key-id`)", tableName))
         .isInstanceOf(SparkException.class)
-        .hasMessage("Unsupported table change: Cannot remove key ID from an encrypted table");
+        .hasMessage(
+            "Unsupported table change: Cannot add, remove, or modify encryption key ID for an existing table");
   }
 
   @TestTemplate
@@ -454,7 +444,8 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThatThrownBy(
             () -> sql("ALTER TABLE %s SET TBLPROPERTIES ('encryption.key-id'='abcd')", tableName))
         .isInstanceOf(SparkException.class)
-        .hasMessage("Unsupported table change: Cannot modify key ID of an encrypted table");
+        .hasMessage(
+            "Unsupported table change: Cannot add, remove, or modify encryption key ID for an existing table");
   }
 
   @TestTemplate
@@ -466,7 +457,7 @@ public class TestTableEncryption extends CatalogTestBase {
                     "REPLACE TABLE %s (id bigint) USING iceberg TBLPROPERTIES ('encryption.key-id'='%s')",
                     tableName, UnitestKMS.MASTER_KEY_NAME2))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Cannot modify key ID of an encrypted table");
+        .hasMessage("Cannot add, remove, or modify encryption key ID for an existing table");
   }
 
   @TestTemplate

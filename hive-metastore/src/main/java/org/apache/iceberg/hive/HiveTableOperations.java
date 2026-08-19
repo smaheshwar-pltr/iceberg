@@ -122,7 +122,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   @Override
-  public FileIO io() {
+  public synchronized FileIO io() {
     if (tableKeyId == null) {
       return fileIO;
     }
@@ -135,7 +135,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   @Override
-  public EncryptionManager encryption() {
+  public synchronized EncryptionManager encryption() {
     if (encryptionManager == null && tableKeyId != null) {
       encryptionManager = createEncryptionManager(encryptedKeys, tableKeyId, encryptionDekLength);
     }
@@ -144,11 +144,22 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   private EncryptionManager encryptionFor(TableMetadata metadata) {
-    // Keep the master-key trust anchor in HMS. All other state must come from the metadata that the
-    // temporary operations represent so transaction updates observe their own staged properties.
+    String catalogKeyId;
+    boolean existingTable;
+    synchronized (this) {
+      catalogKeyId = this.tableKeyId;
+      existingTable = current() != null;
+    }
+
+    if (existingTable) {
+      validateExistingTableEncryptionKey(catalogKeyId, metadata);
+    }
+
+    // HMS anchors the master key for existing tables. Temporary operations use the staged DEK
+    // length.
     String encryptionKeyId =
-        tableKeyId != null
-            ? tableKeyId
+        catalogKeyId != null
+            ? catalogKeyId
             : metadata.property(TableProperties.ENCRYPTION_TABLE_KEY, null);
     if (encryptionKeyId == null) {
       return PlaintextEncryptionManager.instance();
@@ -219,18 +230,21 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (tableKeyIdFromHMS != null) {
       checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
 
-      tableKeyId = tableKeyIdFromHMS;
-      encryptionDekLength =
+      int refreshedDekLength =
           (dekLengthFromHMS != null)
               ? Integer.parseInt(dekLengthFromHMS)
               : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
+      List<EncryptedKey> refreshedKeys = current().encryptionKeys();
 
-      // Committed metadata owns the keys needed by its snapshots. Pending snapshot keys are added
-      // to the metadata update before commit.
-      encryptedKeys = current().encryptionKeys();
-
-      encryptingFileIO = null;
-      encryptionManager = null;
+      synchronized (this) {
+        tableKeyId = tableKeyIdFromHMS;
+        encryptionDekLength = refreshedDekLength;
+        // Committed metadata owns the keys needed by its snapshots. Pending snapshot keys are
+        // added to the metadata update before commit.
+        encryptedKeys = refreshedKeys;
+        encryptingFileIO = null;
+        encryptionManager = null;
+      }
     }
   }
 
@@ -238,6 +252,12 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
+    if (!newTable) {
+      synchronized (this) {
+        validateExistingTableEncryptionKey(tableKeyId, metadata);
+      }
+    }
+
     encryptionPropsFromMetadata(metadata.properties());
 
     String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);
@@ -298,16 +318,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             base.properties().keySet().stream()
                 .filter(key -> !metadata.properties().containsKey(key))
                 .collect(Collectors.toSet());
-
-        Preconditions.checkArgument(
-            !removedProps.contains(TableProperties.ENCRYPTION_TABLE_KEY),
-            "Cannot remove key ID from an encrypted table");
-
-        Preconditions.checkArgument(
-            Objects.equals(
-                base.properties().get(TableProperties.ENCRYPTION_TABLE_KEY),
-                metadata.properties().get(TableProperties.ENCRYPTION_TABLE_KEY)),
-            "Cannot modify key ID of an encrypted table");
       }
 
       HMSTablePropertyHelper.updateHmsTableForIcebergTable(
@@ -475,7 +485,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
         if (tempFileIO == null) {
           EncryptionManager encryption = encryption();
           tempFileIO =
-              encryption == PlaintextEncryptionManager.instance()
+              encryption instanceof PlaintextEncryptionManager
                   ? fileIO
                   : EncryptingFileIO.combine(fileIO, encryption);
         }
@@ -485,8 +495,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
       @Override
       public synchronized EncryptionManager encryption() {
-        // A standard manager copies every retained key, so avoid rebuilding the staged key history
-        // after transaction updates that do not use encryption or file access.
+        // Avoid copying retained keys for updates that do not access encrypted files.
         if (tempEncryption == null) {
           tempEncryption = encryptionFor(uncommittedMetadata);
         }
@@ -555,7 +564,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
         ConfigProperties.LOCK_HIVE_ENABLED, TableProperties.HIVE_LOCK_ENABLED_DEFAULT);
   }
 
-  private void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
+  private synchronized void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
     if (tableKeyId == null) {
       tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
     }
@@ -567,6 +576,14 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
               TableProperties.ENCRYPTION_DEK_LENGTH,
               TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
     }
+  }
+
+  private static void validateExistingTableEncryptionKey(
+      String catalogKeyId, TableMetadata metadata) {
+    Preconditions.checkArgument(
+        Objects.equals(
+            catalogKeyId, metadata.properties().get(TableProperties.ENCRYPTION_TABLE_KEY)),
+        "Cannot add, remove, or modify encryption key ID for an existing table");
   }
 
   private void checkIntegrityForEncryption(

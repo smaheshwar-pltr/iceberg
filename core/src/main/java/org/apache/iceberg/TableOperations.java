@@ -98,6 +98,10 @@ public interface TableOperations {
    * to create a metadata file location based on metadata in the transaction that has not been
    * committed.
    *
+   * <p>The returned operations must derive {@link #io()} and {@link #encryption()} from {@code
+   * uncommittedMetadata} when those services depend on table metadata. Temporary state must not
+   * mutate this operations instance.
+   *
    * <p>Transactions will not call {@link #refresh()} or {@link #commit(TableMetadata,
    * TableMetadata)}.
    *
