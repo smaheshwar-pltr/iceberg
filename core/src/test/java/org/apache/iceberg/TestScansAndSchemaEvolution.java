@@ -319,15 +319,10 @@ public class TestScansAndSchemaEvolution {
   }
 
   @TestTemplate
-  void plansBranchSnapshotAfterSchemaEvolutionWhenMainIsEmpty() throws IOException {
+  void plansBranchSnapshotWhenMainIsEmptyAfterSchemaEvolution() throws IOException {
     Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
 
-    table
-        .newAppend()
-        .appendFile(createDataFile("one"))
-        .appendFile(createDataFile("two"))
-        .toBranch("branch")
-        .commit();
+    table.newAppend().appendFile(createDataFile("one")).toBranch("branch").commit();
     long snapshotId = table.snapshot("branch").snapshotId();
     assertThat(table.currentSnapshot()).isNull();
 
@@ -339,7 +334,7 @@ public class TestScansAndSchemaEvolution {
             .useSnapshot(snapshotId)
             .filter(Expressions.equal("data", "xyz"))
             .planFiles()) {
-      assertThat(tasks).hasSize(2);
+      assertThat(tasks).hasSize(1);
     }
   }
 
