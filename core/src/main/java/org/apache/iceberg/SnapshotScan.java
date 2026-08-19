@@ -82,11 +82,13 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
 
   protected Map<Integer, PartitionSpec> specs() {
     Map<Integer, PartitionSpec> specs = table().specs();
-    Snapshot currentSnapshot = table().currentSnapshot();
     // requires latest schema
-    if (!useSnapshotSchema()
-        || snapshotId() == null
-        || (currentSnapshot != null && snapshotId().equals(currentSnapshot.snapshotId()))) {
+    if (!useSnapshotSchema() || snapshotId() == null) {
+      return specs;
+    }
+
+    Snapshot currentSnapshot = table().currentSnapshot();
+    if (currentSnapshot != null && snapshotId().equals(currentSnapshot.snapshotId())) {
       return specs;
     }
 
