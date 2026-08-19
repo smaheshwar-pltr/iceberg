@@ -43,6 +43,7 @@ import org.apache.iceberg.TestBase;
 import org.apache.iceberg.data.GenericAppenderHelper;
 import org.apache.iceberg.data.RandomGenericData;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.flink.TestHelpers;
 import org.apache.iceberg.flink.TestTableLoader;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
@@ -115,6 +116,24 @@ public class TestStreamingMonitorFunction extends TestBase {
       TestHelpers.assertRecords(
           sourceContext.toRows(), Lists.newArrayList(Iterables.concat(recordsList)), SCHEMA);
     }
+  }
+
+  @TestTemplate
+  public void explicitSnapshotUsesSnapshotSchemaAfterRename() throws IOException {
+    writeRecords(RandomGenericData.generate(SCHEMA, 10, 0L));
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    ScanContext scanContext =
+        ScanContext.builder()
+            .useSnapshotId(snapshotId)
+            .project(SCHEMA)
+            .filters(ImmutableList.of(Expressions.notNull("data")))
+            .build();
+
+    FlinkInputSplit[] splits =
+        FlinkSplitPlanner.planInputSplits(table, scanContext, ThreadPools.getWorkerPool());
+    assertThat(splits).hasSize(1);
   }
 
   @TestTemplate

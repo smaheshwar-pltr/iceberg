@@ -29,6 +29,7 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.RewriteFiles;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.encryption.EncryptionManager;
@@ -228,6 +229,7 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
       fileScanTasks =
           table
               .newScan()
+              .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString())
               .useSnapshot(startingSnapshotId)
               .caseSensitive(caseSensitive)
               .ignoreResiduals()

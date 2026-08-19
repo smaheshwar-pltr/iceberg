@@ -319,6 +319,25 @@ public abstract class TestDelete extends SparkRowLevelOperationsTestBase {
   }
 
   @TestTemplate
+  public void testMetadataDeleteAfterSchemaOnlyRename() throws NoSuchTableException {
+    assumeThat(branch).as("Test only applies to the main branch").isNull();
+    createAndInitPartitionedTable();
+    append(tableName, new Employee(1, "hr"));
+    append(tableName, new Employee(2, "hardware"));
+
+    sql("ALTER TABLE %s RENAME COLUMN id TO employee_id", tableName);
+    sql("DELETE FROM %s WHERE employee_id = 1", tableName);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    validateDelete(table.currentSnapshot(), "1", "1");
+
+    assertEquals(
+        "Should delete using the renamed column",
+        ImmutableList.of(row(2, "hardware")),
+        sql("SELECT * FROM %s ORDER BY employee_id", tableName));
+  }
+
+  @TestTemplate
   public void testDeleteFileThenMetadataDelete() throws Exception {
     assumeThat(fileFormat)
         .as("Avro does not support metadata delete")

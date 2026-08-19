@@ -247,6 +247,41 @@ class TestDataFileRewritePlanner extends OperatorTestBase {
   }
 
   @Test
+  void testBranchUsesCurrentSchemaAfterRename() throws Exception {
+    Table table = createTable();
+    insert(table, 1, "a");
+    insert(table, 2, "b");
+
+    String branchName = "schema-branch";
+    table.manageSnapshots().createBranch(branchName).commit();
+    insert(table, 3, "c");
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    try (OneInputStreamOperatorTestHarness<Trigger, DataFileRewritePlanner.PlannedGroup>
+        testHarness =
+            ProcessFunctionTestHarnesses.forProcessFunction(
+                new DataFileRewritePlanner(
+                    OperatorTestBase.DUMMY_TABLE_NAME,
+                    OperatorTestBase.DUMMY_TABLE_NAME,
+                    0,
+                    tableLoader(),
+                    11,
+                    10_000_000L,
+                    ImmutableMap.of(MIN_INPUT_FILES, "2"),
+                    () -> Expressions.notNull("renamed_data"),
+                    branchName))) {
+      testHarness.open();
+
+      trigger(testHarness);
+
+      assertThat(testHarness.getSideOutput(TaskResultAggregator.ERROR_STREAM)).isNull();
+      List<DataFileRewritePlanner.PlannedGroup> planned = testHarness.extractOutputValues();
+      assertThat(planned).hasSize(1);
+      assertThat(planned.get(0).group().fileScanTasks()).hasSize(2);
+    }
+  }
+
+  @Test
   void testFilterSupplierWithTimestamp() throws Exception {
     Table table = createTableWithTimestampWithoutZone();
 

@@ -22,6 +22,8 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.util.List;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.ExpressionParser;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -33,6 +35,7 @@ public class PlanTableScanRequestParser {
   private static final String FILTER = "filter";
   private static final String CASE_SENSITIVE = "case-sensitive";
   private static final String USE_SNAPSHOT_SCHEMA = "use-snapshot-schema";
+  private static final String SCAN_SCHEMA = "scan-schema";
   private static final String START_SNAPSHOT_ID = "start-snapshot-id";
   private static final String END_SNAPSHOT_ID = "end-snapshot-id";
   private static final String STATS_FIELDS = "stats-fields";
@@ -86,6 +89,11 @@ public class PlanTableScanRequestParser {
     gen.writeBooleanField(CASE_SENSITIVE, request.caseSensitive());
     gen.writeBooleanField(USE_SNAPSHOT_SCHEMA, request.useSnapshotSchema());
 
+    if (request.scanSchema() != null) {
+      gen.writeFieldName(SCAN_SCHEMA);
+      SchemaParser.toJson(request.scanSchema(), gen);
+    }
+
     if (request.statsFields() != null && !request.statsFields().isEmpty()) {
       JsonUtil.writeStringArray(STATS_FIELDS, request.statsFields(), gen);
     }
@@ -128,6 +136,15 @@ public class PlanTableScanRequestParser {
       useSnapshotSchema = JsonUtil.getBool(USE_SNAPSHOT_SCHEMA, json);
     }
 
+    Schema scanSchema = null;
+    if (json.has(SCAN_SCHEMA)) {
+      JsonNode scanSchemaJson = JsonUtil.get(SCAN_SCHEMA, json);
+      Preconditions.checkArgument(
+          scanSchemaJson.hasNonNull("schema-id"),
+          "Cannot parse scan-schema: missing required field schema-id");
+      scanSchema = SchemaParser.fromJson(scanSchemaJson);
+    }
+
     List<String> statsFields = JsonUtil.getStringListOrNull(STATS_FIELDS, json);
 
     return PlanTableScanRequest.builder()
@@ -136,6 +153,7 @@ public class PlanTableScanRequestParser {
         .withFilter(filter)
         .withCaseSensitive(caseSensitive)
         .withUseSnapshotSchema(useSnapshotSchema)
+        .withScanSchema(scanSchema)
         .withStartSnapshotId(startSnapshotId)
         .withEndSnapshotId(endSnapshotId)
         .withStatsFields(statsFields)

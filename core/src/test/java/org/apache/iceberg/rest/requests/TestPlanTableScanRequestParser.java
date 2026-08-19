@@ -22,11 +22,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Test;
 
 public class TestPlanTableScanRequestParser {
+  private static final Schema SCAN_SCHEMA =
+      new Schema(7, Types.NestedField.required(1, "id", Types.IntegerType.get()));
 
   @Test
   public void nullAndEmptyCheck() {
@@ -79,6 +83,55 @@ public class TestPlanTableScanRequestParser {
     assertThatThrownBy(() -> PlanTableScanRequest.builder().withEndSnapshotId(5L).build())
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Invalid incremental scan: startSnapshotId and endSnapshotId is required");
+  }
+
+  @Test
+  public void scanSchemaRequiresExactSnapshotWithCurrentSchemaSelection() {
+    assertThatThrownBy(() -> PlanTableScanRequest.builder().withScanSchema(SCAN_SCHEMA).build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid scan: scanSchema requires snapshotId");
+
+    assertThatThrownBy(
+            () ->
+                PlanTableScanRequest.builder()
+                    .withSnapshotId(1L)
+                    .withUseSnapshotSchema(true)
+                    .withScanSchema(SCAN_SCHEMA)
+                    .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid scan: scanSchema cannot be used when useSnapshotSchema is true");
+  }
+
+  @Test
+  public void scanSchemaRequiresSchemaId() {
+    assertThatThrownBy(
+            () ->
+                PlanTableScanRequestParser.fromJson(
+                    "{\"snapshot-id\":1,\"scan-schema\":{\"type\":\"struct\",\"fields\":[]}}"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot parse scan-schema: missing required field schema-id");
+  }
+
+  @Test
+  public void roundTripSerdeWithScanSchemaAndDefaultFalse() {
+    String json =
+        "{\"snapshot-id\":1,"
+            + "\"case-sensitive\":true,"
+            + "\"scan-schema\":{\"type\":\"struct\",\"schema-id\":7,"
+            + "\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":true,\"type\":\"int\"}]}}";
+
+    PlanTableScanRequest request = PlanTableScanRequestParser.fromJson(json);
+    assertThat(request.useSnapshotSchema()).isFalse();
+    assertThat(request.scanSchema().schemaId()).isEqualTo(SCAN_SCHEMA.schemaId());
+    assertThat(request.scanSchema().sameSchema(SCAN_SCHEMA)).isTrue();
+
+    String expectedJson =
+        "{\"snapshot-id\":1,"
+            + "\"case-sensitive\":true,"
+            + "\"use-snapshot-schema\":false,"
+            + "\"scan-schema\":{\"type\":\"struct\",\"schema-id\":7,"
+            + "\"fields\":[{\"id\":1,\"name\":\"id\",\"required\":true,\"type\":\"int\"}]}}";
+    assertThat(PlanTableScanRequestParser.toJson(request)).isEqualTo(expectedJson);
   }
 
   @Test

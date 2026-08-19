@@ -136,6 +136,67 @@ class TestBinPackRewriteFilePlanner {
     assertThat(plan.totalGroupCount()).isZero();
   }
 
+  @Test
+  void currentSnapshotPinUsesCurrentSchema() {
+    addFiles();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    BinPackRewriteFilePlanner planner =
+        new BinPackRewriteFilePlanner(
+            table, Expressions.notNull("renamed_data"), snapshotId, false, false);
+    planner.init(REWRITE_ALL);
+
+    assertThat(planner.plan().totalGroupCount()).isEqualTo(3);
+  }
+
+  @Test
+  void branchSnapshotPinUsesCurrentSchemaWhenMainIsEmpty() {
+    table.newAppend().appendFile(FILE_1).appendFile(FILE_2).toBranch("branch").commit();
+    long snapshotId = table.snapshot("branch").snapshotId();
+    assertThat(table.currentSnapshot()).isNull();
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    BinPackRewriteFilePlanner planner =
+        new BinPackRewriteFilePlanner(
+            table, Expressions.notNull("renamed_data"), snapshotId, false, false);
+    planner.init(REWRITE_ALL);
+
+    assertThat(planner.plan().totalGroupCount()).isOne();
+  }
+
+  @Test
+  void historicalBranchSnapshotUsesSnapshotSchemaWhenMainIsEmpty() {
+    table.newAppend().appendFile(FILE_1).appendFile(FILE_2).toBranch("branch").commit();
+    long historicalSnapshotId = table.snapshot("branch").snapshotId();
+    table.manageSnapshots().createBranch("historical-branch", historicalSnapshotId).commit();
+    table.newAppend().appendFile(FILE_4).appendFile(FILE_5).toBranch("branch").commit();
+    assertThat(table.currentSnapshot()).isNull();
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    BinPackRewriteFilePlanner planner =
+        new BinPackRewriteFilePlanner(
+            table, Expressions.notNull("data"), historicalSnapshotId, false);
+    planner.init(REWRITE_ALL);
+
+    assertThat(planner.plan().totalGroupCount()).isOne();
+  }
+
+  @Test
+  void historicalSnapshotUsesSnapshotSchema() {
+    table.newAppend().appendFile(FILE_1).appendFile(FILE_2).commit();
+    long historicalSnapshotId = table.currentSnapshot().snapshotId();
+    table.newAppend().appendFile(FILE_4).appendFile(FILE_5).commit();
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    BinPackRewriteFilePlanner planner =
+        new BinPackRewriteFilePlanner(
+            table, Expressions.notNull("data"), historicalSnapshotId, false);
+    planner.init(REWRITE_ALL);
+
+    assertThat(planner.plan().totalGroupCount()).isOne();
+  }
+
   @ParameterizedTest
   @EnumSource(
       value = RewriteJobOrder.class,

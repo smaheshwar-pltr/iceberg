@@ -54,6 +54,7 @@ import org.apache.iceberg.deletes.PositionDelete;
 import org.apache.iceberg.flink.maintenance.api.Trigger;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -85,6 +86,32 @@ class TestEqualityConvertPlanner extends OperatorTestBase {
       assertThat(countEqDeleteTasks(commands)).isZero();
 
       assertThat(harness.getSideOutput(EqualityConvertPlanner.METADATA_STREAM)).hasSize(1);
+    }
+  }
+
+  @Test
+  void bootstrapUsesCurrentSchemaForPinnedTargetSnapshot() throws Exception {
+    Table table = createTableWithDelete(3);
+    table.updateSpec().addField("data").addField("id").commit();
+    insertFullPartitioned(table, 1, "a");
+    table.updateSchema().updateColumn("id", Types.LongType.get()).commit();
+    table.manageSnapshots().createBranch(STAGING_BRANCH).commit();
+    table.refresh();
+
+    try (OneInputStreamOperatorTestHarness<Trigger, ReadCommand> harness =
+        createHarness(STAGING_BRANCH, Lists.newArrayList(1, 2))) {
+      harness.open();
+      sendTrigger(harness);
+
+      List<FileScanTask> tasks =
+          harness.extractOutputValues().stream()
+              .map(ReadCommand::task)
+              .filter(FileScanTask.class::isInstance)
+              .map(FileScanTask.class::cast)
+              .collect(Collectors.toList());
+      assertThat(tasks).hasSize(1);
+      assertThat(tasks.get(0).spec().partitionType().fieldType("id"))
+          .isEqualTo(Types.LongType.get());
     }
   }
 

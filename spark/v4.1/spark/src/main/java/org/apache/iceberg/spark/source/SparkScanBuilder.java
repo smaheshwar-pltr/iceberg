@@ -32,6 +32,7 @@ import org.apache.iceberg.MetricsModes;
 import org.apache.iceberg.ScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.SparkDistributedDataScan;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
@@ -349,8 +350,12 @@ public class SparkScanBuilder extends BaseSparkScanBuilder
             .project(projection)
             .metricsReporter(metricsReporter());
 
-    if (shouldPinSnapshot() || timeTravel != null) {
+    if (timeTravel != null) {
       scan = scan.useSnapshot(snapshot.snapshotId());
+    } else if (shouldPinSnapshot()) {
+      scan =
+          scan.option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString())
+              .useSnapshot(snapshot.snapshotId());
     }
 
     Preconditions.checkState(

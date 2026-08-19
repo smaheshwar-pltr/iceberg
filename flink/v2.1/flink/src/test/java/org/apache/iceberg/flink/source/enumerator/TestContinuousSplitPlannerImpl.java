@@ -33,11 +33,13 @@ import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.data.GenericAppenderHelper;
 import org.apache.iceberg.data.RandomGenericData;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.flink.HadoopTableExtension;
 import org.apache.iceberg.flink.TestFixtures;
 import org.apache.iceberg.flink.source.ScanContext;
 import org.apache.iceberg.flink.source.StreamingStartingStrategy;
 import org.apache.iceberg.flink.source.split.IcebergSourceSplit;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.junit.jupiter.api.BeforeEach;
@@ -173,6 +175,26 @@ public class TestContinuousSplitPlannerImpl {
     for (int i = 0; i < 3; ++i) {
       lastPosition = verifyOneCycle(splitPlanner, lastPosition).lastPosition;
     }
+  }
+
+  @Test
+  void initialTableScanUsesCurrentSchemaAfterRename() throws Exception {
+    appendTwoSnapshots();
+    TABLE_RESOURCE.table().updateSchema().renameColumn("data", "renamed_data").commit();
+
+    ScanContext scanContext =
+        ScanContext.builder()
+            .streaming(true)
+            .startingStrategy(StreamingStartingStrategy.TABLE_SCAN_THEN_INCREMENTAL)
+            .project(TABLE_RESOURCE.table().schema())
+            .filters(ImmutableList.of(Expressions.notNull("renamed_data")))
+            .build();
+    ContinuousSplitPlannerImpl splitPlanner =
+        new ContinuousSplitPlannerImpl(TABLE_RESOURCE.tableLoader().clone(), scanContext, null);
+
+    ContinuousEnumerationResult result = splitPlanner.planSplits(null);
+    assertThat(result.splits()).hasSize(1);
+    assertThat(Iterables.getOnlyElement(result.splits()).task().files()).hasSize(2);
   }
 
   @ParameterizedTest

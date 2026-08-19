@@ -82,7 +82,6 @@ class RESTTableScan extends DataTableScan {
   private final ResourcePaths resourcePaths;
   private final TableIdentifier tableIdentifier;
   private final Set<Endpoint> supportedEndpoints;
-  private final ParserContext parserContext;
   private final Map<String, String> catalogProperties;
   private final Object hadoopConf;
   private String planId = null;
@@ -108,11 +107,6 @@ class RESTTableScan extends DataTableScan {
     this.tableIdentifier = tableIdentifier;
     this.resourcePaths = resourcePaths;
     this.supportedEndpoints = supportedEndpoints;
-    this.parserContext =
-        ParserContext.builder()
-            .add("specsById", table.specs())
-            .add("caseSensitive", context().caseSensitive())
-            .build();
     this.catalogProperties = catalogProperties;
     this.hadoopConf = hadoopConf;
   }
@@ -140,14 +134,17 @@ class RESTTableScan extends DataTableScan {
   @Override
   public TableScan useRef(String name) {
     SnapshotRef ref = table().refs().get(name);
-    this.useSnapshotSchema = ref != null && ref.isTag();
-    return super.useRef(name);
+    RESTTableScan scan = (RESTTableScan) super.useRef(name);
+    scan.useSnapshotSchema = ref != null && ref.isTag();
+    return scan;
   }
 
   @Override
   public TableScan useSnapshot(long snapshotId) {
-    this.useSnapshotSchema = true;
-    return super.useSnapshot(snapshotId);
+    boolean shouldUseSnapshotSchema = shouldUseSnapshotSchema();
+    RESTTableScan scan = (RESTTableScan) super.useSnapshot(snapshotId);
+    scan.useSnapshotSchema = shouldUseSnapshotSchema;
+    return scan;
   }
 
   @Override
@@ -191,6 +188,9 @@ class RESTTableScan extends DataTableScan {
           .withUseSnapshotSchema(true);
     } else if (snapshotId != null) {
       builder.withSnapshotId(snapshotId).withUseSnapshotSchema(useSnapshotSchema);
+      if (!useSnapshotSchema) {
+        builder.withScanSchema(tableSchema());
+      }
     }
 
     return planTableScan(builder.build());
@@ -205,7 +205,7 @@ class RESTTableScan extends DataTableScan {
             headers,
             ErrorHandlers.tableErrorHandler(),
             stringStringMap -> {},
-            parserContext);
+            parserContext());
 
     this.planId = response.planId();
     PlanStatus planStatus = response.planStatus();
@@ -279,7 +279,7 @@ class RESTTableScan extends DataTableScan {
                         FetchPlanningResultResponse.class,
                         headers,
                         ErrorHandlers.planErrorHandler(),
-                        parserContext);
+                        parserContext());
 
                 switch (response.planStatus()) {
                   case COMPLETED:
@@ -352,8 +352,15 @@ class RESTTableScan extends DataTableScan {
             tableIdentifier,
             headers,
             planExecutor(),
-            parserContext),
+            parserContext()),
         this::cancelPlan);
+  }
+
+  private ParserContext parserContext() {
+    return ParserContext.builder()
+        .add("specsById", specs())
+        .add("caseSensitive", isCaseSensitive())
+        .build();
   }
 
   /** Cancels the plan on the server (if supported) and closes the plan-scoped FileIO */

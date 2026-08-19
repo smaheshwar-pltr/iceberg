@@ -2534,6 +2534,20 @@ components:
               items:
                 type: integer
 
+    ScanSchema:
+      allOf:
+        - $ref: '#/components/schemas/StructType'
+        - type: object
+          required:
+            - schema-id
+          properties:
+            schema-id:
+              type: integer
+            identifier-field-ids:
+              type: array
+              items:
+                type: integer
+
     Predicate:
       oneOf:
         - type: boolean
@@ -5342,6 +5356,15 @@ components:
             When scanning a branch, the table schema should be used (false).
           type: boolean
           default: false
+        scan-schema:
+          description:
+            The table schema captured by the client when use-snapshot-schema is false.
+
+            Clients SHOULD supply this schema to keep planning stable across concurrent
+            table schema updates. If supplied, snapshot-id MUST be set and
+            use-snapshot-schema MUST be false. Servers MUST validate both its schema ID
+            and content against table metadata.
+          $ref: '#/components/schemas/ScanSchema'
         start-snapshot-id:
           description: Starting snapshot ID for an incremental scan (exclusive)
           type: integer

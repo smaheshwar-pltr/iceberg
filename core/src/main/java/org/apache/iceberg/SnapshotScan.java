@@ -38,6 +38,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.util.DateTimeUtil;
+import org.apache.iceberg.util.JsonUtil;
 import org.apache.iceberg.util.SnapshotUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +54,26 @@ import org.slf4j.LoggerFactory;
 public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTaskGroup<T>>
     extends BaseScan<ThisT, T, G> {
 
+  /**
+   * Controls whether an exact snapshot scan uses the snapshot schema.
+   *
+   * <p>Accepted values are {@code true} and {@code false}; the default is {@code true}. A false
+   * value retains the scan's schema. This option must be set before {@link #useSnapshot(long)} and
+   * cannot be combined with a non-main {@link #useRef(String)} or {@link #asOfTime(long)}.
+   */
+  public static final String USE_SNAPSHOT_SCHEMA = "use-snapshot-schema";
+
+  /**
+   * Supplies the schema retained by an exact snapshot scan.
+   *
+   * <p>The value must be a schema JSON object with a schema ID and can only be used when {@link
+   * #USE_SNAPSHOT_SCHEMA} is {@code false}. This option must be set before {@link
+   * #useSnapshot(long)} and cannot be combined with a non-main {@link #useRef(String)} or {@link
+   * #asOfTime(long)}.
+   */
+  public static final String SCAN_SCHEMA = "scan-schema";
+
+  private static final boolean USE_SNAPSHOT_SCHEMA_DEFAULT = true;
   private static final Logger LOG = LoggerFactory.getLogger(SnapshotScan.class);
 
   private ScanMetrics scanMetrics;
@@ -72,6 +93,13 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     return false;
   }
 
+  protected boolean shouldUseSnapshotSchema() {
+    String value = options().get(USE_SNAPSHOT_SCHEMA);
+    boolean configuredValue =
+        value != null ? Boolean.parseBoolean(value) : USE_SNAPSHOT_SCHEMA_DEFAULT;
+    return useSnapshotSchema() && configuredValue;
+  }
+
   protected ScanMetrics scanMetrics() {
     if (scanMetrics == null) {
       this.scanMetrics = ScanMetrics.of(new DefaultMetricsContext());
@@ -89,7 +117,7 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
       return specs;
     }
 
-    // this is a time travel request
+    // bind specs to the schema retained by this scan
     Schema snapshotSchema = tableSchema();
     ImmutableMap.Builder<Integer, PartitionSpec> newSpecs =
         ImmutableMap.builderWithExpectedSize(specs.size());
@@ -107,8 +135,20 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
         table().snapshot(scanSnapshotId) != null,
         "Cannot find snapshot with ID %s",
         scanSnapshotId);
+
+    Schema configuredScanSchema = configuredScanSchema();
+    if (configuredScanSchema != null) {
+      Preconditions.checkArgument(
+          "false".equalsIgnoreCase(options().get(USE_SNAPSHOT_SCHEMA)),
+          "Cannot use scan option %s unless scan option %s is false",
+          SCAN_SCHEMA,
+          USE_SNAPSHOT_SCHEMA);
+    }
+
     Schema newSchema =
-        useSnapshotSchema() ? SnapshotUtil.schemaFor(table(), scanSnapshotId) : tableSchema();
+        shouldUseSnapshotSchema()
+            ? SnapshotUtil.schemaFor(table(), scanSnapshotId)
+            : scanSchema(configuredScanSchema);
     TableScanContext newContext = context().useSnapshotId(scanSnapshotId);
     return newRefinedScan(table(), newSchema, newContext);
   }
@@ -117,6 +157,12 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     if (SnapshotRef.MAIN_BRANCH.equals(name)) {
       return newRefinedScan(table(), tableSchema(), context());
     }
+
+    String exactSnapshotOption = exactSnapshotOption();
+    Preconditions.checkArgument(
+        exactSnapshotOption == null,
+        "Cannot use non-main ref when scan option %s is set",
+        exactSnapshotOption);
 
     Preconditions.checkArgument(
         snapshotId() == null, "Cannot override ref, already set snapshot id=%s", snapshotId());
@@ -128,10 +174,81 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
   }
 
   public ThisT asOfTime(long timestampMillis) {
+    String exactSnapshotOption = exactSnapshotOption();
+    Preconditions.checkArgument(
+        exactSnapshotOption == null,
+        "Cannot use timestamp when scan option %s is set",
+        exactSnapshotOption);
     Preconditions.checkArgument(
         snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
 
     return useSnapshot(SnapshotUtil.snapshotIdAsOfTime(table(), timestampMillis));
+  }
+
+  @Override
+  public ThisT option(String property, String value) {
+    if (USE_SNAPSHOT_SCHEMA.equals(property) || SCAN_SCHEMA.equals(property)) {
+      Preconditions.checkArgument(
+          snapshotId() == null,
+          "Cannot set scan option %s, snapshot already set to id=%s",
+          property,
+          snapshotId());
+    }
+
+    if (USE_SNAPSHOT_SCHEMA.equals(property)) {
+      Preconditions.checkArgument(
+          value != null && ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)),
+          "Invalid value for scan option %s: %s (must be true or false)",
+          USE_SNAPSHOT_SCHEMA,
+          value);
+    }
+
+    if (SCAN_SCHEMA.equals(property)) {
+      Preconditions.checkArgument(
+          value != null, "Invalid value for scan option %s: null", property);
+    }
+
+    return super.option(property, value);
+  }
+
+  private String exactSnapshotOption() {
+    if (options().containsKey(USE_SNAPSHOT_SCHEMA)) {
+      return USE_SNAPSHOT_SCHEMA;
+    } else if (options().containsKey(SCAN_SCHEMA)) {
+      return SCAN_SCHEMA;
+    }
+
+    return null;
+  }
+
+  private Schema configuredScanSchema() {
+    String schemaJson = options().get(SCAN_SCHEMA);
+    if (schemaJson == null) {
+      return null;
+    }
+
+    return JsonUtil.parse(
+        schemaJson,
+        json -> {
+          Preconditions.checkArgument(
+              json.hasNonNull("schema-id"), "Invalid scan schema: missing schema-id");
+          return SchemaParser.fromJson(json);
+        });
+  }
+
+  private Schema scanSchema(Schema configuredScanSchema) {
+    if (configuredScanSchema == null) {
+      return tableSchema();
+    }
+
+    Schema knownSchema = table().schemas().get(configuredScanSchema.schemaId());
+    Preconditions.checkArgument(
+        knownSchema != null, "Cannot find scan schema with ID %s", configuredScanSchema.schemaId());
+    Preconditions.checkArgument(
+        knownSchema.sameSchema(configuredScanSchema),
+        "Scan schema with ID %s does not match the table schema with that ID",
+        configuredScanSchema.schemaId());
+    return knownSchema;
   }
 
   @Override
@@ -162,6 +279,7 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
         () -> {
           planningDuration.stop();
           Map<String, String> metadata = Maps.newHashMap(context().options());
+          metadata.remove(SCAN_SCHEMA);
           metadata.putAll(EnvironmentContext.get());
           ScanReport scanReport =
               ImmutableScanReport.builder()

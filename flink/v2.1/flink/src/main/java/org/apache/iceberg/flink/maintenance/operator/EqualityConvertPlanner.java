@@ -47,6 +47,7 @@ import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotChanges;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.SnapshotSummary;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.flink.TableLoader;
@@ -627,7 +628,11 @@ public class EqualityConvertPlanner extends AbstractStreamOperator<ReadCommand>
     long commitSnapshotId = mainSnapshot.snapshotId();
 
     try (CloseableIterable<FileScanTask> tasks =
-        table.newScan().useSnapshot(commitSnapshotId).planFiles()) {
+        table
+            .newScan()
+            .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false")
+            .useSnapshot(commitSnapshotId)
+            .planFiles()) {
       for (FileScanTask task : tasks) {
         output.collect(
             new StreamRecord<>(

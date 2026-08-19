@@ -139,6 +139,29 @@ public abstract class TestDelete extends SparkRowLevelOperationsTestBase {
   }
 
   @TestTemplate
+  public void testDeleteAfterSchemaOnlyRename() throws NoSuchTableException {
+    createAndInitUnpartitionedTable();
+    append(tableName, new Employee(1, "hr"), new Employee(2, "hardware"));
+    createBranchIfNeeded();
+
+    sql("ALTER TABLE %s RENAME COLUMN id TO employee_id", tableName);
+    sql("DELETE FROM %s WHERE employee_id = 1", commitTarget());
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    Snapshot currentSnapshot = SnapshotUtil.latestSnapshot(table, branch);
+    if (mode(table) == COPY_ON_WRITE) {
+      validateCopyOnWrite(currentSnapshot, "1", "1", "1");
+    } else {
+      validateMergeOnRead(currentSnapshot, "1", "1", null);
+    }
+
+    assertEquals(
+        "Should delete using the renamed column",
+        ImmutableList.of(row(2, "hardware")),
+        sql("SELECT * FROM %s ORDER BY employee_id", selectTarget()));
+  }
+
+  @TestTemplate
   public void testCoalesceDelete() throws Exception {
     createAndInitUnpartitionedTable();
 

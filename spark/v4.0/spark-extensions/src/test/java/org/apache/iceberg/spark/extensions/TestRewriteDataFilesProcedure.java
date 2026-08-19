@@ -1230,6 +1230,36 @@ public class TestRewriteDataFilesProcedure extends ExtensionsTestBase {
   }
 
   @TestTemplate
+  public void testRewriteDataFilesOnDivergedBranchAfterSchemaOnlyRename() {
+    createTable();
+    insertData(10);
+
+    String branchName = "schemaBranch";
+    sql("ALTER TABLE %s CREATE BRANCH %s", tableName, branchName);
+    insertData(tableName, 10);
+    sql("ALTER TABLE %s RENAME COLUMN c1 TO renamed_c1", tableName);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    long mainSnapshotId = table.currentSnapshot().snapshotId();
+    long branchSnapshotId = table.refs().get(branchName).snapshotId();
+
+    List<Object[]> output =
+        sql(
+            "CALL %s.system.rewrite_data_files("
+                + "table => '%s', branch => '%s', where => 'renamed_c1 > 0')",
+            catalogName, tableName, branchName);
+
+    assertEquals(
+        "Action should rewrite branch files using the renamed column",
+        row(10, 1),
+        Arrays.copyOf(output.get(0), 2));
+
+    table.refresh();
+    assertThat(table.currentSnapshot().snapshotId()).isEqualTo(mainSnapshotId);
+    assertThat(table.refs().get(branchName).snapshotId()).isNotEqualTo(branchSnapshotId);
+  }
+
+  @TestTemplate
   public void testBranchCompactionDoesNotAffectMain() {
     createTable();
     // create 10 files under non-partitioned table

@@ -2057,6 +2057,11 @@ class PlanTableScanRequest(BaseModel):
         alias='use-snapshot-schema',
         description='Whether to use the schema at the time the snapshot was written.\nWhen time travelling, the snapshot schema should be used (true). When scanning a branch, the table schema should be used (false).',
     )
+    scan_schema: ScanSchema | None = Field(
+        None,
+        alias='scan-schema',
+        description='The table schema captured by the client when use-snapshot-schema is false.\nClients SHOULD supply this schema to keep planning stable across concurrent table schema updates. If supplied, snapshot-id MUST be set and use-snapshot-schema MUST be false. Servers MUST validate both its schema ID and content against table metadata.',
+    )
     start_snapshot_id: int | None = Field(
         None,
         alias='start-snapshot-id',
@@ -2090,6 +2095,11 @@ class FileScanTask(BaseModel):
 
 class Schema(StructType):
     schema_id: int | None = Field(None, alias='schema-id')
+    identifier_field_ids: list[int] | None = Field(None, alias='identifier-field-ids')
+
+
+class ScanSchema(StructType):
+    schema_id: int = Field(..., alias='schema-id')
     identifier_field_ids: list[int] | None = Field(None, alias='identifier-field-ids')
 
 

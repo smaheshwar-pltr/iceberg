@@ -28,6 +28,7 @@ import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.RewriteJobOrder;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
@@ -96,6 +97,7 @@ public class BinPackRewriteFilePlanner
   private final Expression filter;
   private final Long snapshotId;
   private final boolean caseSensitive;
+  private final boolean useSnapshotSchema;
 
   private int deleteFileThreshold;
   private double deleteRatioThreshold;
@@ -111,6 +113,7 @@ public class BinPackRewriteFilePlanner
         table,
         filter,
         table.currentSnapshot() != null ? table.currentSnapshot().snapshotId() : null,
+        false,
         false);
   }
 
@@ -125,10 +128,30 @@ public class BinPackRewriteFilePlanner
    */
   public BinPackRewriteFilePlanner(
       Table table, Expression filter, Long snapshotId, boolean caseSensitive) {
+    this(table, filter, snapshotId, caseSensitive, true);
+  }
+
+  /**
+   * Creates the planner for the given table.
+   *
+   * @param table to plan for
+   * @param filter used to remove files from the plan
+   * @param snapshotId a snapshot ID used for planning and as the starting snapshot id for commit
+   *     validation when replacing the files
+   * @param caseSensitive property used for scanning
+   * @param useSnapshotSchema whether to use the snapshot schema instead of the table schema
+   */
+  public BinPackRewriteFilePlanner(
+      Table table,
+      Expression filter,
+      Long snapshotId,
+      boolean caseSensitive,
+      boolean useSnapshotSchema) {
     super(table);
     this.filter = filter;
     this.snapshotId = snapshotId;
     this.caseSensitive = caseSensitive;
+    this.useSnapshotSchema = useSnapshotSchema;
   }
 
   @Override
@@ -291,6 +314,10 @@ public class BinPackRewriteFilePlanner
         table().newScan().filter(filter).caseSensitive(caseSensitive).ignoreResiduals();
 
     if (snapshotId != null) {
+      if (!useSnapshotSchema) {
+        scan = scan.option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString());
+      }
+
       scan = scan.useSnapshot(snapshotId);
     }
 

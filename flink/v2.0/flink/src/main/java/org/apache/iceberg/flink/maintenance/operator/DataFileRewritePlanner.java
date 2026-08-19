@@ -130,7 +130,8 @@ public class DataFileRewritePlanner
       }
 
       BinPackRewriteFilePlanner planner =
-          new BinPackRewriteFilePlanner(table, filterSupplier.get(), snapshot.snapshotId(), false);
+          new BinPackRewriteFilePlanner(
+              table, filterSupplier.get(), snapshot.snapshotId(), false, false);
       planner.init(rewriterOptions);
 
       FileRewritePlan<RewriteDataFiles.FileGroupInfo, FileScanTask, DataFile, RewriteFileGroup>

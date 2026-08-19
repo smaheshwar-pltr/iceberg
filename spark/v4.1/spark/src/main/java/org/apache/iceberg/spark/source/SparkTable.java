@@ -30,6 +30,7 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotRef;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.exceptions.ValidationException;
@@ -234,7 +235,9 @@ public class SparkTable extends BaseSparkTable
     if (scanBranch != null) {
       scan = scan.useRef(scanBranch);
     } else if (snapshot != null) {
-      scan = scan.useSnapshot(snapshot.snapshotId());
+      scan =
+          scan.option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString())
+              .useSnapshot(snapshot.snapshotId());
     }
 
     try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {

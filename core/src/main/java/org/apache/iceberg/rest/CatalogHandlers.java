@@ -56,6 +56,8 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.RetryableValidationException;
 import org.apache.iceberg.Scan;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.SchemaParser;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
@@ -842,7 +844,26 @@ public class CatalogHandlers {
       TableScan tableScan = table.newScan();
 
       if (request.snapshotId() != null) {
+        Schema expectedScanSchema = null;
+        if (!request.useSnapshotSchema()) {
+          expectedScanSchema =
+              request.scanSchema() != null ? request.scanSchema() : tableScan.schema();
+          tableScan = tableScan.option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString());
+          if (request.scanSchema() != null) {
+            validateScanSchema(table, request.scanSchema());
+            tableScan =
+                tableScan.option(
+                    SnapshotScan.SCAN_SCHEMA, SchemaParser.toJson(request.scanSchema()));
+          }
+        }
         tableScan = tableScan.useSnapshot(request.snapshotId());
+        if (expectedScanSchema != null) {
+          Preconditions.checkArgument(
+              matchesSchema(tableScan.schema(), expectedScanSchema),
+              "Scan %s did not use requested scan schema with ID %s",
+              tableScan.getClass().getName(),
+              expectedScanSchema.schemaId());
+        }
       }
 
       // Apply filters and projections using common method
@@ -881,7 +902,7 @@ public class CatalogHandlers {
             .withPlanStatus(PlanStatus.COMPLETED)
             .withPlanId(planId)
             .withFileScanTasks(initial.first())
-            .withSpecsById(table.specs());
+            .withSpecsById(specsForTasks(table, initial.first()));
 
     if (!nextPlanTasks.isEmpty()) {
       builder.withPlanTasks(nextPlanTasks);
@@ -911,7 +932,7 @@ public class CatalogHandlers {
         .withPlanStatus(PlanStatus.COMPLETED)
         .withFileScanTasks(initial.first())
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(initial.second()))
-        .withSpecsById(table.specs())
+        .withSpecsById(specsForTasks(table, initial.first()))
         .build();
   }
 
@@ -932,8 +953,38 @@ public class CatalogHandlers {
     return FetchScanTasksResponse.builder()
         .withFileScanTasks(fileScanTasks)
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(planTask))
-        .withSpecsById(table.specs())
+        .withSpecsById(specsForTasks(table, fileScanTasks))
         .build();
+  }
+
+  private static Map<Integer, PartitionSpec> specsForTasks(Table table, List<FileScanTask> tasks) {
+    if (tasks.isEmpty()) {
+      return table.specs();
+    }
+
+    Schema taskSchema = tasks.get(0).spec().schema();
+    if (taskSchema.sameSchema(table.schema())) {
+      return table.specs();
+    }
+
+    return table.specs().entrySet().stream()
+        .collect(
+            Collectors.toMap(
+                Map.Entry::getKey, entry -> entry.getValue().toUnbound().bind(taskSchema, true)));
+  }
+
+  private static void validateScanSchema(Table table, Schema scanSchema) {
+    Schema knownSchema = table.schemas().get(scanSchema.schemaId());
+    Preconditions.checkArgument(
+        knownSchema != null, "Cannot find scan schema with ID %s", scanSchema.schemaId());
+    Preconditions.checkArgument(
+        matchesSchema(knownSchema, scanSchema),
+        "Scan schema with ID %s does not match the table schema with that ID",
+        scanSchema.schemaId());
+  }
+
+  private static boolean matchesSchema(Schema left, Schema right) {
+    return left.schemaId() == right.schemaId() && left.sameSchema(right);
   }
 
   /**
@@ -1030,6 +1081,13 @@ public class CatalogHandlers {
 
         previousPlanTask = planTaskKey;
       }
+
+      if (initialFileScanTasks == null) {
+        firstPlanTaskKey = planTaskPrefix + "0";
+        initialFileScanTasks = Collections.emptyList();
+        IN_MEMORY_PLANNING_STATE.addPlanTask(firstPlanTaskKey, initialFileScanTasks);
+      }
+
       return Pair.of(initialFileScanTasks, firstPlanTaskKey);
     } catch (IOException e) {
       throw new UncheckedIOException(e);

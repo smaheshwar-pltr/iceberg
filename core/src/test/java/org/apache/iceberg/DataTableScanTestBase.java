@@ -27,6 +27,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
@@ -179,6 +180,191 @@ public abstract class DataTableScanTestBase<
     assertThatThrownBy(() -> useRef(newScan(), "nonexisting"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Cannot find ref nonexisting");
+  }
+
+  @TestTemplate
+  public void exactSnapshotPinPlansWithCurrentSchema() throws IOException {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    ScanT scan =
+        useSnapshot(newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"), snapshotId)
+            .filter(Expressions.notNull("renamed_data"));
+    assertThat(scan.schema()).isEqualTo(table.schema());
+    validateExpectedFileScanTasks(scan, ImmutableList.of(FILE_A.location()));
+  }
+
+  @TestTemplate
+  public void exactSnapshotPinRemainsOnCapturedSnapshot() throws IOException {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    ScanT scan =
+        useSnapshot(newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"), snapshotId);
+
+    table.newFastAppend().appendFile(FILE_B).commit();
+
+    validateExpectedFileScanTasks(scan, ImmutableList.of(FILE_A.location()));
+  }
+
+  @TestTemplate
+  public void exactSnapshotPinRetainsSchemaAfterTableSchemaChange() throws IOException {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    Schema pinnedSchema = table.schema();
+    ScanT scan =
+        useSnapshot(newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"), snapshotId)
+            .filter(Expressions.notNull("data"));
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    assertThat(scan.schema()).isEqualTo(pinnedSchema);
+    validateExpectedFileScanTasks(scan, ImmutableList.of(FILE_A.location()));
+  }
+
+  @TestTemplate
+  public void exactSnapshotPinUsesCapturedScanSchemaInEitherOptionOrder() throws IOException {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.updateSchema().renameColumn("data", "captured_data").commit();
+    Schema capturedSchema = table.schema();
+    String capturedSchemaJson = SchemaParser.toJson(capturedSchema);
+    table.updateSchema().renameColumn("captured_data", "latest_data").commit();
+
+    ScanT schemaFirst =
+        useSnapshot(
+                newScan()
+                    .option(SnapshotScan.SCAN_SCHEMA, capturedSchemaJson)
+                    .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"),
+                snapshotId)
+            .filter(Expressions.notNull("captured_data"));
+    ScanT selectionFirst =
+        useSnapshot(
+                newScan()
+                    .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false")
+                    .option(SnapshotScan.SCAN_SCHEMA, capturedSchemaJson),
+                snapshotId)
+            .filter(Expressions.notNull("captured_data"));
+
+    assertThat(schemaFirst.schema()).isEqualTo(capturedSchema);
+    assertThat(selectionFirst.schema()).isEqualTo(capturedSchema);
+    validateExpectedFileScanTasks(schemaFirst, ImmutableList.of(FILE_A.location()));
+    validateExpectedFileScanTasks(selectionFirst, ImmutableList.of(FILE_A.location()));
+  }
+
+  @TestTemplate
+  public void exactSnapshotScanSchemaRequiresCurrentSchemaSelection() {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    String schemaJson = SchemaParser.toJson(table.schema());
+
+    assertThatThrownBy(
+            () -> useSnapshot(newScan().option(SnapshotScan.SCAN_SCHEMA, schemaJson), snapshotId))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage(
+            "Cannot use scan option scan-schema unless scan option use-snapshot-schema is false");
+  }
+
+  @TestTemplate
+  public void exactSnapshotScanSchemaRequiresSchemaId() {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    assertThatThrownBy(
+            () ->
+                useSnapshot(
+                    newScan()
+                        .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false")
+                        .option(SnapshotScan.SCAN_SCHEMA, "{\"type\":\"struct\",\"fields\":[]}"),
+                    snapshotId))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid scan schema: missing schema-id");
+  }
+
+  @TestTemplate
+  public void exactSnapshotSchemaOptionRejectsInvalidValue() {
+    assertThatThrownBy(() -> newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "invalid"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage(
+            "Invalid value for scan option use-snapshot-schema: invalid (must be true or false)");
+  }
+
+  @TestTemplate
+  public void exactSnapshotSchemaOptionMustPrecedeSnapshot() {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    ScanT scan = useSnapshot(newScan(), table.currentSnapshot().snapshotId());
+
+    assertThatThrownBy(() -> scan.option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot set scan option use-snapshot-schema, snapshot already set to id=1");
+    assertThatThrownBy(
+            () -> scan.option(SnapshotScan.SCAN_SCHEMA, SchemaParser.toJson(table.schema())))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot set scan option scan-schema, snapshot already set to id=1");
+  }
+
+  @TestTemplate
+  public void exactSnapshotSchemaOptionCannotBeUsedWithRef() {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    table.manageSnapshots().createBranch("branch", table.currentSnapshot().snapshotId()).commit();
+
+    assertThatThrownBy(
+            () -> useRef(newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"), "branch"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot use non-main ref when scan option use-snapshot-schema is set");
+    assertThatThrownBy(
+            () -> useRef(newScan(), "branch").option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot set scan option use-snapshot-schema, snapshot already set to id=1");
+    assertThatThrownBy(
+            () ->
+                useRef(
+                    newScan().option(SnapshotScan.SCAN_SCHEMA, SchemaParser.toJson(table.schema())),
+                    "branch"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot use non-main ref when scan option scan-schema is set");
+  }
+
+  @TestTemplate
+  public void exactSnapshotSchemaOptionCannotBeUsedWithTimestamp() {
+    table.newFastAppend().appendFile(FILE_A).commit();
+
+    assertThatThrownBy(
+            () ->
+                asOfTime(
+                    newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"),
+                    System.currentTimeMillis()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot use timestamp when scan option use-snapshot-schema is set");
+    assertThatThrownBy(
+            () ->
+                asOfTime(
+                    newScan().option(SnapshotScan.SCAN_SCHEMA, SchemaParser.toJson(table.schema())),
+                    System.currentTimeMillis()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot use timestamp when scan option scan-schema is set");
+  }
+
+  @TestTemplate
+  public void mainRefCanBeCombinedWithExactSnapshotSchemaOption() throws IOException {
+    table.newFastAppend().appendFile(FILE_A).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    ScanT optionBeforeRef =
+        useSnapshot(
+            useRef(
+                newScan().option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"),
+                SnapshotRef.MAIN_BRANCH),
+            snapshotId);
+    ScanT refBeforeOption =
+        useSnapshot(
+            useRef(newScan(), SnapshotRef.MAIN_BRANCH)
+                .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false"),
+            snapshotId);
+
+    validateExpectedFileScanTasks(optionBeforeRef, ImmutableList.of(FILE_A.location()));
+    validateExpectedFileScanTasks(refBeforeOption, ImmutableList.of(FILE_A.location()));
   }
 
   private void validateExpectedFileScanTasks(ScanT scan, List<CharSequence> expectedFileScanPaths)

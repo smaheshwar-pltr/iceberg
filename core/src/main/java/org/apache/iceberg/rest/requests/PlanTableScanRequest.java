@@ -19,6 +19,7 @@
 package org.apache.iceberg.rest.requests;
 
 import java.util.List;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -30,6 +31,7 @@ public class PlanTableScanRequest implements RESTRequest {
   private final Expression filter;
   private final boolean caseSensitive;
   private final boolean useSnapshotSchema;
+  private final Schema scanSchema;
   private final Long startSnapshotId;
   private final Long endSnapshotId;
   private final List<String> statsFields;
@@ -55,6 +57,10 @@ public class PlanTableScanRequest implements RESTRequest {
     return useSnapshotSchema;
   }
 
+  public Schema scanSchema() {
+    return scanSchema;
+  }
+
   public Long startSnapshotId() {
     return startSnapshotId;
   }
@@ -77,6 +83,7 @@ public class PlanTableScanRequest implements RESTRequest {
       Expression filter,
       boolean caseSensitive,
       boolean useSnapshotSchema,
+      Schema scanSchema,
       Long startSnapshotId,
       Long endSnapshotId,
       List<String> statsFields,
@@ -86,6 +93,7 @@ public class PlanTableScanRequest implements RESTRequest {
     this.filter = filter;
     this.caseSensitive = caseSensitive;
     this.useSnapshotSchema = useSnapshotSchema;
+    this.scanSchema = scanSchema;
     this.startSnapshotId = startSnapshotId;
     this.endSnapshotId = endSnapshotId;
     this.statsFields = statsFields;
@@ -107,6 +115,14 @@ public class PlanTableScanRequest implements RESTRequest {
           "Invalid incremental scan: startSnapshotId and endSnapshotId is required");
     }
 
+    if (scanSchema != null) {
+      Preconditions.checkArgument(
+          snapshotId != null, "Invalid scan: scanSchema requires snapshotId");
+      Preconditions.checkArgument(
+          !useSnapshotSchema,
+          "Invalid scan: scanSchema cannot be used when useSnapshotSchema is true");
+    }
+
     if (null != minRowsRequested) {
       Preconditions.checkArgument(
           minRowsRequested >= 0L, "Invalid scan: minRowsRequested is negative");
@@ -121,6 +137,7 @@ public class PlanTableScanRequest implements RESTRequest {
         .add("filter", filter)
         .add("caseSensitive", caseSensitive)
         .add("useSnapshotSchema", useSnapshotSchema)
+        .add("scanSchema", scanSchema)
         .add("startSnapshotId", startSnapshotId)
         .add("endSnapshotId", endSnapshotId)
         .add("statsFields", statsFields)
@@ -138,6 +155,7 @@ public class PlanTableScanRequest implements RESTRequest {
     private Expression filter;
     private boolean caseSensitive = true;
     private boolean useSnapshotSchema = false;
+    private Schema scanSchema;
     private Long startSnapshotId;
     private Long endSnapshotId;
     private List<String> statsFields;
@@ -175,6 +193,11 @@ public class PlanTableScanRequest implements RESTRequest {
       return this;
     }
 
+    public Builder withScanSchema(Schema schema) {
+      this.scanSchema = schema;
+      return this;
+    }
+
     public Builder withStartSnapshotId(Long startingSnapshotId) {
       this.startSnapshotId = startingSnapshotId;
       return this;
@@ -202,6 +225,7 @@ public class PlanTableScanRequest implements RESTRequest {
           filter,
           caseSensitive,
           useSnapshotSchema,
+          scanSchema,
           startSnapshotId,
           endSnapshotId,
           statsFields,

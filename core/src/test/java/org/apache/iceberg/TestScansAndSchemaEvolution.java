@@ -35,6 +35,7 @@ import org.apache.iceberg.avro.RandomAvroData;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.inmemory.InMemoryOutputFile;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
@@ -328,14 +329,39 @@ public class TestScansAndSchemaEvolution {
     // schema while the table itself uses the new one
     table.updateSchema().deleteColumn("data").commit();
 
-    List<FileScanTask> tasks =
-        Lists.newArrayList(
-            table
-                .newScan()
-                .useSnapshot(snapshotId)
-                .filter(Expressions.equal("data", "xyz"))
-                .planFiles());
-    assertThat(tasks).hasSize(2);
+    try (CloseableIterable<FileScanTask> tasks =
+        table
+            .newScan()
+            .useSnapshot(snapshotId)
+            .filter(Expressions.equal("data", "xyz"))
+            .planFiles()) {
+      assertThat(tasks).hasSize(2);
+    }
+  }
+
+  @TestTemplate
+  public void testBranchSnapshotWhenMainIsEmpty() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table
+        .newAppend()
+        .appendFile(createDataFile("one"))
+        .appendFile(createDataFile("two"))
+        .toBranch("branch")
+        .commit();
+    long snapshotId = table.snapshot("branch").snapshotId();
+    assertThat(table.currentSnapshot()).isNull();
+
+    table.updateSchema().deleteColumn("data").commit();
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table
+            .newScan()
+            .useSnapshot(snapshotId)
+            .filter(Expressions.equal("data", "xyz"))
+            .planFiles()) {
+      assertThat(tasks).hasSize(2);
+    }
   }
 
   @TestTemplate

@@ -27,6 +27,7 @@ import org.apache.iceberg.CombinedScanTask;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.Scan;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TableScan;
@@ -122,6 +123,10 @@ public class FlinkSplitPlanner {
       scan = refineScanWithBaseConfigs(scan, context, workerPool);
 
       if (context.snapshotId() != null) {
+        if (context.isStreaming()) {
+          scan = scan.option(SnapshotScan.USE_SNAPSHOT_SCHEMA, "false");
+        }
+
         scan = scan.useSnapshot(context.snapshotId());
       } else if (context.tag() != null) {
         scan = scan.useRef(context.tag());

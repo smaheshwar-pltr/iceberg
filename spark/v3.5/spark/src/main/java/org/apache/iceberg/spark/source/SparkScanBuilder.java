@@ -36,6 +36,7 @@ import org.apache.iceberg.MetricsModes;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotScan;
 import org.apache.iceberg.SparkDistributedDataScan;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
@@ -665,6 +666,7 @@ public class SparkScanBuilder
 
     BatchScan scan =
         newBatchScan()
+            .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString())
             .useSnapshot(snapshotId)
             .caseSensitive(caseSensitive)
             .filter(filterExpression())
@@ -701,6 +703,7 @@ public class SparkScanBuilder
     BatchScan scan =
         table
             .newBatchScan()
+            .option(SnapshotScan.USE_SNAPSHOT_SCHEMA, Boolean.FALSE.toString())
             .useSnapshot(snapshot.snapshotId())
             .ignoreResiduals()
             .caseSensitive(caseSensitive)

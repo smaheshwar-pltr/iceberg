@@ -50,7 +50,16 @@ class SparkShufflingDataRewritePlanner extends BinPackRewriteFilePlanner {
 
   SparkShufflingDataRewritePlanner(
       Table table, Expression filter, Long snapshotId, boolean caseSensitive) {
-    super(table, filter, snapshotId, caseSensitive);
+    this(table, filter, snapshotId, caseSensitive, true);
+  }
+
+  SparkShufflingDataRewritePlanner(
+      Table table,
+      Expression filter,
+      Long snapshotId,
+      boolean caseSensitive,
+      boolean useSnapshotSchema) {
+    super(table, filter, snapshotId, caseSensitive, useSnapshotSchema);
   }
 
   @Override
