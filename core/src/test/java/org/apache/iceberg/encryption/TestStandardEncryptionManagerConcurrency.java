@@ -24,19 +24,46 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.io.ObjectStreamClass;
 import java.nio.ByteBuffer;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.iceberg.ManifestListFile;
+import org.apache.iceberg.TestHelpers;
 import org.junit.jupiter.api.Test;
 
 class TestStandardEncryptionManagerConcurrency {
   private static final long WAIT_SECONDS = 10;
-  private static final long SERIAL_VERSION_UID = -5497522897222558303L;
+  private static final String RELEASED_MANIFEST_LIST_KEY_ID = "9P/B2bSlqbdOX3ggfw3MIw==";
+  private static final String RELEASED_KEY_METADATA =
+      "ASAAAQIDBAUGBwgJCgsMDQ4PAiAQERITFBUWFxgZGhscHR4fAA==";
+  // Serialized by iceberg-core 1.11.0 after minting a manifest-list key with UnitestKMS.
+  private static final String RELEASED_MANAGER_FIXTURE =
+      String.join(
+          "",
+          "rO0ABXNyADdvcmcuYXBhY2hlLmljZWJlcmcuZW5jcnlwdGlvbi5TdGFuZGFyZEVuY3J5cHRpb25NYW5h",
+          "Z2Vys7TgDVZ5HaECAAVJAA1kYXRhS2V5TGVuZ3RoSgANdGVzdFRpbWVTaGlmdEwADmVuY3J5cHRpb25L",
+          "ZXlzdAAPTGphdmEvdXRpbC9NYXA7TAAJa21zQ2xpZW50dAAzTG9yZy9hcGFjaGUvaWNlYmVyZy9lbmNy",
+          "eXB0aW9uL0tleU1hbmFnZW1lbnRDbGllbnQ7TAAKdGFibGVLZXlJZHQAEkxqYXZhL2xhbmcvU3RyaW5n",
+          "O3hwAAAAEAAAAAAAAAAAc3IAJ29yZy5hcGFjaGUuaWNlYmVyZy51dGlsLlNlcmlhbGl6YWJsZU1hcNEh",
+          "o5wvJt5YAgABTAAJY29waWVkTWFwcQB+AAF4cHNyABFqYXZhLnV0aWwuSGFzaE1hcAUH2sHDFmDRAwAC",
+          "RgAKbG9hZEZhY3RvckkACXRocmVzaG9sZHhwP0AAAAAAAAx3CAAAABAAAAACdAAYZ2ptRTd2aUpGT3FY",
+          "dko4UVd4QlYzdz09c3IALm9yZy5hcGFjaGUuaWNlYmVyZy5lbmNyeXB0aW9uLkJhc2VFbmNyeXB0ZWRL",
+          "ZXnhdynLStYT3AIABEwADWVuY3J5cHRlZEJ5SWRxAH4AA0wABWtleUlkcQB+AANbAAtrZXlNZXRhZGF0",
+          "YXQAAltCTAAKcHJvcGVydGllc3EAfgABeHB0AARrZXlBcQB+AAl1cgACW0Ks8xf4BghU4AIAAHhwAAAA",
+          "LA0xu+rZnxGKeEZBosgUA4XSKs9s050LtNbnD9UZLWxs6hvLRe2DIeSHPSOpc3EAfgAFc3EAfgAHP0AA",
+          "AAAAAAF3CAAAAAIAAAABdAANS0VZX1RJTUVTVEFNUHQADTE3ODcxNzkwNDg4NDN4dAAYOVAvQjJiU2xx",
+          "YmRPWDNnZ2Z3M01Jdz09c3EAfgAKcQB+AAlxAH4AFHVxAH4ADgAAAEGSrKRujkigYQOrYFTK2gEo1t5w",
+          "L/1Hqc45h4OI+CEhYM4MIh/+a8CjoUyVCIW2d8WIoyR5tLmCXinaTxWwQQJ9uHB4c3IAKG9yZy5hcGFj",
+          "aGUuaWNlYmVyZy5lbmNyeXB0aW9uLlVuaXRlc3RLTVNhs1Igyo6qHAIAAHhyACtvcmcuYXBhY2hlLmlj",
+          "ZWJlcmcuZW5jcnlwdGlvbi5NZW1vcnlNb2NrS01Tor3jwgNw00ACAAFMAAptYXN0ZXJLZXlzcQB+AAF4",
+          "cHNxAH4ABz9AAAAAAAADdwgAAAAEAAAAAnEAfgANdXEAfgAOAAAAEDAxMjM0NTY3ODkwMTIzNDV0AARr",
+          "ZXlCdXEAfgAOAAAAEDExMjM0NTY3ODkwMTIzNDV4cQB+AA0=");
 
   @Test
   void concurrentMintingCreatesOneKeyEncryptionKey() throws Exception {
@@ -79,35 +106,58 @@ class TestStandardEncryptionManagerConcurrency {
   }
 
   @Test
-  void serializationDoesNotExposeIncompleteKeyRegistry() throws Exception {
-    BlockingKms kms = new BlockingKms();
-    InvocationTrackingManager manager = newInvocationTrackingManager(kms);
-    AtomicReference<StandardEncryptionManager> serialized = new AtomicReference<>();
+  void blockedKeyCreationDoesNotBlockExistingKeyReads() throws Exception {
+    BlockingKms kms = new BlockingKms(2);
+    StandardEncryptionManager initialManager = newManager(kms);
+    String existingManifestListKey = initialManager.addManifestListKeyMetadata(keyMetadata());
+    StandardEncryptionManager manager =
+        new StandardEncryptionManager(
+            List.copyOf(initialManager.encryptionKeys().values()),
+            UnitestKMS.MASTER_KEY_NAME1,
+            16,
+            kms);
+    manager.setTestTimeShift(TimeUnit.DAYS.toMillis(731));
+    AtomicReference<ByteBuffer> loadedKey = new AtomicReference<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
     Thread minter =
         new Thread(() -> capture(() -> manager.addManifestListKeyMetadata(keyMetadata()), failure));
-    Thread serializer =
-        new Thread(() -> capture(() -> serialized.set(roundTrip(manager)), failure));
+    Thread reader =
+        new Thread(
+            () ->
+                capture(
+                    () -> loadedKey.set(manager.encryptedByKey(existingManifestListKey)), failure));
 
     minter.start();
     try {
       kms.awaitWrap();
-      serializer.start();
-      manager.awaitSerializationInvocation();
+      reader.start();
+      join(reader);
     } finally {
       kms.releaseWrap();
       join(minter);
-      join(serializer);
+      join(reader);
     }
 
     assertThat(failure.get()).isNull();
-    assertCompleteKeyPairs(serialized.get().encryptionKeys());
+    assertThat(loadedKey.get()).isNotNull();
+  }
+
+  @Test
+  void javaSerializationDoesNotWaitForKeyCreation() throws Exception {
+    assertSerializationDoesNotWait(TestStandardEncryptionManagerConcurrency::roundTrip);
+  }
+
+  @Test
+  void kryoSerializationDoesNotWaitForKeyCreation() throws Exception {
+    assertSerializationDoesNotWait(TestHelpers.KryoHelpers::roundTripSerialize);
   }
 
   @Test
   void snapshotDoesNotExposeIncompleteKeyRegistry() throws Exception {
-    BlockingKms kms = new BlockingKms();
+    BlockingKms kms = new BlockingKms(2);
     InvocationTrackingManager manager = newInvocationTrackingManager(kms);
+    manager.addManifestListKeyMetadata(keyMetadata());
+    manager.setTestTimeShift(TimeUnit.DAYS.toMillis(731));
     AtomicReference<Map<String, EncryptedKey>> snapshot = new AtomicReference<>();
     AtomicReference<Throwable> failure = new AtomicReference<>();
     Thread minter =
@@ -119,7 +169,7 @@ class TestStandardEncryptionManagerConcurrency {
     try {
       kms.awaitWrap();
       reader.start();
-      manager.awaitSnapshotInvocation();
+      join(reader);
     } finally {
       kms.releaseWrap();
       join(minter);
@@ -208,9 +258,19 @@ class TestStandardEncryptionManagerConcurrency {
   }
 
   @Test
-  void serialVersionUidRemainsCompatible() {
-    assertThat(ObjectStreamClass.lookup(StandardEncryptionManager.class).getSerialVersionUID())
-        .isEqualTo(SERIAL_VERSION_UID);
+  void deserializesReleasedManagerState() throws Exception {
+    StandardEncryptionManager manager =
+        deserialize(Base64.getDecoder().decode(RELEASED_MANAGER_FIXTURE));
+    EncryptedKey manifestListKey = manager.encryptionKey(RELEASED_MANIFEST_LIST_KEY_ID);
+
+    assertThat(manifestListKey).isNotNull();
+    assertThat(manager.encryptionKeys())
+        .hasSize(2)
+        .containsKeys(RELEASED_MANIFEST_LIST_KEY_ID, manifestListKey.encryptedById());
+    assertThat(
+            EncryptionUtil.decryptManifestListKeyMetadata(
+                manifestList(RELEASED_MANIFEST_LIST_KEY_ID), manager))
+        .isEqualTo(ByteBuffer.wrap(Base64.getDecoder().decode(RELEASED_KEY_METADATA)));
   }
 
   private static StandardEncryptionManager newManager(UnitestKMS kms) {
@@ -235,11 +295,59 @@ class TestStandardEncryptionManagerConcurrency {
     return new StandardKeyMetadata(new byte[16], new byte[16]);
   }
 
+  private static ManifestListFile manifestList(String keyId) {
+    return new ManifestListFile() {
+      @Override
+      public String location() {
+        return "test-manifest-list";
+      }
+
+      @Override
+      public String encryptionKeyID() {
+        return keyId;
+      }
+
+      @Override
+      public ByteBuffer decryptKeyMetadata(EncryptionManager em) {
+        return EncryptionUtil.decryptManifestListKeyMetadata(this, em);
+      }
+    };
+  }
+
   private static void assertCompleteKeyPairs(Map<String, EncryptedKey> keys) {
     assertThat(keys).isNotEmpty();
     keys.values().stream()
         .filter(key -> !UnitestKMS.MASTER_KEY_NAME1.equals(key.encryptedById()))
         .forEach(key -> assertThat(keys).containsKey(key.encryptedById()));
+  }
+
+  private static void assertSerializationDoesNotWait(ManagerRoundTrip roundTrip) throws Exception {
+    BlockingKms kms = new BlockingKms(2);
+    StandardEncryptionManager manager = newManager(kms);
+    manager.addManifestListKeyMetadata(keyMetadata());
+    manager.setTestTimeShift(TimeUnit.DAYS.toMillis(731));
+    AtomicReference<StandardEncryptionManager> serialized = new AtomicReference<>();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread minter =
+        new Thread(() -> capture(() -> manager.addManifestListKeyMetadata(keyMetadata()), failure));
+    Thread serializer =
+        new Thread(() -> capture(() -> serialized.set(roundTrip.apply(manager)), failure));
+
+    minter.start();
+    try {
+      kms.awaitWrap();
+      serializer.start();
+      join(serializer);
+    } finally {
+      kms.releaseWrap();
+      join(minter);
+      join(serializer);
+    }
+
+    assertThat(failure.get()).isNull();
+    assertCompleteKeyPairs(serialized.get().encryptionKeys());
+    serialized.get().addManifestListKeyMetadata(keyMetadata());
+    assertCompleteKeyPairs(serialized.get().encryptionKeys());
   }
 
   private static void capture(ThrowingRunnable action, AtomicReference<Throwable> failure) {
@@ -268,27 +376,56 @@ class TestStandardEncryptionManagerConcurrency {
     }
   }
 
+  private static StandardEncryptionManager deserialize(byte[] bytes) throws Exception {
+    try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
+      return (StandardEncryptionManager) in.readObject();
+    }
+  }
+
   @FunctionalInterface
   private interface ThrowingRunnable {
     void run() throws Exception;
   }
 
+  @FunctionalInterface
+  private interface ManagerRoundTrip {
+    StandardEncryptionManager apply(StandardEncryptionManager manager) throws Exception;
+  }
+
   private static class BlockingKms extends UnitestKMS {
     private final AtomicInteger wrapCalls = new AtomicInteger();
+    private final int blockedWrapCall;
     private transient CountDownLatch wrapEntered = new CountDownLatch(1);
     private transient CountDownLatch allowWrap = new CountDownLatch(1);
 
+    private BlockingKms() {
+      this(1);
+    }
+
+    private BlockingKms(int blockedWrapCall) {
+      this.blockedWrapCall = blockedWrapCall;
+    }
+
+    @Override
+    public void initialize(Map<String, String> properties) {
+      super.initialize(properties);
+      // Keep the Kryo round trip focused on the manager rather than UnitestKMS's ImmutableMap.
+      this.masterKeys = new HashMap<>(this.masterKeys);
+    }
+
     @Override
     public ByteBuffer wrapKey(ByteBuffer key, String wrappingKeyId) {
-      wrapCalls.incrementAndGet();
-      wrapEntered.countDown();
-      try {
-        if (!allowWrap.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
-          throw new AssertionError("Timed out waiting to release key wrapping");
+      int call = wrapCalls.incrementAndGet();
+      if (call == blockedWrapCall) {
+        wrapEntered.countDown();
+        try {
+          if (!allowWrap.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
+            throw new AssertionError("Timed out waiting to release key wrapping");
+          }
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new AssertionError("Interrupted while waiting to wrap key", e);
         }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new AssertionError("Interrupted while waiting to wrap key", e);
       }
 
       return super.wrapKey(key, wrappingKeyId);
@@ -309,8 +446,6 @@ class TestStandardEncryptionManagerConcurrency {
 
   private static class InvocationTrackingManager extends StandardEncryptionManager {
     private final transient CountDownLatch addInvocations = new CountDownLatch(2);
-    private final transient CountDownLatch snapshotInvocation = new CountDownLatch(1);
-    private final transient CountDownLatch serializationInvocation = new CountDownLatch(1);
 
     private InvocationTrackingManager(UnitestKMS kms) {
       super(List.of(), UnitestKMS.MASTER_KEY_NAME1, 16, kms);
@@ -322,30 +457,8 @@ class TestStandardEncryptionManagerConcurrency {
       return super.addManifestListKeyMetadata(keyMetadata);
     }
 
-    @Override
-    Map<String, EncryptedKey> encryptionKeys() {
-      if (snapshotInvocation != null) {
-        snapshotInvocation.countDown();
-      }
-
-      return super.encryptionKeys();
-    }
-
-    private Object writeReplace() {
-      serializationInvocation.countDown();
-      return this;
-    }
-
     private void awaitAddInvocations() throws InterruptedException {
       assertThat(addInvocations.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
-    }
-
-    private void awaitSnapshotInvocation() throws InterruptedException {
-      assertThat(snapshotInvocation.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
-    }
-
-    private void awaitSerializationInvocation() throws InterruptedException {
-      assertThat(serializationInvocation.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
     }
   }
 

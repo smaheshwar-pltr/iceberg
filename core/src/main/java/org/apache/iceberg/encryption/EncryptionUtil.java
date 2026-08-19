@@ -149,13 +149,20 @@ public class EncryptionUtil {
     StandardEncryptionManager sem = (StandardEncryptionManager) em;
     String manifestListKeyId = manifestList.encryptionKeyID();
     EncryptedKey manifestListKey = sem.encryptionKey(manifestListKeyId);
+    Preconditions.checkState(
+        manifestListKey != null,
+        "Cannot find manifest list key metadata with id %s",
+        manifestListKeyId);
     ByteBuffer encryptedKeyMetadata = manifestListKey.encryptedKeyMetadata();
     String keyEncryptionKeyID = manifestListKey.encryptedById();
+    EncryptedKey keyEncryptionKeyMetadata = sem.encryptionKey(keyEncryptionKeyID);
+    Preconditions.checkState(
+        keyEncryptionKeyMetadata != null,
+        "Cannot find key encryption key with id %s",
+        keyEncryptionKeyID);
     ByteBuffer keyEncryptionKey = sem.encryptedByKey(manifestListKeyId);
     String keyEncryptionKeyTimestamp =
-        sem.encryptionKey(keyEncryptionKeyID)
-            .properties()
-            .get(StandardEncryptionManager.KEY_TIMESTAMP);
+        keyEncryptionKeyMetadata.properties().get(StandardEncryptionManager.KEY_TIMESTAMP);
     Preconditions.checkState(
         keyEncryptionKeyTimestamp != null, "Key encryption key must be timestamped");
     Ciphers.AesGcmDecryptor decryptor =

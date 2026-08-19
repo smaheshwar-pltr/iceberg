@@ -26,8 +26,11 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.ManifestListFile;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 
@@ -67,6 +70,54 @@ public class TestEncryptionUtil {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage(
             "Cannot set both KMS type (aws) and KMS impl (org.apache.iceberg.aws.AwsKeyManagementClient)");
+  }
+
+  @Test
+  void reportsMissingManifestListKey() {
+    StandardEncryptionManager manager = manager(List.of());
+
+    assertThatThrownBy(
+            () ->
+                EncryptionUtil.decryptManifestListKeyMetadata(manifestList("missing-mlk"), manager))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("Cannot find manifest list key metadata with id missing-mlk");
+  }
+
+  @Test
+  void reportsMissingKeyEncryptionKey() {
+    EncryptedKey manifestListKey =
+        new BaseEncryptedKey("mlk", ByteBuffer.wrap(new byte[] {1, 2, 3}), "missing-kek", null);
+    StandardEncryptionManager manager = manager(List.of(manifestListKey));
+
+    assertThatThrownBy(
+            () -> EncryptionUtil.decryptManifestListKeyMetadata(manifestList("mlk"), manager))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("Cannot find key encryption key with id missing-kek");
+  }
+
+  private static StandardEncryptionManager manager(List<EncryptedKey> keys) {
+    UnitestKMS kms = new UnitestKMS();
+    kms.initialize(Map.of());
+    return new StandardEncryptionManager(keys, UnitestKMS.MASTER_KEY_NAME1, 16, kms);
+  }
+
+  private static ManifestListFile manifestList(String keyId) {
+    return new ManifestListFile() {
+      @Override
+      public String location() {
+        return "test-manifest-list";
+      }
+
+      @Override
+      public String encryptionKeyID() {
+        return keyId;
+      }
+
+      @Override
+      public ByteBuffer decryptKeyMetadata(EncryptionManager em) {
+        return EncryptionUtil.decryptManifestListKeyMetadata(this, em);
+      }
+    };
   }
 
   static class UnitTestCustomClassLoader extends ClassLoader {
