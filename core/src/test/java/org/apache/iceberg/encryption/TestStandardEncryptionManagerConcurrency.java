@@ -20,8 +20,13 @@ package org.apache.iceberg.encryption;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.Serializer;
+import com.esotericsoftware.kryo.io.Input;
+import com.esotericsoftware.kryo.io.Output;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
@@ -36,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.iceberg.ManifestListFile;
 import org.apache.iceberg.TestHelpers;
 import org.junit.jupiter.api.Test;
+import org.objenesis.strategy.StdInstantiatorStrategy;
 
 class TestStandardEncryptionManagerConcurrency {
   private static final long WAIT_SECONDS = 10;
@@ -150,6 +156,18 @@ class TestStandardEncryptionManagerConcurrency {
   @Test
   void kryoSerializationDoesNotWaitForKeyCreation() throws Exception {
     assertSerializationDoesNotWait(TestHelpers.KryoHelpers::roundTripSerialize);
+  }
+
+  @Test
+  void javaSerializationUsesStableRegistrySnapshot() throws Exception {
+    assertSerializationUsesStableRegistrySnapshot(
+        TestStandardEncryptionManagerConcurrency::coordinatedJavaRoundTrip);
+  }
+
+  @Test
+  void kryoSerializationUsesStableRegistrySnapshot() throws Exception {
+    assertSerializationUsesStableRegistrySnapshot(
+        TestStandardEncryptionManagerConcurrency::coordinatedKryoRoundTrip);
   }
 
   @Test
@@ -350,6 +368,106 @@ class TestStandardEncryptionManagerConcurrency {
     assertCompleteKeyPairs(serialized.get().encryptionKeys());
   }
 
+  private static void assertSerializationUsesStableRegistrySnapshot(
+      CoordinatedManagerRoundTrip roundTrip) throws Exception {
+    StandardEncryptionManager manager = newManager(new BlockingKms(Integer.MAX_VALUE));
+    manager.addManifestListKeyMetadata(keyMetadata());
+    CountDownLatch keySerializationStarted = new CountDownLatch(1);
+    CountDownLatch continueSerialization = new CountDownLatch(1);
+    AtomicReference<StandardEncryptionManager> serialized = new AtomicReference<>();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread serializer =
+        new Thread(
+            () ->
+                capture(
+                    () ->
+                        serialized.set(
+                            roundTrip.apply(
+                                manager, keySerializationStarted, continueSerialization)),
+                    failure));
+
+    serializer.start();
+    try {
+      await(keySerializationStarted);
+      manager.addManifestListKeyMetadata(keyMetadata());
+    } finally {
+      continueSerialization.countDown();
+      join(serializer);
+    }
+
+    assertThat(failure.get()).isNull();
+    assertCompleteKeyPairs(serialized.get().encryptionKeys());
+  }
+
+  private static StandardEncryptionManager coordinatedJavaRoundTrip(
+      StandardEncryptionManager manager,
+      CountDownLatch keySerializationStarted,
+      CountDownLatch continueSerialization)
+      throws Exception {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (ObjectOutputStream out =
+        new ObjectOutputStream(bytes) {
+          {
+            enableReplaceObject(true);
+          }
+
+          @Override
+          protected Object replaceObject(Object object) throws IOException {
+            if (object instanceof EncryptedKey && keySerializationStarted.getCount() > 0) {
+              keySerializationStarted.countDown();
+              await(continueSerialization);
+            }
+
+            return object;
+          }
+        }) {
+      out.writeObject(manager);
+    }
+
+    return deserialize(bytes.toByteArray());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static StandardEncryptionManager coordinatedKryoRoundTrip(
+      StandardEncryptionManager manager,
+      CountDownLatch keySerializationStarted,
+      CountDownLatch continueSerialization)
+      throws Exception {
+    Kryo kryo = new Kryo();
+    kryo.setInstantiatorStrategy(
+        new Kryo.DefaultInstantiatorStrategy(new StdInstantiatorStrategy()));
+    Serializer<BaseEncryptedKey> keySerializer =
+        (Serializer<BaseEncryptedKey>) kryo.getDefaultSerializer(BaseEncryptedKey.class);
+    kryo.register(
+        BaseEncryptedKey.class,
+        new Serializer<BaseEncryptedKey>() {
+          @Override
+          public void write(Kryo current, Output output, BaseEncryptedKey key) {
+            if (keySerializationStarted.getCount() > 0) {
+              keySerializationStarted.countDown();
+              await(continueSerialization);
+            }
+
+            keySerializer.write(current, output, key);
+          }
+
+          @Override
+          public BaseEncryptedKey read(Kryo current, Input input, Class<BaseEncryptedKey> type) {
+            return keySerializer.read(current, input, type);
+          }
+        });
+
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (Output out = new Output(new ObjectOutputStream(bytes))) {
+      kryo.writeClassAndObject(out, manager);
+    }
+
+    try (Input in =
+        new Input(new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray())))) {
+      return (StandardEncryptionManager) kryo.readClassAndObject(in);
+    }
+  }
+
   private static void capture(ThrowingRunnable action, AtomicReference<Throwable> failure) {
     try {
       action.run();
@@ -361,6 +479,17 @@ class TestStandardEncryptionManagerConcurrency {
   private static void join(Thread thread) throws InterruptedException {
     thread.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
     assertThat(thread.isAlive()).isFalse();
+  }
+
+  private static void await(CountDownLatch latch) {
+    try {
+      if (!latch.await(WAIT_SECONDS, TimeUnit.SECONDS)) {
+        throw new AssertionError("Timed out waiting for coordinated serialization");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError("Interrupted during coordinated serialization", e);
+    }
   }
 
   @SuppressWarnings("unchecked")
@@ -390,6 +519,15 @@ class TestStandardEncryptionManagerConcurrency {
   @FunctionalInterface
   private interface ManagerRoundTrip {
     StandardEncryptionManager apply(StandardEncryptionManager manager) throws Exception;
+  }
+
+  @FunctionalInterface
+  private interface CoordinatedManagerRoundTrip {
+    StandardEncryptionManager apply(
+        StandardEncryptionManager manager,
+        CountDownLatch keySerializationStarted,
+        CountDownLatch continueSerialization)
+        throws Exception;
   }
 
   private static class BlockingKms extends UnitestKMS {
