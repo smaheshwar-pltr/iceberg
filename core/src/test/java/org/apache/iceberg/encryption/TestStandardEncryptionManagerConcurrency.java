@@ -31,7 +31,6 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -40,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.iceberg.ManifestListFile;
 import org.apache.iceberg.TestHelpers;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.junit.jupiter.api.Test;
 import org.objenesis.strategy.StdInstantiatorStrategy;
 
@@ -548,7 +548,7 @@ class TestStandardEncryptionManagerConcurrency {
     public void initialize(Map<String, String> properties) {
       super.initialize(properties);
       // Keep the Kryo round trip focused on the manager rather than UnitestKMS's ImmutableMap.
-      this.masterKeys = new HashMap<>(this.masterKeys);
+      this.masterKeys = Maps.newHashMap(this.masterKeys);
     }
 
     @Override
