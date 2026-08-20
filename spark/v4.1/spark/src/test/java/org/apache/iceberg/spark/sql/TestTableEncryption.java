@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -139,6 +140,16 @@ public class TestTableEncryption extends CatalogTestBase {
         table.newScan().useSnapshot(snapshotId).planFiles()) {
       return ImmutableList.copyOf(tasks);
     }
+  }
+
+  private static List<String> metadataFileNames(Table table) {
+    String metadataFolderPath =
+        new File(table.currentSnapshot().manifestListLocation())
+            .getParent()
+            .replaceFirst("file:", "");
+    File[] metadataFiles = new File(metadataFolderPath).listFiles();
+    assertThat(metadataFiles).isNotNull();
+    return Arrays.stream(metadataFiles).map(File::getName).sorted().collect(Collectors.toList());
   }
 
   private static void assertSnapshotHasEncryptionKeys(Table table, Snapshot snapshot) {
@@ -329,6 +340,12 @@ public class TestTableEncryption extends CatalogTestBase {
         .isInstanceOfSatisfying(
             NativeEncryptionOutputFile.class,
             output -> assertThat(output.keyMetadata().encryptionKey().remaining()).isEqualTo(32));
+
+    assertThat(
+            ops.encryption().encrypt(localOutput(table.location() + "/committed-data-key-length")))
+        .isInstanceOfSatisfying(
+            NativeEncryptionOutputFile.class,
+            output -> assertThat(output.keyMetadata().encryptionKey().remaining()).isEqualTo(16));
   }
 
   @TestTemplate
@@ -341,10 +358,12 @@ public class TestTableEncryption extends CatalogTestBase {
         .updateProperties()
         .set(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
         .commit();
+    List<String> metadataFilesBeforeAppend = metadataFileNames(table);
 
     assertThatThrownBy(() -> transaction.newFastAppend().appendFile(file).commit())
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Cannot add, remove, or modify encryption key ID for an existing table");
+    assertThat(metadataFileNames(table)).containsExactlyElementsOf(metadataFilesBeforeAppend);
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions
