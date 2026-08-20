@@ -272,8 +272,7 @@ public class TestTableEncryption extends CatalogTestBase {
                     "REPLACE TABLE %s (id bigint) USING iceberg TBLPROPERTIES ('encryption.key-id'='%s')",
                     tableName, UnitestKMS.MASTER_KEY_NAME2))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage(
-            "Cannot add, remove, or modify encryption key ID for an existing table");
+        .hasMessage("Cannot add, remove, or modify encryption key ID for an existing table");
   }
 
   @TestTemplate
