@@ -193,6 +193,16 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
     return (RESTTableScan) scan;
   }
 
+  @Test
+  void exactSnapshotSelectionIsNotSupported() {
+    Table table = restTableFor(restCatalog, "exact_snapshot_not_supported");
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    assertThatThrownBy(() -> table.newScan().atSnapshot(snapshotId))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessage("Exact snapshot selection is not supported for REST server-side planning");
+  }
+
   // ==================== Test Planning Behavior ====================
 
   /** Enum for parameterized tests to test both synchronous and asynchronous planning modes. */

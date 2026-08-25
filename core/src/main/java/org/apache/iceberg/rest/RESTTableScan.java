@@ -151,6 +151,12 @@ class RESTTableScan extends DataTableScan {
   }
 
   @Override
+  public TableScan atSnapshot(long snapshotId) {
+    throw new UnsupportedOperationException(
+        "Exact snapshot selection is not supported for REST server-side planning");
+  }
+
+  @Override
   public Supplier<FileIO> fileIO() {
     return () -> {
       Preconditions.checkState(

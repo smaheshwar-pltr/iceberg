@@ -61,6 +61,14 @@ class IncrementalDataTableScan extends DataTableScan {
   }
 
   @Override
+  public TableScan atSnapshot(long scanSnapshotId) {
+    throw new UnsupportedOperationException(
+        String.format(
+            "Cannot scan table at exact snapshot ID %s: configured for incremental data in snapshots (%s, %s]",
+            scanSnapshotId, context().fromSnapshotId(), context().toSnapshotId()));
+  }
+
+  @Override
   public TableScan appendsBetween(long fromSnapshotId, long toSnapshotId) {
     validateSnapshotIdsRefinement(fromSnapshotId, toSnapshotId);
     return new IncrementalDataTableScan(

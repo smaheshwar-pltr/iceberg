@@ -38,6 +38,19 @@ public interface TableScan extends Scan<TableScan, FileScanTask, CombinedScanTas
   TableScan useSnapshot(long snapshotId);
 
   /**
+   * Create a new {@link TableScan} from this scan's configuration that will read data from the
+   * given snapshot using the snapshot's schema.
+   *
+   * @param snapshotId a snapshot ID
+   * @return a new scan based on this with the given snapshot ID and schema
+   * @throws IllegalArgumentException if the snapshot cannot be found or does not identify a schema
+   * @throws UnsupportedOperationException if exact snapshot selection is not supported
+   */
+  default TableScan atSnapshot(long snapshotId) {
+    throw new UnsupportedOperationException("Exact snapshot selection is not supported");
+  }
+
+  /**
    * Create a new {@link TableScan} from this scan's configuration that will use the given
    * reference.
    *
@@ -96,7 +109,7 @@ public interface TableScan extends Scan<TableScan, FileScanTask, CombinedScanTas
    * Returns the {@link Snapshot} that will be used by this scan.
    *
    * <p>If the snapshot was not configured using {@link #asOfTime(long)} or {@link
-   * #useSnapshot(long)}, the current table snapshot will be used.
+   * #useSnapshot(long)}, or {@link #atSnapshot(long)}, the current table snapshot will be used.
    *
    * @return the Snapshot this scan will use
    */
