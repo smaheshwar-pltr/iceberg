@@ -32,19 +32,37 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import java.io.File;
+import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.CatalogUtil;
+import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
+import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.types.Types;
 import org.apache.thrift.TException;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
@@ -52,6 +70,395 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.platform.commons.support.ReflectionSupport;
 
 public class TestHiveCommits extends HiveTableTestBase {
+  private static final int INTERLEAVING_TIMEOUT_SECONDS = 30;
+
+  @Test
+  void plaintextRefreshIgnoresMetadataHashProperty() {
+    Table retained = catalog.loadTable(TABLE_IDENTIFIER);
+    HiveTableOperations retainedOps =
+        (HiveTableOperations) ((HasTableOperations) retained).operations();
+
+    catalog
+        .loadTable(TABLE_IDENTIFIER)
+        .updateProperties()
+        .set(HiveTableOperations.METADATA_HASH_PROP, "not-a-metadata-hash")
+        .commit();
+
+    retained.refresh();
+    assertThat(retainedOps.current().properties())
+        .containsEntry(HiveTableOperations.METADATA_HASH_PROP, "not-a-metadata-hash");
+    assertThat(retained.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        HiveTableOperations.METADATA_HASH_PROP,
+        TableProperties.ENCRYPTION_TABLE_KEY,
+        TableProperties.ENCRYPTION_DEK_LENGTH
+      })
+  void failedIntegrityRefreshRetainsAcceptedState(String hmsProperty) throws Exception {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "encrypted_refresh");
+    HiveCatalog encryptionCatalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+                ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()),
+                HIVE_METASTORE_EXTENSION.hiveConf());
+
+    try {
+      Table retained =
+          encryptionCatalog
+              .buildTable(identifier, SCHEMA)
+              .withPartitionSpec(PartitionSpec.unpartitioned())
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .withProperty(TableProperties.ENCRYPTION_DEK_LENGTH, "24")
+              .create();
+      retained.refresh();
+      HiveTableOperations retainedOps =
+          (HiveTableOperations) ((HasTableOperations) retained).operations();
+      String acceptedLocation = retainedOps.currentMetadataLocation();
+      String acceptedHash =
+          HIVE_METASTORE_EXTENSION
+              .metastoreClient()
+              .getTable(DB_NAME, identifier.name())
+              .getParameters()
+              .get(HiveTableOperations.METADATA_HASH_PROP);
+
+      encryptionCatalog
+          .loadTable(identifier)
+          .updateSchema()
+          .addColumn("data", Types.StringType.get())
+          .commit();
+
+      org.apache.hadoop.hive.metastore.api.Table hmsTable =
+          HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+      String candidateLocation =
+          hmsTable.getParameters().get(HiveTableOperations.METADATA_LOCATION_PROP);
+      String candidateHash = hmsTable.getParameters().get(HiveTableOperations.METADATA_HASH_PROP);
+      assertThat(candidateLocation).isNotEqualTo(acceptedLocation);
+      assertThat(candidateHash).isNotEqualTo(acceptedHash);
+      String acceptedHmsValue = hmsTable.getParameters().get(hmsProperty);
+      String rejectedHmsValue =
+          ImmutableMap.of(
+                  HiveTableOperations.METADATA_HASH_PROP,
+                  acceptedHash,
+                  TableProperties.ENCRYPTION_TABLE_KEY,
+                  UnitestKMS.MASTER_KEY_NAME2,
+                  TableProperties.ENCRYPTION_DEK_LENGTH,
+                  "32")
+              .get(hmsProperty);
+      assertThat(rejectedHmsValue).isNotEqualTo(acceptedHmsValue);
+      hmsTable.getParameters().put(hmsProperty, rejectedHmsValue);
+      HIVE_METASTORE_EXTENSION.metastoreClient().alter_table(DB_NAME, identifier.name(), hmsTable);
+
+      try {
+        assertThatThrownBy(retainedOps::refresh)
+            .isInstanceOf(RuntimeException.class)
+            .hasMessageContaining("differs");
+        assertThat(retainedOps.currentMetadataLocation()).isEqualTo(acceptedLocation);
+        assertThat(retainedOps.current().schema().findField("data")).isNull();
+      } finally {
+        hmsTable = HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+        hmsTable.getParameters().put(hmsProperty, acceptedHmsValue);
+        HIVE_METASTORE_EXTENSION
+            .metastoreClient()
+            .alter_table(DB_NAME, identifier.name(), hmsTable);
+      }
+
+      retainedOps.refresh();
+      assertThat(retainedOps.currentMetadataLocation()).isEqualTo(candidateLocation);
+      assertThat(retainedOps.current().schema().findField("data")).isNotNull();
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, true);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"invalid", "17"})
+  void invalidDekCommitIsRejected(String invalidDekLength) throws Exception {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "invalid_dek_commit");
+    HiveCatalog encryptionCatalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+                ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()),
+                HIVE_METASTORE_EXTENSION.hiveConf());
+
+    try {
+      Table retained =
+          encryptionCatalog
+              .buildTable(identifier, SCHEMA)
+              .withPartitionSpec(PartitionSpec.unpartitioned())
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .withProperty(TableProperties.ENCRYPTION_DEK_LENGTH, "24")
+              .create();
+      retained.refresh();
+      HiveTableOperations retainedOps =
+          (HiveTableOperations) ((HasTableOperations) retained).operations();
+      String acceptedLocation = retainedOps.currentMetadataLocation();
+
+      assertThatThrownBy(
+              () ->
+                  encryptionCatalog
+                      .loadTable(identifier)
+                      .updateProperties()
+                      .set(TableProperties.ENCRYPTION_DEK_LENGTH, invalidDekLength)
+                      .commit())
+          .isInstanceOf(ValidationException.class)
+          .hasMessage("Invalid data key length: %s (must be 16, 24, or 32)", invalidDekLength);
+
+      retained.refresh();
+      assertThat(retainedOps.currentMetadataLocation()).isEqualTo(acceptedLocation);
+      assertThat(retainedOps.current().properties())
+          .containsEntry(TableProperties.ENCRYPTION_DEK_LENGTH, "24");
+      org.apache.hadoop.hive.metastore.api.Table hmsTable =
+          HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+      assertThat(hmsTable.getParameters())
+          .containsEntry(HiveTableOperations.METADATA_LOCATION_PROP, acceptedLocation)
+          .containsEntry(TableProperties.ENCRYPTION_DEK_LENGTH, "24");
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, true);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"invalid", "17"})
+  void invalidDekRefreshRetainsAcceptedState(String invalidDekLength) throws Exception {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "invalid_dek_refresh");
+    HiveCatalog encryptionCatalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+                ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()),
+                HIVE_METASTORE_EXTENSION.hiveConf());
+
+    try {
+      Table retained =
+          encryptionCatalog
+              .buildTable(identifier, SCHEMA)
+              .withPartitionSpec(PartitionSpec.unpartitioned())
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .withProperty(TableProperties.ENCRYPTION_DEK_LENGTH, "24")
+              .create();
+      retained.refresh();
+      HiveTableOperations retainedOps =
+          (HiveTableOperations) ((HasTableOperations) retained).operations();
+      TableMetadata acceptedMetadata = retainedOps.current();
+      String acceptedLocation = retainedOps.currentMetadataLocation();
+      EncryptionManager acceptedManager = retainedOps.encryption();
+      FileIO acceptedFileIO = retainedOps.io();
+      org.apache.hadoop.hive.metastore.api.Table hmsTable =
+          HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+      String acceptedHash = hmsTable.getParameters().get(HiveTableOperations.METADATA_HASH_PROP);
+
+      TableMetadata candidateMetadata =
+          TableMetadata.buildFrom(acceptedMetadata)
+              .setProperties(
+                  ImmutableMap.of(TableProperties.ENCRYPTION_DEK_LENGTH, invalidDekLength))
+              .build();
+      String candidateLocation =
+          retainedOps.metadataFileLocation("injected-" + invalidDekLength + ".metadata.json");
+      TableMetadataParser.overwrite(
+          candidateMetadata, acceptedFileIO.newOutputFile(candidateLocation));
+      hmsTable.getParameters().put(HiveTableOperations.METADATA_LOCATION_PROP, candidateLocation);
+      hmsTable.getParameters().put(TableProperties.ENCRYPTION_DEK_LENGTH, invalidDekLength);
+      HMSTablePropertyHelper.setMetadataHash(candidateMetadata, hmsTable.getParameters());
+      HIVE_METASTORE_EXTENSION.metastoreClient().alter_table(DB_NAME, identifier.name(), hmsTable);
+
+      try {
+        assertThatThrownBy(retainedOps::refresh)
+            .isInstanceOf(ValidationException.class)
+            .hasMessage("Invalid data key length: %s (must be 16, 24, or 32)", invalidDekLength);
+        assertThat(retainedOps.currentMetadataLocation()).isEqualTo(acceptedLocation);
+        assertThat(retainedOps.current()).isSameAs(acceptedMetadata);
+        assertThat(retainedOps.current().properties())
+            .containsEntry(TableProperties.ENCRYPTION_DEK_LENGTH, "24");
+        assertThat(retainedOps.encryption()).isSameAs(acceptedManager);
+        assertThat(retainedOps.io()).isSameAs(acceptedFileIO);
+      } finally {
+        hmsTable = HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+        hmsTable.getParameters().put(HiveTableOperations.METADATA_LOCATION_PROP, acceptedLocation);
+        hmsTable.getParameters().put(HiveTableOperations.METADATA_HASH_PROP, acceptedHash);
+        hmsTable.getParameters().put(TableProperties.ENCRYPTION_DEK_LENGTH, "24");
+        HIVE_METASTORE_EXTENSION
+            .metastoreClient()
+            .alter_table(DB_NAME, identifier.name(), hmsTable);
+        acceptedFileIO.deleteFile(candidateLocation);
+      }
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, true);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @Test
+  void refreshPublishesMetadataWithEncryptionState() throws Exception {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "refresh_file_io");
+    HiveCatalog encryptionCatalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                CatalogUtil.ICEBERG_CATALOG_TYPE_HIVE,
+                ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()),
+                HIVE_METASTORE_EXTENSION.hiveConf());
+
+    try {
+      Table retained =
+          encryptionCatalog
+              .buildTable(identifier, SCHEMA)
+              .withPartitionSpec(PartitionSpec.unpartitioned())
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .create();
+      retained.refresh();
+      HiveTableOperations retainedOps =
+          (HiveTableOperations) ((HasTableOperations) retained).operations();
+      EncryptionManager priorManager = retainedOps.encryption();
+
+      Table concurrent = encryptionCatalog.loadTable(identifier);
+      DataFile file =
+          DataFiles.builder(concurrent.spec())
+              .withPath(concurrent.location() + "/data.parquet")
+              .withRecordCount(1)
+              .withFileSizeInBytes(1)
+              .build();
+      concurrent.newFastAppend().appendFile(file).commit();
+      Snapshot concurrentSnapshot = concurrent.currentSnapshot();
+      assertThat(concurrentSnapshot.keyId()).isNotNull();
+      assertThat(EncryptionUtil.encryptionKeys(priorManager))
+          .doesNotContainKey(concurrentSnapshot.keyId());
+
+      HiveTableOperations spyOps = spy(retainedOps);
+      CountDownLatch managerSelected = new CountDownLatch(1);
+      CountDownLatch publishFileIO = new CountDownLatch(1);
+      CountDownLatch firstCurrentReturned = new CountDownLatch(1);
+      CountDownLatch refreshFinished = new CountDownLatch(1);
+      AtomicBoolean blockNextEncryption = new AtomicBoolean(true);
+      AtomicReference<EncryptionManager> selectedManager = new AtomicReference<>();
+      doAnswer(
+              invocation -> {
+                EncryptionManager manager = (EncryptionManager) invocation.callRealMethod();
+                if (blockNextEncryption.compareAndSet(true, false)) {
+                  selectedManager.set(manager);
+                  managerSelected.countDown();
+                  if (!publishFileIO.await(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting to publish FileIO");
+                  }
+                }
+
+                return manager;
+              })
+          .when(spyOps)
+          .encryption();
+
+      AtomicReference<FileIO> overlappingFileIO = new AtomicReference<>();
+      AtomicReference<Snapshot> observedSnapshot = new AtomicReference<>();
+      AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+      Thread ioThread =
+          new Thread(
+              () -> {
+                try {
+                  overlappingFileIO.set(spyOps.io());
+                } catch (Throwable t) {
+                  asyncFailure.compareAndSet(null, t);
+                }
+              },
+              "hive-encryption-io");
+      Thread refreshThread =
+          new Thread(
+              () -> {
+                try {
+                  spyOps.refresh();
+                } catch (Throwable t) {
+                  asyncFailure.compareAndSet(null, t);
+                } finally {
+                  refreshFinished.countDown();
+                }
+              },
+              "hive-encryption-refresh");
+      Thread currentThread =
+          new Thread(
+              () -> {
+                try {
+                  spyOps.current();
+                  firstCurrentReturned.countDown();
+                  if (!refreshFinished.await(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                    throw new AssertionError("Timed out waiting for refresh");
+                  }
+
+                  observedSnapshot.set(spyOps.current().currentSnapshot());
+                } catch (Throwable t) {
+                  firstCurrentReturned.countDown();
+                  asyncFailure.compareAndSet(null, t);
+                }
+              },
+              "hive-encryption-current");
+
+      try {
+        ioThread.start();
+        assertThat(managerSelected.await(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            .as("FileIO selected its encryption manager")
+            .isTrue();
+        assertThat(selectedManager).hasValue(priorManager);
+
+        refreshThread.start();
+        awaitBlocked(refreshThread);
+
+        currentThread.start();
+        awaitBlockedBeforeReturn(currentThread, firstCurrentReturned);
+      } finally {
+        publishFileIO.countDown();
+        ioThread.join(TimeUnit.SECONDS.toMillis(INTERLEAVING_TIMEOUT_SECONDS));
+        refreshThread.join(TimeUnit.SECONDS.toMillis(INTERLEAVING_TIMEOUT_SECONDS));
+        currentThread.join(TimeUnit.SECONDS.toMillis(INTERLEAVING_TIMEOUT_SECONDS));
+      }
+
+      assertThat(ioThread.isAlive()).as("FileIO thread completed").isFalse();
+      assertThat(refreshThread.isAlive()).as("refresh thread completed").isFalse();
+      assertThat(currentThread.isAlive()).as("current thread completed").isFalse();
+      assertThat(asyncFailure.get()).isNull();
+
+      assertThat(overlappingFileIO.get()).isInstanceOf(EncryptingFileIO.class);
+      assertThat(((EncryptingFileIO) overlappingFileIO.get()).encryptionManager())
+          .isSameAs(priorManager);
+
+      FileIO refreshedFileIO = spyOps.io();
+      EncryptionManager refreshedManager = spyOps.encryption();
+      assertThat(refreshedFileIO).isInstanceOf(EncryptingFileIO.class);
+      assertThat(((EncryptingFileIO) refreshedFileIO).encryptionManager())
+          .isSameAs(refreshedManager)
+          .isNotSameAs(priorManager);
+      assertThat(EncryptionUtil.encryptionKeys(refreshedManager))
+          .containsKey(concurrentSnapshot.keyId());
+      Snapshot refreshedSnapshot = observedSnapshot.get();
+      assertThat(refreshedSnapshot.snapshotId()).isEqualTo(concurrentSnapshot.snapshotId());
+      assertThat(refreshedSnapshot.allManifests(refreshedFileIO)).hasSize(1);
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, true);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
 
   @Test
   public void testSuppressUnlockExceptions() {
@@ -617,5 +1024,24 @@ public class TestHiveCommits extends HiveTableTestBase {
         .getParentFile()
         .listFiles(file -> file.getName().endsWith("metadata.json"))
         .length;
+  }
+
+  private static void awaitBlocked(Thread thread) {
+    Awaitility.await()
+        .atMost(Duration.ofSeconds(INTERLEAVING_TIMEOUT_SECONDS))
+        .until(() -> !thread.isAlive() || thread.getState() == Thread.State.BLOCKED);
+    assertThat(thread.getState())
+        .as("%s is blocked", thread.getName())
+        .isEqualTo(Thread.State.BLOCKED);
+  }
+
+  private static void awaitBlockedBeforeReturn(Thread thread, CountDownLatch returned) {
+    Awaitility.await()
+        .atMost(Duration.ofSeconds(INTERLEAVING_TIMEOUT_SECONDS))
+        .until(() -> returned.getCount() == 0 || thread.getState() == Thread.State.BLOCKED);
+    assertThat(returned.getCount()).as("Current metadata is not published").isOne();
+    assertThat(thread.getState())
+        .as("%s is blocked", thread.getName())
+        .isEqualTo(Thread.State.BLOCKED);
   }
 }

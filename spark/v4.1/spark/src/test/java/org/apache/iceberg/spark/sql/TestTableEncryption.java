@@ -43,6 +43,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
@@ -51,10 +52,15 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.EncryptedKey;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.encryption.UnitestKMS;
+import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
@@ -63,6 +69,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Streams;
 import org.apache.iceberg.spark.CatalogTestBase;
+import org.apache.iceberg.spark.Spark3Util;
 import org.apache.iceberg.spark.SparkCatalogConfig;
 import org.apache.iceberg.types.Types;
 import org.apache.parquet.crypto.ParquetCryptoRuntimeException;
@@ -74,6 +81,8 @@ import org.mockito.internal.util.collections.Iterables;
 
 public class TestTableEncryption extends CatalogTestBase {
   private static final int INTERLEAVING_TIMEOUT_SECONDS = 30;
+
+  private Path tableLocation;
 
   private static Map<String, String> appendCatalogEncryptionProperties(Map<String, String> props) {
     Map<String, String> newProps = Maps.newHashMap();
@@ -94,7 +103,7 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @BeforeEach
-  public void createTables() {
+  public void createTables() throws Exception {
     CoordinatedKMS.reset();
     sql(
         "CREATE TABLE %s (id bigint, data string, float float) USING iceberg "
@@ -102,13 +111,27 @@ public class TestTableEncryption extends CatalogTestBase {
             + "'encryption.key-id'='%s', 'format-version'='3')",
         tableName, UnitestKMS.MASTER_KEY_NAME1);
 
+    this.tableLocation = new Path(Spark3Util.loadIcebergTable(spark, tableName).location());
     sql("INSERT INTO %s VALUES (1, 'a', 1.0), (2, 'b', 2.0), (3, 'c', float('NaN'))", tableName);
   }
 
   @AfterEach
-  public void removeTables() {
+  public void removeTables() throws IOException {
     CoordinatedKMS.reset();
     sql("DROP TABLE IF EXISTS %s", tableName);
+
+    FileSystem fs = tableLocation.getFileSystem(hiveConf);
+    Path qualifiedTableLocation = fs.makeQualified(tableLocation);
+    Path metastoreRoot = fs.makeQualified(new Path(new File(dbPath("default")).getParent()));
+    Path expectedTableLocation = new Path(metastoreRoot, tableIdent.name());
+    assertThat(qualifiedTableLocation)
+        .as("Table location must be owned by the test metastore")
+        .isEqualTo(expectedTableLocation);
+    if (fs.exists(qualifiedTableLocation)) {
+      assertThat(fs.delete(qualifiedTableLocation, true))
+          .as("Failed to delete test table location %s", qualifiedTableLocation)
+          .isTrue();
+    }
   }
 
   @TestTemplate
@@ -281,6 +304,77 @@ public class TestTableEncryption extends CatalogTestBase {
 
     Table afterSecondReplace = validationCatalog.loadTable(tableIdent);
     assertThat(currentDataFiles(afterSecondReplace)).hasSize(1);
+  }
+
+  @TestTemplate
+  void invalidDekCreateCleansStagedMetadata() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table original = validationCatalog.loadTable(tableIdent);
+    Schema schema = original.schema();
+    DataFile file = currentDataFiles(original).get(0);
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    Transaction create =
+        validationCatalog
+            .buildTable(tableIdent, schema)
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+            .createTransaction();
+    create.newFastAppend().appendFile(file).commit();
+    Snapshot stagedSnapshot = create.table().currentSnapshot();
+    String stagedManifestList = stagedSnapshot.manifestListLocation();
+    List<String> stagedManifests =
+        stagedSnapshot.allManifests(create.table().io()).stream()
+            .map(manifest -> manifest.path())
+            .collect(Collectors.toList());
+    assertThat(stagedManifests).isNotEmpty();
+    create.updateProperties().set(TableProperties.ENCRYPTION_DEK_LENGTH, "17").commit();
+
+    assertThatThrownBy(create::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessage("Invalid data key length: 17 (must be 16, 24, or 32)");
+    assertThat(validationCatalog.tableExists(tableIdent)).isFalse();
+    assertThat(localInput(stagedManifestList).exists()).isFalse();
+    assertThat(stagedManifests).allSatisfy(path -> assertThat(localInput(path).exists()).isFalse());
+  }
+
+  @TestTemplate
+  void retainedEncryptedHandleFollowsPlaintextRecreation() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table retained = validationCatalog.loadTable(tableIdent);
+    Schema schema = retained.schema();
+    assertThat(retained.encryption()).isNotSameAs(PlaintextEncryptionManager.instance());
+    assertThat(retained.io()).isInstanceOf(EncryptingFileIO.class);
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    assertThatThrownBy(retained::refresh)
+        .isInstanceOf(NoSuchTableException.class)
+        .hasMessage("No such table: %s", tableIdent);
+    assertThat(retained.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+    assertThat(retained.io()).isNotInstanceOf(EncryptingFileIO.class);
+
+    Table plaintext =
+        validationCatalog
+            .buildTable(tableIdent, schema)
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .create();
+    DataFile file =
+        DataFiles.builder(plaintext.spec())
+            .withPath(plaintext.location() + "/plain-recreated.parquet")
+            .withFileSizeInBytes(1)
+            .withRecordCount(1)
+            .build();
+
+    retained.refresh();
+    assertThat(retained.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+    assertThat(retained.io()).isNotInstanceOf(EncryptingFileIO.class);
+    retained.newFastAppend().appendFile(file).commit();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    Snapshot snapshot = reloaded.currentSnapshot();
+    assertThat(snapshot).isNotNull();
+    assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    assertThat(snapshot.keyId()).isNull();
   }
 
   @TestTemplate
