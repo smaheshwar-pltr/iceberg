@@ -38,6 +38,8 @@ import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.LocationProviders;
+import org.apache.iceberg.MetadataUpdate;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
@@ -236,6 +238,44 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     }
   }
 
+  /** Validates that newly added snapshots retain the keys required to read their manifest lists. */
+  private void checkManifestListKeysArePresent(TableMetadata metadata) {
+    Map<String, EncryptedKey> keysById =
+        metadata.encryptionKeys().stream()
+            .collect(Collectors.toMap(EncryptedKey::keyId, key -> key));
+
+    for (MetadataUpdate change : metadata.changes()) {
+      if (!(change instanceof MetadataUpdate.AddSnapshot)) {
+        continue;
+      }
+
+      MetadataUpdate.AddSnapshot addSnapshot = (MetadataUpdate.AddSnapshot) change;
+      Snapshot snapshot = addSnapshot.snapshot();
+      if (metadata.snapshot(snapshot.snapshotId()) == null) {
+        continue;
+      }
+
+      String keyId = snapshot.keyId();
+      if (keyId == null) {
+        continue;
+      }
+
+      EncryptedKey manifestListKey = keysById.get(keyId);
+      if (manifestListKey == null) {
+        throw new CommitFailedException(
+            "Cannot commit snapshot %s to %s.%s: manifest list key %s is missing from table metadata",
+            snapshot.snapshotId(), database, tableName, keyId);
+      }
+
+      String keyEncryptionKeyId = manifestListKey.encryptedById();
+      if (!keysById.containsKey(keyEncryptionKeyId)) {
+        throw new CommitFailedException(
+            "Cannot commit snapshot %s to %s.%s: key encryption key %s is missing from table metadata",
+            snapshot.snapshotId(), database, tableName, keyEncryptionKeyId);
+      }
+    }
+  }
+
   @SuppressWarnings({"checkstyle:CyclomaticComplexity", "MethodLength"})
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
@@ -258,6 +298,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       tableMetadata = metadata;
     }
 
+    checkManifestListKeysArePresent(tableMetadata);
     newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
 
     boolean hiveEngineEnabled = hiveEngineEnabled(tableMetadata, conf);
