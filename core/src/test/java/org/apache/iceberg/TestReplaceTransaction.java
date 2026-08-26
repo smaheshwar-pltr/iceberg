@@ -33,6 +33,8 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
+import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
@@ -45,6 +47,28 @@ import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(ParameterizedTestExtension.class)
 public class TestReplaceTransaction extends TestBase {
+
+  @TestTemplate
+  void replaceCommitUsesRefreshResult() {
+    TableMetadata initial = readMetadata();
+    TableMetadata refreshed =
+        TableMetadata.buildFrom(initial)
+            .setProperties(ImmutableMap.of("refreshed", "true"))
+            .build();
+    TableMetadata replacement =
+        TableMetadata.buildFrom(initial)
+            .setProperties(ImmutableMap.of("replacement", "true"))
+            .build();
+    RefreshResultOperations operations =
+        new RefreshResultOperations(table.ops(), initial, refreshed);
+    Transaction replace =
+        Transactions.replaceTableTransaction(table.name(), operations, replacement);
+
+    replace.commitTransaction();
+
+    assertThat(operations.refreshCalls()).isOne();
+    assertThat(operations.committedBase()).isSameAs(refreshed);
+  }
 
   @TestTemplate
   public void testReplaceTransactionWithCustomSortOrder() {
@@ -430,5 +454,65 @@ public class TestReplaceTransaction extends TestBase {
   private static Schema assignFreshIds(Schema schema) {
     AtomicInteger lastColumnId = new AtomicInteger(0);
     return TypeUtil.assignFreshIds(schema, lastColumnId::incrementAndGet);
+  }
+
+  private static class RefreshResultOperations implements TableOperations {
+    private final TableOperations delegate;
+    private final TableMetadata initial;
+    private final TableMetadata refreshed;
+    private int refreshCalls = 0;
+    private boolean refreshReturned = false;
+    private TableMetadata committedBase;
+
+    private RefreshResultOperations(
+        TableOperations delegate, TableMetadata initial, TableMetadata refreshed) {
+      this.delegate = delegate;
+      this.initial = initial;
+      this.refreshed = refreshed;
+    }
+
+    @Override
+    public TableMetadata current() {
+      if (refreshReturned) {
+        throw new AssertionError("current() called after refresh()");
+      }
+
+      return initial;
+    }
+
+    @Override
+    public TableMetadata refresh() {
+      this.refreshCalls += 1;
+      this.refreshReturned = true;
+      return refreshed;
+    }
+
+    @Override
+    public void commit(TableMetadata base, TableMetadata metadata) {
+      this.committedBase = base;
+    }
+
+    @Override
+    public FileIO io() {
+      return delegate.io();
+    }
+
+    @Override
+    public String metadataFileLocation(String fileName) {
+      return delegate.metadataFileLocation(fileName);
+    }
+
+    @Override
+    public LocationProvider locationProvider() {
+      return delegate.locationProvider();
+    }
+
+    private int refreshCalls() {
+      return refreshCalls;
+    }
+
+    private TableMetadata committedBase() {
+      return committedBase;
+    }
   }
 }

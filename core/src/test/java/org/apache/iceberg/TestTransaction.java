@@ -20,12 +20,15 @@ package org.apache.iceberg;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.mockito.ArgumentMatchers.any;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,11 +38,16 @@ import java.util.stream.Collectors;
 import org.apache.iceberg.ManifestEntry.Status;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
+import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.inmemory.InMemoryFileIO;
+import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.JsonUtil;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -47,6 +55,8 @@ import org.mockito.Mockito;
 
 @ExtendWith(ParameterizedTestExtension.class)
 public class TestTransaction extends TestBase {
+  private static final String TEMP_METADATA_LOCATION = "temp-metadata-location";
+  private static final String PROBE_METADATA_FILE = "probe.metadata.json";
 
   @TestTemplate
   public void testEmptyTransaction() {
@@ -325,6 +335,249 @@ public class TestTransaction extends TestBase {
 
     assertThat(Sets.newHashSet(table.currentSnapshot().allManifests(table.io())))
         .isEqualTo(appendManifests);
+  }
+
+  @TestTemplate
+  void simpleTransactionRebasesWhenTableAdvancesDuringStart() {
+    TableMetadata initial = readMetadata();
+    TableMetadata advanced =
+        TableMetadata.buildFrom(initial).setProperties(Map.of("concurrent", "true")).build();
+    AdvancingStartOperations operations =
+        new AdvancingStartOperations(table.ops(), initial, advanced);
+    Transaction transaction = Transactions.newTransaction(table.name(), operations);
+    transaction.updateProperties().set("transaction", "true").commit();
+
+    transaction.commitTransaction();
+
+    assertThat(operations.current().properties())
+        .containsEntry("concurrent", "true")
+        .containsEntry("transaction", "true");
+  }
+
+  @TestTemplate
+  void simpleTransactionRejectsUuidChangeDuringStart() {
+    TableMetadata initial = readMetadata();
+    TableMetadata recreated =
+        TableMetadata.buildFrom(initial)
+            .assignUUID(UUID.randomUUID().toString())
+            .setProperties(Map.of("recreated", "true"))
+            .build();
+    AdvancingStartOperations operations =
+        new AdvancingStartOperations(table.ops(), initial, recreated);
+    Transaction transaction = Transactions.newTransaction(table.name(), operations);
+    transaction.updateProperties().set("transaction", "true").commit();
+
+    assertThatThrownBy(transaction::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessage(
+            "Cannot commit transaction: table UUID does not match: base=%s != refreshed=%s",
+            initial.uuid(), recreated.uuid());
+    assertThat(operations.current().properties())
+        .containsEntry("recreated", "true")
+        .doesNotContainKey("transaction");
+  }
+
+  @TestTemplate
+  void simpleTransactionCleansUpWhenRefreshRejectsUuidChange() {
+    String root = "memory:uuid-cleanup-" + UUID.randomUUID();
+    TableMetadata original =
+        TableMetadata.buildFrom(
+                TableMetadata.newTableMetadata(
+                    SCHEMA, SPEC, SortOrder.unsorted(), root, Map.of(), formatVersion))
+            .assignUUID("original-uuid")
+            .build();
+    TableMetadata recreated =
+        TableMetadata.buildFrom(original).assignUUID("recreated-uuid").build();
+    InMemoryFileIO fileIO = new InMemoryFileIO();
+    String originalLocation = root + "/metadata/00000-original.metadata.json";
+    String recreatedLocation = root + "/metadata/00001-recreated.metadata.json";
+    TableMetadataParser.overwrite(original, fileIO.newOutputFile(originalLocation));
+    TableMetadataParser.overwrite(recreated, fileIO.newOutputFile(recreatedLocation));
+    UuidPointerOperations operations = new UuidPointerOperations(root, originalLocation, fileIO);
+    operations.refresh();
+
+    Transaction transaction = Transactions.newTransaction("uuid-cleanup", operations);
+    transaction.newFastAppend().appendFile(FILE_A).commit();
+    Snapshot staged = transaction.table().currentSnapshot();
+    String stagedManifestList = staged.manifestListLocation();
+    List<String> stagedManifests =
+        staged.allManifests(fileIO).stream().map(ManifestFile::path).collect(Collectors.toList());
+    assertThat(fileIO.fileExists(stagedManifestList)).isTrue();
+    assertThat(stagedManifests).allMatch(fileIO::fileExists);
+    operations.pointTo(recreatedLocation);
+
+    assertThatThrownBy(transaction::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessage(
+            "Cannot commit transaction: Table UUID does not match: current=%s != refreshed=%s",
+            original.uuid(), recreated.uuid())
+        .cause()
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(
+            "Table UUID does not match: current=%s != refreshed=%s",
+            original.uuid(), recreated.uuid());
+    assertThat(fileIO.fileExists(stagedManifestList)).isFalse();
+    assertThat(stagedManifests).noneMatch(fileIO::fileExists);
+  }
+
+  @TestTemplate
+  void replaceTransactionCleansUpWhenRefreshRejectsUuidChange() {
+    String root = "memory:replace-uuid-cleanup-" + UUID.randomUUID();
+    TableMetadata original =
+        TableMetadata.buildFrom(
+                TableMetadata.newTableMetadata(
+                    SCHEMA, SPEC, SortOrder.unsorted(), root, Map.of(), formatVersion))
+            .assignUUID("original-uuid")
+            .build();
+    TableMetadata recreated =
+        TableMetadata.buildFrom(original).assignUUID("recreated-uuid").build();
+    InMemoryFileIO fileIO = new InMemoryFileIO();
+    String originalLocation = root + "/metadata/00000-original.metadata.json";
+    String recreatedLocation = root + "/metadata/00001-recreated.metadata.json";
+    TableMetadataParser.overwrite(original, fileIO.newOutputFile(originalLocation));
+    TableMetadataParser.overwrite(recreated, fileIO.newOutputFile(recreatedLocation));
+    UuidPointerOperations operations = new UuidPointerOperations(root, originalLocation, fileIO);
+    operations.refresh();
+
+    Transaction transaction =
+        new BaseTransaction(
+            "replace-uuid-cleanup",
+            operations,
+            BaseTransaction.TransactionType.CREATE_OR_REPLACE_TABLE,
+            original);
+    transaction.newFastAppend().appendFile(FILE_A).commit();
+    Snapshot staged = transaction.table().currentSnapshot();
+    String stagedManifestList = staged.manifestListLocation();
+    List<String> stagedManifests =
+        staged.allManifests(fileIO).stream().map(ManifestFile::path).collect(Collectors.toList());
+    assertThat(fileIO.fileExists(stagedManifestList)).isTrue();
+    assertThat(stagedManifests).allMatch(fileIO::fileExists);
+    operations.pointTo(recreatedLocation);
+
+    Throwable failure = catchThrowable(transaction::commitTransaction);
+
+    assertThat(fileIO.fileExists(stagedManifestList)).isFalse();
+    assertThat(stagedManifests).noneMatch(fileIO::fileExists);
+    assertThat(failure)
+        .isInstanceOf(ValidationException.class)
+        .hasMessage(
+            "Cannot commit transaction: Table UUID does not match: current=%s != refreshed=%s",
+            original.uuid(), recreated.uuid())
+        .cause()
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(
+            "Table UUID does not match: current=%s != refreshed=%s",
+            original.uuid(), recreated.uuid());
+  }
+
+  @TestTemplate
+  void simpleCommitUsesRefreshResultAndRebuildsTempOperations() {
+    TableMetadata initial =
+        TableMetadata.buildFrom(readMetadata())
+            .setProperties(Map.of(TEMP_METADATA_LOCATION, "metadata-a"))
+            .build();
+    TableMetadata refreshed =
+        TableMetadata.buildFrom(initial)
+            .setProperties(Map.of(TEMP_METADATA_LOCATION, "metadata-b", "concurrent", "true"))
+            .build();
+    RefreshResultOperations operations =
+        new RefreshResultOperations(table.ops(), initial, refreshed);
+    ProbeTransaction transaction =
+        new ProbeTransaction(
+            table.name(), operations, BaseTransaction.TransactionType.SIMPLE, initial);
+    List<String> metadataLocations = Lists.newArrayList();
+    transaction.newMetadataLocationProbe(metadataLocations).commit();
+
+    assertThat(metadataLocations).containsExactly("metadata-a/" + PROBE_METADATA_FILE);
+
+    transaction.commitTransaction();
+
+    assertThat(operations.refreshCalls()).isOne();
+    assertThat(operations.committedBase()).isSameAs(refreshed);
+    assertThat(metadataLocations)
+        .containsExactly("metadata-a/" + PROBE_METADATA_FILE, "metadata-b/" + PROBE_METADATA_FILE);
+    assertThat(operations.committedMetadata().properties())
+        .containsEntry("concurrent", "true")
+        .containsEntry("transaction", "true");
+  }
+
+  @TestTemplate
+  void simpleCommitRejectsDifferentTableUuid() {
+    TableMetadata initial =
+        TableMetadata.buildFrom(readMetadata())
+            .setProperties(Map.of(TEMP_METADATA_LOCATION, "metadata-a"))
+            .build();
+    TableMetadata recreated =
+        TableMetadata.buildFrom(initial)
+            .assignUUID(UUID.randomUUID().toString())
+            .setProperties(Map.of(TEMP_METADATA_LOCATION, "metadata-b"))
+            .build();
+    RefreshResultOperations operations =
+        new RefreshResultOperations(table.ops(), initial, recreated);
+    ProbeTransaction transaction =
+        new ProbeTransaction(
+            table.name(), operations, BaseTransaction.TransactionType.SIMPLE, initial);
+    List<String> metadataLocations = Lists.newArrayList();
+    transaction.newMetadataLocationProbe(metadataLocations).commit();
+
+    assertThatThrownBy(transaction::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessage(
+            "Cannot commit transaction: table UUID does not match: base=%s != refreshed=%s",
+            initial.uuid(), recreated.uuid());
+    assertThat(operations.committedBase()).isNull();
+    assertThat(metadataLocations).containsExactly("metadata-a/" + PROBE_METADATA_FILE);
+  }
+
+  @TestTemplate
+  void simpleCommitRejectsMissingRefreshedUuid() {
+    assumeThat(formatVersion).isEqualTo(1);
+    TableMetadata initial =
+        TableMetadata.buildFrom(readMetadata())
+            .setProperties(Map.of(TEMP_METADATA_LOCATION, "metadata-a"))
+            .build();
+    TableMetadata recreated =
+        withoutUUID(
+            TableMetadata.buildFrom(initial)
+                .setProperties(Map.of(TEMP_METADATA_LOCATION, "metadata-b"))
+                .build());
+    RefreshResultOperations operations =
+        new RefreshResultOperations(table.ops(), initial, recreated);
+    ProbeTransaction transaction =
+        new ProbeTransaction(
+            table.name(), operations, BaseTransaction.TransactionType.SIMPLE, initial);
+    List<String> metadataLocations = Lists.newArrayList();
+    transaction.newMetadataLocationProbe(metadataLocations).commit();
+
+    assertThatThrownBy(transaction::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessage(
+            "Cannot commit transaction: table UUID does not match: base=%s != refreshed=%s",
+            initial.uuid(), recreated.uuid());
+    assertThat(operations.committedBase()).isNull();
+    assertThat(metadataLocations).containsExactly("metadata-a/" + PROBE_METADATA_FILE);
+  }
+
+  @TestTemplate
+  void simpleCommitAllowsFirstUuidAssignment() {
+    assumeThat(formatVersion).isEqualTo(1);
+    TableMetadata initial = withoutUUID(readMetadata());
+    TableMetadata refreshed =
+        TableMetadata.buildFrom(initial)
+            .assignUUID()
+            .setProperties(Map.of("concurrent", "true"))
+            .build();
+    RefreshResultOperations operations =
+        new RefreshResultOperations(table.ops(), initial, refreshed);
+    Transaction transaction =
+        new BaseTransaction(
+            table.name(), operations, BaseTransaction.TransactionType.SIMPLE, initial);
+    transaction.updateProperties().set("transaction", "true").commit();
+
+    transaction.commitTransaction();
+
+    assertThat(operations.committedBase()).isSameAs(refreshed);
+    assertThat(operations.committedMetadata().uuid()).isEqualTo(refreshed.uuid());
   }
 
   @TestTemplate
@@ -1021,6 +1274,253 @@ public class TestTransaction extends TestBase {
           new MergeAppend(tableName(), ((HasTableOperations) table()).operations())
               .toBranch("branch");
       return appendUpdate(append);
+    }
+  }
+
+  private static class ProbeTransaction extends BaseTransaction {
+    private ProbeTransaction(
+        String tableName, TableOperations ops, TransactionType type, TableMetadata start) {
+      super(tableName, ops, type, start);
+    }
+
+    private PendingUpdate<String> newMetadataLocationProbe(List<String> metadataLocations) {
+      TableOperations operations = ((HasTableOperations) table()).operations();
+      return appendUpdate(new MetadataLocationProbe(operations, metadataLocations));
+    }
+  }
+
+  private static class MetadataLocationProbe implements PendingUpdate<String> {
+    private final TableOperations operations;
+    private final List<String> metadataLocations;
+
+    private MetadataLocationProbe(TableOperations operations, List<String> metadataLocations) {
+      this.operations = operations;
+      this.metadataLocations = metadataLocations;
+    }
+
+    @Override
+    public String apply() {
+      return operations.metadataFileLocation(PROBE_METADATA_FILE);
+    }
+
+    @Override
+    public void commit() {
+      metadataLocations.add(apply());
+      new PropertiesUpdate(operations).set("transaction", "true").commit();
+    }
+  }
+
+  private static TableMetadata withoutUUID(TableMetadata metadata) {
+    return JsonUtil.parse(
+        TableMetadataParser.toJson(metadata),
+        node -> {
+          ((ObjectNode) node).remove("table-uuid");
+          return TableMetadataParser.fromJson(node);
+        });
+  }
+
+  private static class AdvancingStartOperations implements TableOperations {
+    private final TableOperations delegate;
+    private final TableMetadata initial;
+    private TableMetadata current;
+    private int refreshCalls = 0;
+
+    private AdvancingStartOperations(
+        TableOperations delegate, TableMetadata initial, TableMetadata advanced) {
+      this.delegate = delegate;
+      this.initial = initial;
+      this.current = advanced;
+    }
+
+    @Override
+    public TableMetadata current() {
+      return current;
+    }
+
+    @Override
+    public TableMetadata refresh() {
+      return refreshCalls++ == 0 ? initial : current;
+    }
+
+    @Override
+    public void commit(TableMetadata base, TableMetadata metadata) {
+      if (base != current) {
+        throw new CommitFailedException("Cannot commit changes based on stale metadata");
+      }
+
+      this.current = metadata;
+    }
+
+    @Override
+    public FileIO io() {
+      return delegate.io();
+    }
+
+    @Override
+    public String metadataFileLocation(String fileName) {
+      return delegate.metadataFileLocation(fileName);
+    }
+
+    @Override
+    public LocationProvider locationProvider() {
+      return delegate.locationProvider();
+    }
+  }
+
+  private static class UuidPointerOperations extends BaseMetastoreTableOperations {
+    private final String root;
+    private final InMemoryFileIO fileIO;
+    private String pointer;
+
+    private UuidPointerOperations(String root, String pointer, InMemoryFileIO fileIO) {
+      this.root = root;
+      this.pointer = pointer;
+      this.fileIO = fileIO;
+    }
+
+    private void pointTo(String newPointer) {
+      this.pointer = newPointer;
+    }
+
+    @Override
+    protected String tableName() {
+      return "uuid-cleanup";
+    }
+
+    @Override
+    protected void doRefresh() {
+      refreshFromMetadataLocation(pointer);
+    }
+
+    @Override
+    protected void doCommit(TableMetadata base, TableMetadata metadata) {
+      throw new AssertionError("Commit must not be reached after UUID mismatch");
+    }
+
+    @Override
+    public FileIO io() {
+      return fileIO;
+    }
+
+    @Override
+    public String metadataFileLocation(String fileName) {
+      return root + "/metadata/" + fileName;
+    }
+
+    @Override
+    public LocationProvider locationProvider() {
+      return LocationProviders.locationsFor(current().location(), current().properties());
+    }
+  }
+
+  private static class RefreshResultOperations implements TableOperations {
+    private final TableOperations delegate;
+    private final TableMetadata initial;
+    private final TableMetadata refreshed;
+    private int refreshCalls = 0;
+    private boolean refreshReturned = false;
+    private TableMetadata committedBase;
+    private TableMetadata committedMetadata;
+
+    private RefreshResultOperations(
+        TableOperations delegate, TableMetadata initial, TableMetadata refreshed) {
+      this.delegate = delegate;
+      this.initial = initial;
+      this.refreshed = refreshed;
+    }
+
+    @Override
+    public TableMetadata current() {
+      if (refreshReturned) {
+        throw new AssertionError("current() called after refresh()");
+      }
+
+      return initial;
+    }
+
+    @Override
+    public TableMetadata refresh() {
+      this.refreshCalls += 1;
+      this.refreshReturned = true;
+      return refreshed;
+    }
+
+    @Override
+    public void commit(TableMetadata base, TableMetadata metadata) {
+      this.committedBase = base;
+      this.committedMetadata = metadata;
+    }
+
+    @Override
+    public FileIO io() {
+      return delegate.io();
+    }
+
+    @Override
+    public String metadataFileLocation(String fileName) {
+      return delegate.metadataFileLocation(fileName);
+    }
+
+    @Override
+    public LocationProvider locationProvider() {
+      return delegate.locationProvider();
+    }
+
+    @Override
+    public TableOperations temp(TableMetadata metadata) {
+      return new MetadataScopedOperations(delegate.temp(metadata), metadata);
+    }
+
+    private int refreshCalls() {
+      return refreshCalls;
+    }
+
+    private TableMetadata committedBase() {
+      return committedBase;
+    }
+
+    private TableMetadata committedMetadata() {
+      return committedMetadata;
+    }
+  }
+
+  private static class MetadataScopedOperations implements TableOperations {
+    private final TableOperations delegate;
+    private final TableMetadata metadata;
+
+    private MetadataScopedOperations(TableOperations delegate, TableMetadata metadata) {
+      this.delegate = delegate;
+      this.metadata = metadata;
+    }
+
+    @Override
+    public TableMetadata current() {
+      return metadata;
+    }
+
+    @Override
+    public TableMetadata refresh() {
+      return metadata;
+    }
+
+    @Override
+    public void commit(TableMetadata base, TableMetadata updated) {
+      throw new UnsupportedOperationException("Cannot commit temporary operations");
+    }
+
+    @Override
+    public FileIO io() {
+      return delegate.io();
+    }
+
+    @Override
+    public String metadataFileLocation(String fileName) {
+      return metadata.properties().get(TEMP_METADATA_LOCATION) + "/" + fileName;
+    }
+
+    @Override
+    public LocationProvider locationProvider() {
+      return delegate.locationProvider();
     }
   }
 }
