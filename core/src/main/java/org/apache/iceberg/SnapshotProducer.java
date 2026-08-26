@@ -46,8 +46,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -113,6 +115,13 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private final Map<String, String> manifestWriterProps;
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
+  // Keys minted while writing this snapshot's manifest list in apply(), read back in commit()
+  // (addEncryptionKeys) to persist them into the committed metadata. Minting is a pure operation
+  // on an immutable, metadata-sourced EncryptionManager, so the keys live nowhere else until they
+  // are committed here. apply() and commit() run on the same thread (commit() calls apply()), so no
+  // volatile is needed. Mirrors how apply() also populates the manifestLists and base fields that
+  // commit() reads. Null when the table is unencrypted or the manager is not standard.
+  private StandardEncryptionManager.MintedKeys applyManifestListKeys;
   private TableMetadata base;
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
@@ -354,6 +363,11 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           replacedRecords);
     }
 
+    ManifestListFile manifestListFile = writer.toManifestListFile();
+    // Capture the keys minted while writing the manifest list so commit() can persist them into the
+    // committed metadata. The manager itself never stores them.
+    this.applyManifestListKeys = writer.manifestListKeys();
+
     return new BaseSnapshot(
         sequenceNumber,
         snapshotId(),
@@ -365,7 +379,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         manifestList.location(),
         nextRowId,
         assignedRows,
-        writer.toManifestListFile().encryptionKeyID());
+        manifestListFile.encryptionKeyID());
   }
 
   private void runValidations(Snapshot parentSnapshot) {
@@ -499,10 +513,13 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
                   if (base.snapshot(newSnapshot.snapshotId()) != null) {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
-                  } else if (stageOnly) {
-                    update.addSnapshot(newSnapshot);
                   } else {
-                    update.setBranchSnapshot(newSnapshot, targetBranch);
+                    addEncryptionKeys(update, newSnapshot);
+                    if (stageOnly) {
+                      update.addSnapshot(newSnapshot);
+                    } else {
+                      update.setBranchSnapshot(newSnapshot, targetBranch);
+                    }
                   }
 
                   TableMetadata updated = update.build();
@@ -567,6 +584,27 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
       notifyListeners();
     } catch (Throwable e) {
       LOG.warn("Failed to notify event listeners", e);
+    }
+  }
+
+  private void addEncryptionKeys(TableMetadata.Builder update, Snapshot snapshot) {
+    if (applyManifestListKeys == null) {
+      return;
+    }
+
+    // Persist the manifest-list key minted for this snapshot. Its key encryption key is persisted
+    // only when it too was newly minted; an existing (unexpired) KEK is already in metadata.
+    EncryptedKey manifestListKey = applyManifestListKeys.manifestListKey();
+    Preconditions.checkState(
+        snapshot.keyId() != null && snapshot.keyId().equals(manifestListKey.keyId()),
+        "Snapshot key id %s does not match minted manifest list key id %s",
+        snapshot.keyId(),
+        manifestListKey.keyId());
+    update.addEncryptionKey(manifestListKey);
+
+    EncryptedKey newKeyEncryptionKey = applyManifestListKeys.newKeyEncryptionKey();
+    if (newKeyEncryptionKey != null) {
+      update.addEncryptionKey(newKeyEncryptionKey);
     }
   }
 
