@@ -22,8 +22,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
@@ -39,6 +39,7 @@ import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.LocationProviders;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.encryption.EncryptedKey;
@@ -60,7 +61,6 @@ import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTest
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
-import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -88,6 +88,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final KeyManagementClient keyManagementClient;
   private final ClientPool<IMetaStoreClient, TException> metaClients;
 
+  // Guards accepted metadata and its derived encryption state during refresh and access.
+  private final Object stateLock = new Object();
   private EncryptionManager encryptionManager;
   private EncryptingFileIO encryptingFileIO;
   private String tableKeyId;
@@ -125,45 +127,84 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   @Override
+  public TableMetadata current() {
+    synchronized (stateLock) {
+      return super.current();
+    }
+  }
+
+  @Override
+  public TableMetadata refresh() {
+    synchronized (stateLock) {
+      return super.refresh();
+    }
+  }
+
+  @Override
+  public String currentMetadataLocation() {
+    synchronized (stateLock) {
+      return super.currentMetadataLocation();
+    }
+  }
+
+  @Override
+  public int currentVersion() {
+    synchronized (stateLock) {
+      return super.currentVersion();
+    }
+  }
+
+  @Override
   public FileIO io() {
-    if (tableKeyId == null) {
-      return fileIO;
-    }
+    synchronized (stateLock) {
+      if (tableKeyId == null) {
+        return fileIO;
+      }
 
-    if (encryptingFileIO == null) {
-      encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
-    }
+      if (encryptingFileIO == null) {
+        encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
+      }
 
-    return encryptingFileIO;
+      return encryptingFileIO;
+    }
   }
 
   @Override
   public EncryptionManager encryption() {
-    if (encryptionManager != null) {
+    synchronized (stateLock) {
+      if (encryptionManager != null) {
+        return encryptionManager;
+      }
+
+      if (tableKeyId != null) {
+        Preconditions.checkArgument(
+            keyManagementClient != null,
+            "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+            CatalogProperties.ENCRYPTION_KMS_IMPL);
+
+        Map<String, String> encryptionProperties =
+            ImmutableMap.of(
+                TableProperties.ENCRYPTION_TABLE_KEY,
+                tableKeyId,
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                String.valueOf(encryptionDekLength));
+
+        encryptionManager =
+            EncryptionUtil.createEncryptionManager(
+                encryptedKeys, encryptionProperties, keyManagementClient);
+      } else {
+        return PlaintextEncryptionManager.instance();
+      }
+
       return encryptionManager;
     }
+  }
 
-    if (tableKeyId != null) {
-      Preconditions.checkArgument(
-          keyManagementClient != null,
-          "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-          CatalogProperties.ENCRYPTION_KMS_IMPL);
-
-      Map<String, String> encryptionProperties =
-          ImmutableMap.of(
-              TableProperties.ENCRYPTION_TABLE_KEY,
-              tableKeyId,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              String.valueOf(encryptionDekLength));
-
-      encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              encryptedKeys, encryptionProperties, keyManagementClient);
-    } else {
-      return PlaintextEncryptionManager.instance();
+  @Override
+  protected void requestRefresh() {
+    synchronized (stateLock) {
+      super.requestRefresh();
     }
-
-    return encryptionManager;
   }
 
   @Override
@@ -189,9 +230,14 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       dekLengthFromHMS = table.getParameters().get(TableProperties.ENCRYPTION_DEK_LENGTH);
       metadataHashFromHMS = table.getParameters().get(METADATA_HASH_PROP);
     } catch (NoSuchObjectException e) {
+      clearEncryptionState();
       if (currentMetadataLocation() != null) {
         throw new NoSuchTableException("No such table: %s.%s", database, tableName);
       }
+
+    } catch (NoSuchTableException e) {
+      clearEncryptionState();
+      throw e;
 
     } catch (TException e) {
       String errMsg =
@@ -203,37 +249,29 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       throw new RuntimeException("Interrupted during refresh", e);
     }
 
-    refreshFromMetadataLocation(metadataLocation, metadataRefreshMaxRetries);
+    String hmsTableKeyId = tableKeyIdFromHMS;
+    String hmsDekLength = dekLengthFromHMS;
+    String hmsMetadataHash = metadataHashFromHMS;
+    AtomicReference<EncryptionState> loadedEncryptionState = new AtomicReference<>();
+    refreshFromMetadataLocation(
+        metadataLocation,
+        null,
+        metadataRefreshMaxRetries,
+        location -> {
+          TableMetadata metadata = TableMetadataParser.read(fileIO, location);
+          loadedEncryptionState.set(
+              validatedEncryptionState(metadata, hmsTableKeyId, hmsDekLength, hmsMetadataHash));
 
-    if (tableKeyIdFromHMS != null) {
-      checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
+          return metadata;
+        });
 
-      tableKeyId = tableKeyIdFromHMS;
-      encryptionDekLength =
-          (dekLengthFromHMS != null)
-              ? Integer.parseInt(dekLengthFromHMS)
-              : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
-
-      encryptedKeys =
-          Optional.ofNullable(current().encryptionKeys())
-              .map(Lists::newLinkedList)
-              .orElseGet(Lists::newLinkedList);
-
-      if (encryptionManager != null) {
-        Set<String> keyIdsFromMetadata =
-            encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
-
-        for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
-          if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
-            encryptedKeys.add(keyFromEM);
-          }
-        }
-      }
-
-      // Force re-creation of encryption manager with updated keys
-      encryptingFileIO = null;
-      encryptionManager = null;
+    EncryptionState encryptionState = loadedEncryptionState.get();
+    if (encryptionState == null) {
+      encryptionState =
+          validatedEncryptionState(current(), hmsTableKeyId, hmsDekLength, hmsMetadataHash);
     }
+
+    installEncryptionState(encryptionState);
   }
 
   @SuppressWarnings({"checkstyle:CyclomaticComplexity", "MethodLength"})
@@ -241,6 +279,10 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
     final TableMetadata tableMetadata;
+    if (metadata.properties().get(TableProperties.ENCRYPTION_TABLE_KEY) != null) {
+      validatedDataKeyLength(metadata.properties().get(TableProperties.ENCRYPTION_DEK_LENGTH));
+    }
+
     encryptionPropsFromMetadata(metadata.properties());
 
     String newMetadataLocation;
@@ -558,36 +600,68 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   private void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
-    if (tableKeyId == null) {
-      tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
-    }
+    synchronized (stateLock) {
+      if (tableKeyId == null) {
+        tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
+      }
 
-    if (tableKeyId != null && encryptionDekLength <= 0) {
-      encryptionDekLength =
-          PropertyUtil.propertyAsInt(
-              tableProperties,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+      if (tableKeyId != null && encryptionDekLength <= 0) {
+        encryptionDekLength =
+            validatedDataKeyLength(tableProperties.get(TableProperties.ENCRYPTION_DEK_LENGTH));
+      }
     }
   }
 
-  private void checkIntegrityForEncryption(
-      String encryptionKeyIdFromHMS, String dekLengthFromHMS, String metadataHashFromHMS) {
-    TableMetadata metadata = current();
-    if (StringUtils.isNotEmpty(metadataHashFromHMS)) {
-      HMSTablePropertyHelper.verifyMetadataHash(metadata, metadataHashFromHMS);
-      return;
+  private void installEncryptionState(EncryptionState state) {
+    synchronized (stateLock) {
+      this.tableKeyId = state.tableKeyId;
+      this.encryptionDekLength = state.dekLength;
+      this.encryptedKeys = state.encryptedKeys;
+      this.encryptingFileIO = null;
+      this.encryptionManager = null;
+    }
+  }
+
+  private void clearEncryptionState() {
+    synchronized (stateLock) {
+      this.tableKeyId = null;
+      this.encryptionDekLength = 0;
+      this.encryptedKeys = List.of();
+      this.encryptingFileIO = null;
+      this.encryptionManager = null;
+    }
+  }
+
+  private EncryptionState validatedEncryptionState(
+      TableMetadata metadata,
+      String encryptionKeyIdFromHMS,
+      String dekLengthFromHMS,
+      String metadataHashFromHMS) {
+    if (metadata == null) {
+      Preconditions.checkState(
+          encryptionKeyIdFromHMS == null,
+          "Cannot validate encryption state without table metadata");
+      return new EncryptionState(null, 0, List.of());
     }
 
-    LOG.warn(
-        "Full metadata integrity check skipped because no metadata hash was recorded in HMS for table {}."
-            + " Falling back to encryption property based check.",
-        tableName);
-
     Map<String, String> propertiesFromMetadata = metadata.properties();
-
     String encryptionKeyIdFromMetadata =
         propertiesFromMetadata.get(TableProperties.ENCRYPTION_TABLE_KEY);
+    String dekLengthFromMetadata =
+        propertiesFromMetadata.get(TableProperties.ENCRYPTION_DEK_LENGTH);
+    if (encryptionKeyIdFromHMS == null && encryptionKeyIdFromMetadata == null) {
+      return new EncryptionState(null, 0, List.of());
+    }
+
+    if (StringUtils.isNotEmpty(metadataHashFromHMS)) {
+      HMSTablePropertyHelper.verifyMetadataHash(metadata, metadataHashFromHMS);
+    } else {
+      LOG.warn(
+          "Full metadata integrity check skipped because no metadata hash was recorded in HMS for table {}."
+              + " Falling back to encryption property based check.",
+          tableName);
+    }
+
     if (!Objects.equals(encryptionKeyIdFromHMS, encryptionKeyIdFromMetadata)) {
       String errMsg =
           String.format(
@@ -596,14 +670,64 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       throw new RuntimeException(errMsg);
     }
 
-    String dekLengthFromMetadata =
-        propertiesFromMetadata.get(TableProperties.ENCRYPTION_DEK_LENGTH);
     if (!Objects.equals(dekLengthFromHMS, dekLengthFromMetadata)) {
       String errMsg =
           String.format(
               "Metadata file might have been modified. DEK length %s differs from HMS value %s",
               dekLengthFromMetadata, dekLengthFromHMS);
       throw new RuntimeException(errMsg);
+    }
+
+    int dekLength = validatedDataKeyLength(dekLengthFromHMS);
+
+    List<EncryptedKey> acceptedEncryptedKeys = Lists.newLinkedList(metadata.encryptionKeys());
+    EncryptionManager cachedEncryptionManager;
+    synchronized (stateLock) {
+      cachedEncryptionManager = this.encryptionManager;
+    }
+
+    Map<String, EncryptedKey> cachedEncryptionKeys =
+        cachedEncryptionManager != null
+            ? EncryptionUtil.encryptionKeys(cachedEncryptionManager)
+            : Collections.emptyMap();
+
+    if (!cachedEncryptionKeys.isEmpty()) {
+      Set<String> keyIdsFromMetadata =
+          acceptedEncryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
+
+      for (EncryptedKey keyFromEM : cachedEncryptionKeys.values()) {
+        if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
+          acceptedEncryptedKeys.add(keyFromEM);
+        }
+      }
+    }
+
+    return new EncryptionState(encryptionKeyIdFromHMS, dekLength, acceptedEncryptedKeys);
+  }
+
+  private static boolean isValidDekLength(int dekLength) {
+    return dekLength == 16 || dekLength == 24 || dekLength == 32;
+  }
+
+  private static int validatedDataKeyLength(String dataKeyLength) {
+    if (dataKeyLength == null) {
+      return TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
+    }
+
+    int parsedDataKeyLength = parseDataKeyLength(dataKeyLength);
+    ValidationException.check(
+        isValidDekLength(parsedDataKeyLength),
+        "Invalid data key length: %s (must be 16, 24, or 32)",
+        dataKeyLength);
+    return parsedDataKeyLength;
+  }
+
+  private static int parseDataKeyLength(String dataKeyLength) {
+    try {
+      return Integer.parseInt(dataKeyLength);
+    } catch (NumberFormatException e) {
+      throw new ValidationException(
+          e, "Invalid data key length: %s (must be 16, 24, or 32)", dataKeyLength);
     }
   }
 
@@ -613,6 +737,18 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return new MetastoreLock(conf, metaClients, catalogName, database, tableName);
     } else {
       return new NoLock();
+    }
+  }
+
+  private static class EncryptionState {
+    private final String tableKeyId;
+    private final int dekLength;
+    private final List<EncryptedKey> encryptedKeys;
+
+    private EncryptionState(String tableKeyId, int dekLength, List<EncryptedKey> encryptedKeys) {
+      this.tableKeyId = tableKeyId;
+      this.dekLength = dekLength;
+      this.encryptedKeys = encryptedKeys;
     }
   }
 }
