@@ -20,6 +20,7 @@ package org.apache.iceberg;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.events.ScanEvent;
@@ -72,6 +73,10 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     return false;
   }
 
+  boolean bindSpecsToScanSchema() {
+    return false;
+  }
+
   protected ScanMetrics scanMetrics() {
     if (scanMetrics == null) {
       this.scanMetrics = ScanMetrics.of(new DefaultMetricsContext());
@@ -82,40 +87,65 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
 
   protected Map<Integer, PartitionSpec> specs() {
     Map<Integer, PartitionSpec> specs = table().specs();
-    // requires latest schema
-    if (!useSnapshotSchema()
-        || snapshotId() == null
-        || table().currentSnapshot() == null
-        || snapshotId().equals(table().currentSnapshot().snapshotId())) {
+    if (!useSnapshotSchema() || snapshotId() == null) {
       return specs;
     }
 
-    // this is a time travel request
-    Schema snapshotSchema = tableSchema();
+    if (!bindSpecsToScanSchema()) {
+      Snapshot currentSnapshot = table().currentSnapshot();
+      if (currentSnapshot == null || snapshotId().equals(currentSnapshot.snapshotId())) {
+        return specs;
+      }
+    }
+
+    return bindSpecs(specs, specs.keySet());
+  }
+
+  Map<Integer, PartitionSpec> specs(Set<Integer> specIds) {
+    if (!bindSpecsToScanSchema()) {
+      return specs();
+    }
+
+    return bindSpecs(table().specs(), specIds);
+  }
+
+  private Map<Integer, PartitionSpec> bindSpecs(
+      Map<Integer, PartitionSpec> specs, Set<Integer> specIds) {
+    Schema scanSchema = tableSchema();
     ImmutableMap.Builder<Integer, PartitionSpec> newSpecs =
-        ImmutableMap.builderWithExpectedSize(specs.size());
+        ImmutableMap.builderWithExpectedSize(specIds.size());
     for (Map.Entry<Integer, PartitionSpec> entry : specs.entrySet()) {
-      newSpecs.put(entry.getKey(), entry.getValue().toUnbound().bind(snapshotSchema, true));
+      if (specIds.contains(entry.getKey())) {
+        newSpecs.put(entry.getKey(), entry.getValue().toUnbound().bind(scanSchema, true));
+      }
     }
 
     return newSpecs.build();
   }
 
   public ThisT useSnapshot(long scanSnapshotId) {
-    Preconditions.checkArgument(
-        snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
-    Preconditions.checkArgument(
-        table().snapshot(scanSnapshotId) != null,
-        "Cannot find snapshot with ID %s",
-        scanSnapshotId);
+    validateSnapshotSelection(scanSnapshotId);
     Schema newSchema =
         useSnapshotSchema() ? SnapshotUtil.schemaFor(table(), scanSnapshotId) : tableSchema();
     TableScanContext newContext = context().useSnapshotId(scanSnapshotId);
     return newRefinedScan(table(), newSchema, newContext);
   }
 
+  Snapshot validateSnapshotSelection(long scanSnapshotId) {
+    Preconditions.checkArgument(
+        snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
+    Snapshot snapshot = table().snapshot(scanSnapshotId);
+    Preconditions.checkArgument(
+        snapshot != null, "Cannot find snapshot with ID %s", scanSnapshotId);
+    return snapshot;
+  }
+
   public ThisT useRef(String name) {
     if (SnapshotRef.MAIN_BRANCH.equals(name)) {
+      Preconditions.checkArgument(
+          !bindSpecsToScanSchema(),
+          "Cannot override ref, already set snapshot id=%s",
+          snapshotId());
       return newRefinedScan(table(), tableSchema(), context());
     }
 

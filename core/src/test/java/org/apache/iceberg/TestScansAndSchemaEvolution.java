@@ -22,6 +22,7 @@ import static org.apache.iceberg.TestHelpers.ALL_VERSIONS;
 import static org.apache.iceberg.TestHelpers.V3_AND_ABOVE;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 import java.io.File;
@@ -32,15 +33,20 @@ import java.util.stream.Collectors;
 import org.apache.avro.generic.GenericData;
 import org.apache.iceberg.avro.Avro;
 import org.apache.iceberg.avro.RandomAvroData;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
+import org.apache.iceberg.inmemory.InMemoryFileIO;
 import org.apache.iceberg.inmemory.InMemoryOutputFile;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.transforms.Transforms;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -55,6 +61,10 @@ public class TestScansAndSchemaEvolution {
 
   private static final PartitionSpec SPEC =
       PartitionSpec.builderFor(SCHEMA).identity("part").build();
+
+  private static final int DATA_BUCKETS = 8;
+  private static final PartitionSpec DATA_BUCKET_SPEC =
+      PartitionSpec.builderFor(SCHEMA).bucket("data", DATA_BUCKETS).build();
 
   @Parameters(name = "formatVersion = {0}")
   protected static List<Integer> formatVersions() {
@@ -318,6 +328,203 @@ public class TestScansAndSchemaEvolution {
   }
 
   @TestTemplate
+  void exactSnapshotUsesSnapshotSchemaAfterSchemaOnlyUpdate() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, DATA_BUCKET_SPEC, formatVersion);
+    table.newAppend().appendFile(createBucketedDataFile("xyz")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    Schema snapshotSchema = table.schema();
+    PartitionSpec snapshotSpec = table.spec();
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    Expression exactFilter = Expressions.equal("data", "xyz");
+    TableScan exactScan = table.newScan().atSnapshot(snapshotId).filter(exactFilter);
+    assertThat(exactScan.schema()).isEqualTo(snapshotSchema);
+    try (CloseableIterable<FileScanTask> tasks = exactScan.planFiles()) {
+      List<FileScanTask> plannedTasks = Lists.newArrayList(tasks);
+      assertThat(plannedTasks).hasSize(1);
+      assertTask(plannedTasks.get(0), snapshotSchema, snapshotSpec, exactFilter);
+    }
+  }
+
+  @TestTemplate
+  void exactSnapshotIgnoresUnreferencedLaterSpecs() throws IOException {
+    PartitionSpec snapshotSpec = PartitionSpec.unpartitioned();
+    Table table = TestTables.create(temp, "test", SCHEMA, snapshotSpec, formatVersion);
+    table.newAppend().appendFile(createUnpartitionedDataFile(snapshotSpec)).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+    table.updateSpec().addField("data", Expressions.bucket("id", DATA_BUCKETS)).commit();
+
+    Expression exactFilter = Expressions.equal("data", "xyz");
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().atSnapshot(snapshotId).filter(exactFilter).planFiles()) {
+      List<FileScanTask> plannedTasks = Lists.newArrayList(tasks);
+      assertThat(plannedTasks).hasSize(1);
+      assertTask(plannedTasks.get(0), SCHEMA, snapshotSpec, exactFilter);
+    }
+  }
+
+  @Test
+  void exactSnapshotSupportsReferencedSpecWithDroppedSource() throws IOException {
+    PartitionSpec identitySpec = PartitionSpec.builderFor(SCHEMA).identity("data").build();
+    Table table = TestTables.create(temp, "test", SCHEMA, identitySpec, 2);
+    PartitionData partition = new PartitionData(identitySpec.partitionType());
+    partition.set(0, "xyz");
+    DataFile partitionedFile =
+        DataFiles.builder(identitySpec)
+            .withPath("/path/to/data-" + UUID.randomUUID() + ".parquet")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .withPartition(partition)
+            .build();
+    table.newAppend().appendFile(partitionedFile).commit();
+
+    table.updateSpec().removeField(identitySpec.fields().get(0).name()).commit();
+    table.updateSchema().deleteColumn("data").commit();
+    table.newAppend().appendFile(createUnpartitionedDataFile(table.spec())).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().atSnapshot(snapshotId).planFiles()) {
+      assertThat(tasks).hasSize(2);
+    }
+  }
+
+  @TestTemplate
+  void exactSnapshotBindsDeleteManifestSpecs() throws IOException {
+    assumeThat(formatVersion).isGreaterThanOrEqualTo(2);
+    Table table = TestTables.create(temp, "test", SCHEMA, DATA_BUCKET_SPEC, formatVersion);
+    table.newAppend().appendFile(createBucketedDataFile("xyz")).commit();
+
+    table.updateSpec().removeField(DATA_BUCKET_SPEC.fields().get(0).name()).commit();
+    PartitionSpec deleteSpec = table.spec();
+    DeleteFile deleteFile =
+        FileMetadata.deleteFileBuilder(deleteSpec)
+            .ofEqualityDeletes()
+            .withPath("/path/to/delete-" + UUID.randomUUID() + ".parquet")
+            .withFileSizeInBytes(10)
+            .withRecordCount(1)
+            .build();
+    table.newRowDelta().addDeletes(deleteFile).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    Schema snapshotSchema = table.schema();
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+    table.updateSpec().addField("data", Expressions.bucket("id", DATA_BUCKETS)).commit();
+
+    Expression exactFilter = Expressions.equal("data", "xyz");
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().atSnapshot(snapshotId).filter(exactFilter).planFiles()) {
+      List<FileScanTask> plannedTasks = Lists.newArrayList(tasks);
+      assertThat(plannedTasks).hasSize(1);
+      assertTask(plannedTasks.get(0), snapshotSchema, DATA_BUCKET_SPEC, exactFilter);
+      assertThat(plannedTasks.get(0).deletes())
+          .singleElement()
+          .satisfies(delete -> assertThat(delete.specId()).isEqualTo(deleteSpec.specId()));
+    }
+  }
+
+  @TestTemplate
+  void snapshotPinKeepsCurrentSchemaAfterSchemaOnlyUpdate() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, DATA_BUCKET_SPEC, formatVersion);
+    table.newAppend().appendFile(createBucketedDataFile("xyz")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    Expression pinFilter = Expressions.equal("renamed_data", "xyz");
+    TableScan pinScan =
+        table.newScan().filter(pinFilter).project(table.schema()).useSnapshot(snapshotId);
+    assertThat(pinScan.schema()).isEqualTo(table.schema());
+    try (CloseableIterable<FileScanTask> tasks = pinScan.planFiles()) {
+      List<FileScanTask> plannedTasks = Lists.newArrayList(tasks);
+      assertThat(plannedTasks).hasSize(1);
+      assertTask(plannedTasks.get(0), table.schema(), table.spec(), pinFilter);
+    }
+  }
+
+  @TestTemplate
+  void exactBatchSnapshotUsesSnapshotSchemaWhenMainIsEmpty() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, DATA_BUCKET_SPEC, formatVersion);
+    table.newAppend().appendFile(createBucketedDataFile("xyz")).toBranch("branch").commit();
+    long snapshotId = table.snapshot("branch").snapshotId();
+    Schema snapshotSchema = table.schema();
+    PartitionSpec snapshotSpec = table.spec();
+    assertThat(table.currentSnapshot()).isNull();
+
+    table.updateSchema().renameColumn("data", "renamed_data").commit();
+
+    Expression exactFilter = Expressions.equal("data", "xyz");
+    BatchScan exactScan = table.newBatchScan().atSnapshot(snapshotId).filter(exactFilter);
+    assertThat(exactScan.schema()).isEqualTo(snapshotSchema);
+    try (CloseableIterable<ScanTask> tasks = exactScan.planFiles()) {
+      List<ScanTask> plannedTasks = Lists.newArrayList(tasks);
+      assertThat(plannedTasks).hasSize(1);
+      assertThat(plannedTasks.get(0)).isInstanceOf(FileScanTask.class);
+      assertTask((FileScanTask) plannedTasks.get(0), snapshotSchema, snapshotSpec, exactFilter);
+    }
+  }
+
+  @Test
+  void publicDataTableScanDoesNotAdoptExactSnapshotSelection() {
+    Table table = TestTables.create(temp, "test", SCHEMA, PartitionSpec.unpartitioned(), 1);
+    TableScan scan =
+        new DataTableScan(table, table.schema(), ImmutableTableScanContext.builder().build());
+
+    assertThatThrownBy(() -> scan.atSnapshot(1L))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessage("Exact snapshot selection is not supported");
+  }
+
+  @Test
+  void exactSnapshotCannotBeOverriddenByMainRef() {
+    Table table = TestTables.create(temp, "test", SCHEMA, DATA_BUCKET_SPEC, 1);
+    table.newAppend().appendFile(createBucketedDataFile("xyz")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    assertThatThrownBy(() -> table.newScan().atSnapshot(snapshotId).useRef(SnapshotRef.MAIN_BRANCH))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot override ref, already set snapshot id=%s", snapshotId);
+  }
+
+  @Test
+  void exactSnapshotRejectsMissingSnapshotSchema() {
+    long snapshotId = 1L;
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            SCHEMA, PartitionSpec.unpartitioned(), temp.toURI().toString(), ImmutableMap.of());
+    Snapshot snapshot =
+        new BaseSnapshot(
+            1L,
+            snapshotId,
+            null,
+            System.currentTimeMillis(),
+            DataOperations.APPEND,
+            ImmutableMap.of(),
+            null,
+            "file:/manifest-list.avro",
+            null,
+            null,
+            null);
+    TableMetadata metadataWithSnapshot =
+        TableMetadata.buildFrom(metadata)
+            .addSnapshot(snapshot)
+            .setRef(
+                SnapshotRef.MAIN_BRANCH, SnapshotRef.branchBuilder(snapshot.snapshotId()).build())
+            .build();
+    Table table =
+        new BaseTable(
+            new StaticTableOperations(metadataWithSnapshot, new InMemoryFileIO()), "test");
+
+    assertThat(table.newScan().useSnapshot(snapshotId).schema()).isEqualTo(table.schema());
+    assertThatThrownBy(() -> table.newScan().atSnapshot(snapshotId))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot determine schema for snapshot with ID 1");
+  }
+
+  @TestTemplate
   public void testAddColumnWithDefaultValueAndQuery() throws IOException {
     assumeThat(V3_AND_ABOVE).as("Default values require v3+").contains(formatVersion);
     Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
@@ -448,5 +655,39 @@ public class TestScansAndSchemaEvolution {
               assertThat(categoryFieldInTask.initialDefault()).isEqualTo(defaultValue);
               assertThat(categoryFieldInTask.writeDefault()).isEqualTo(defaultValue);
             });
+  }
+
+  private DataFile createBucketedDataFile(String data) {
+    PartitionData partition = new PartitionData(DATA_BUCKET_SPEC.partitionType());
+    partition.set(
+        0, Transforms.<CharSequence>bucket(DATA_BUCKETS).bind(Types.StringType.get()).apply(data));
+    return DataFiles.builder(DATA_BUCKET_SPEC)
+        .withPath("/path/to/data-" + UUID.randomUUID() + ".parquet")
+        .withFileSizeInBytes(10)
+        .withRecordCount(1)
+        .withPartition(partition)
+        .build();
+  }
+
+  private DataFile createUnpartitionedDataFile(PartitionSpec spec) {
+    return DataFiles.builder(spec)
+        .withPath("/path/to/data-" + UUID.randomUUID() + ".parquet")
+        .withFileSizeInBytes(10)
+        .withRecordCount(1)
+        .build();
+  }
+
+  private static void assertTask(
+      FileScanTask task,
+      Schema expectedSchema,
+      PartitionSpec expectedSpec,
+      Expression expectedResidual) {
+    assertThat(task.schema().sameSchema(expectedSchema)).isTrue();
+    assertThat(task.schema().schemaId()).isEqualTo(expectedSchema.schemaId());
+    assertThat(task.spec().schema().sameSchema(expectedSchema)).isTrue();
+    assertThat(task.spec().schema().schemaId()).isEqualTo(expectedSchema.schemaId());
+    assertThat(task.spec().specId()).isEqualTo(expectedSpec.specId());
+    assertThat(task.spec().fields()).isEqualTo(expectedSpec.fields());
+    assertThat(task.residual()).isEqualTo(expectedResidual);
   }
 }

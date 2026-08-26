@@ -19,9 +19,12 @@
 package org.apache.iceberg;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 
 public class DataTableScan extends BaseTableScan {
   protected DataTableScan(Table table, Schema schema, TableScanContext context) {
@@ -75,7 +78,7 @@ public class DataTableScan extends BaseTableScan {
             .select(scanColumns())
             .filterData(filter())
             .schemasById(schemas())
-            .specsById(specs())
+            .specsById(specs(dataManifests, deleteManifests))
             .scanMetrics(scanMetrics())
             .ignoreDeleted()
             .columnsToKeepStats(columnsToKeepStats());
@@ -89,5 +92,17 @@ public class DataTableScan extends BaseTableScan {
     }
 
     return manifestGroup.planFiles();
+  }
+
+  private Map<Integer, PartitionSpec> specs(
+      List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests) {
+    if (!bindSpecsToScanSchema()) {
+      return specs();
+    }
+
+    Set<Integer> specIds = Sets.newHashSet();
+    dataManifests.forEach(manifest -> specIds.add(manifest.partitionSpecId()));
+    deleteManifests.forEach(manifest -> specIds.add(manifest.partitionSpecId()));
+    return specs(specIds);
   }
 }

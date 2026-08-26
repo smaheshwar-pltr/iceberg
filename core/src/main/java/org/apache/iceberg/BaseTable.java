@@ -81,7 +81,7 @@ public class BaseTable
 
   @Override
   public TableScan newScan() {
-    return new DataTableScan(
+    return new LocalDataTableScan(
         this, schema(), ImmutableTableScanContext.builder().metricsReporter(reporter).build());
   }
 

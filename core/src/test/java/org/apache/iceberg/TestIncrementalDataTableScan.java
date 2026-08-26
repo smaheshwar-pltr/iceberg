@@ -63,6 +63,10 @@ public class TestIncrementalDataTableScan extends TestBase {
     assertThatThrownBy(() -> table.newScan().appendsBetween(1, 2).appendsBetween(1, 3))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("to snapshot id 3 not in existing snapshot ids range (1, 2]");
+    assertThatThrownBy(() -> table.newScan().appendsBetween(2, 5).atSnapshot(3))
+        .isInstanceOf(UnsupportedOperationException.class)
+        .hasMessage(
+            "Cannot scan table at exact snapshot ID 3: configured for incremental data in snapshots (2, 5]");
   }
 
   @TestTemplate

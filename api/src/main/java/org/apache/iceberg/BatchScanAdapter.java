@@ -51,6 +51,11 @@ public class BatchScanAdapter implements BatchScan {
   }
 
   @Override
+  public BatchScan atSnapshot(long snapshotId) {
+    return new BatchScanAdapter(scan.atSnapshot(snapshotId));
+  }
+
+  @Override
   public BatchScan useRef(String ref) {
     return new BatchScanAdapter(scan.useRef(ref));
   }
