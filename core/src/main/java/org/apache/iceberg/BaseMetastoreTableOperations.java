@@ -74,6 +74,14 @@ public abstract class BaseMetastoreTableOperations extends BaseMetastoreOperatio
     return currentMetadata;
   }
 
+  /**
+   * Returns the currently loaded metadata without refreshing (null if not yet loaded). Unlike
+   * {@link #current()} this performs no I/O, so it is safe to call from within a refresh.
+   */
+  protected TableMetadata currentMetadata() {
+    return currentMetadata;
+  }
+
   public String currentMetadataLocation() {
     return currentMetadataLocation;
   }

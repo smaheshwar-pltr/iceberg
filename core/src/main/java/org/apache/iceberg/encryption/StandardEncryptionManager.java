@@ -31,11 +31,15 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
-import org.apache.iceberg.util.SerializableMap;
 
+/**
+ * An immutable, metadata-sourced {@link EncryptionManager} for standard (envelope) encryption.
+ * Generating a manifest-list key is pure: it returns the new key(s) for the caller to persist.
+ */
 public class StandardEncryptionManager implements EncryptionManager {
   // Maximal lifespan of key encryption keys is 2 years according to NIST SP 800-57 (PART 1 REV. 5,
   // section 5.3.6.7.b)
@@ -75,15 +79,17 @@ public class StandardEncryptionManager implements EncryptionManager {
     this.dataKeyLength = dataKeyLength;
     this.testTimeShift = 0;
 
-    this.encryptionKeys = SerializableMap.copyOf(Maps.newLinkedHashMap());
+    Map<String, EncryptedKey> keyMap = Maps.newLinkedHashMap();
     if (keys != null) {
       for (EncryptedKey key : keys) {
-        this.encryptionKeys.put(
+        keyMap.put(
             key.keyId(),
             new BaseEncryptedKey(
                 key.keyId(), key.encryptedKeyMetadata(), key.encryptedById(), key.properties()));
       }
     }
+
+    this.encryptionKeys = ImmutableMap.copyOf(keyMap);
   }
 
   @Override
@@ -120,7 +126,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return unwrappedKeyCache;
   }
 
-  private SecureRandom workerRNG() {
+  private synchronized SecureRandom workerRNG() {
     if (this.lazyRNG == null) {
       this.lazyRNG = new SecureRandom();
     }
@@ -130,33 +136,6 @@ public class StandardEncryptionManager implements EncryptionManager {
 
   Map<String, EncryptedKey> encryptionKeys() {
     return encryptionKeys;
-  }
-
-  String keyEncryptionKeyID() {
-    // Find unexpired key encryption key
-    for (String keyID : encryptionKeys.keySet()) {
-      EncryptedKey key = encryptionKeys.get(keyID);
-      if (key.encryptedById().equals(tableKeyId)) { // this is a key encryption key
-        String timestampProperty = key.properties().get(KEY_TIMESTAMP);
-        long keyTimestamp = Long.parseLong(timestampProperty);
-        if (currentTimeMillis() - keyTimestamp < KEY_ENCRYPTION_KEY_LIFESPAN_MS) {
-          return keyID;
-        }
-      }
-    }
-
-    // No unexpired key encryption keys; create one
-    ByteBuffer unwrapped = newKey();
-    ByteBuffer wrapped = kmsClient.wrapKey(unwrapped, tableKeyId);
-    Map<String, String> properties = Maps.newHashMap();
-    properties.put(KEY_TIMESTAMP, "" + currentTimeMillis());
-    EncryptedKey key = new BaseEncryptedKey(generateKeyId(), wrapped, tableKeyId, properties);
-
-    // update internal tracking
-    unwrappedKeyCache().put(key.keyId(), unwrapped);
-    encryptionKeys.put(key.keyId(), key);
-
-    return key.keyId();
   }
 
   // For key rotation tests
@@ -184,20 +163,42 @@ public class StandardEncryptionManager implements EncryptionManager {
     return unwrappedKeyCache().get(encryptedKeyMetadata.encryptedById());
   }
 
-  public String addManifestListKeyMetadata(NativeEncryptionKeyMetadata keyMetadata) {
-    String manifestListKeyID = generateKeyId();
-    String keyEncryptionKeyID = keyEncryptionKeyID();
-    String keyEncryptionKeyTimestamp =
-        encryptionKeys.get(keyEncryptionKeyID).properties().get(KEY_TIMESTAMP);
+  /**
+   * Generates a manifest-list key for the given key metadata without storing it. The returned
+   * {@link ManifestListKeys} must be persisted into table metadata by the caller to stay
+   * decryptable.
+   */
+  public ManifestListKeys generateManifestListKey(NativeEncryptionKeyMetadata keyMetadata) {
+    KeyEncryptionKey kek = keyEncryptionKey();
+    String kekTimestamp = kek.key.properties().get(KEY_TIMESTAMP);
     ByteBuffer encryptedKeyMetadata =
-        EncryptionUtil.encryptManifestListKeyMetadata(
-            unwrappedKeyCache().get(keyEncryptionKeyID), keyEncryptionKeyTimestamp, keyMetadata);
-    BaseEncryptedKey key =
-        new BaseEncryptedKey(manifestListKeyID, encryptedKeyMetadata, keyEncryptionKeyID, null);
+        EncryptionUtil.encryptManifestListKeyMetadata(kek.unwrapped, kekTimestamp, keyMetadata);
+    EncryptedKey manifestListKey =
+        new BaseEncryptedKey(generateKeyId(), encryptedKeyMetadata, kek.key.keyId(), null);
+    // A reused KEK is already in metadata, so only a newly generated one is returned to persist.
+    return new ManifestListKeys(manifestListKey, kek.isNew ? kek.key : null);
+  }
 
-    encryptionKeys.put(key.keyId(), key);
+  /**
+   * Returns an unexpired key encryption key from the metadata-sourced keys, or generates a fresh
+   * one.
+   */
+  private KeyEncryptionKey keyEncryptionKey() {
+    for (EncryptedKey key : encryptionKeys.values()) {
+      if (key.encryptedById().equals(tableKeyId)) { // this is a key encryption key
+        long keyTimestamp = Long.parseLong(key.properties().get(KEY_TIMESTAMP));
+        if (currentTimeMillis() - keyTimestamp < KEY_ENCRYPTION_KEY_LIFESPAN_MS) {
+          return new KeyEncryptionKey(key, unwrappedKeyCache().get(key.keyId()), false);
+        }
+      }
+    }
 
-    return manifestListKeyID;
+    ByteBuffer unwrapped = newKey();
+    ByteBuffer wrapped = kmsClient.wrapKey(unwrapped, tableKeyId);
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put(KEY_TIMESTAMP, "" + currentTimeMillis());
+    EncryptedKey key = new BaseEncryptedKey(generateKeyId(), wrapped, tableKeyId, properties);
+    return new KeyEncryptionKey(key, unwrapped, true);
   }
 
   private String generateKeyId() {
@@ -210,6 +211,40 @@ public class StandardEncryptionManager implements EncryptionManager {
     byte[] newKey = new byte[dataKeyLength];
     workerRNG().nextBytes(newKey);
     return ByteBuffer.wrap(newKey);
+  }
+
+  /** The keys from a single {@link #generateManifestListKey} call, for the caller to persist. */
+  public static final class ManifestListKeys {
+    private final EncryptedKey manifestListKey;
+    private final EncryptedKey newKeyEncryptionKey;
+
+    private ManifestListKeys(EncryptedKey manifestListKey, EncryptedKey newKeyEncryptionKey) {
+      this.manifestListKey = manifestListKey;
+      this.newKeyEncryptionKey = newKeyEncryptionKey;
+    }
+
+    public EncryptedKey manifestListKey() {
+      return manifestListKey;
+    }
+
+    /**
+     * The wrapping key encryption key if newly generated (not yet in metadata), else {@code null}.
+     */
+    public EncryptedKey newKeyEncryptionKey() {
+      return newKeyEncryptionKey;
+    }
+  }
+
+  private static class KeyEncryptionKey {
+    private final EncryptedKey key;
+    private final ByteBuffer unwrapped;
+    private final boolean isNew;
+
+    private KeyEncryptionKey(EncryptedKey key, ByteBuffer unwrapped, boolean isNew) {
+      this.key = key;
+      this.unwrapped = unwrapped;
+      this.isNew = isNew;
+    }
   }
 
   private class StandardEncryptedOutputFile implements NativeEncryptionOutputFile {
