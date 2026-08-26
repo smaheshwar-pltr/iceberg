@@ -37,6 +37,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.hadoop.hive.metastore.api.InvalidObjectException;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataFile;
@@ -961,6 +962,117 @@ public class TestHiveCommits extends HiveTableTestBase {
           .hasValueMatching(lock -> lock.getClass().equals(expectedLockClass));
     } finally {
       catalog.dropTable(newTableIdentifier, true);
+    }
+  }
+
+  @Test
+  void failedEncryptedCreateDoesNotInstallEncryptionState() throws Exception {
+    TableIdentifier tableIdent = TableIdentifier.of(DB_NAME, "failed_encrypted_create");
+    UnitestKMS kms = new UnitestKMS();
+    kms.initialize(ImmutableMap.of());
+    HiveTableOperations ops =
+        new HiveTableOperations(
+            catalog.getConf(),
+            catalog.clientPool(),
+            catalog.newTableOps(tableIdent).io(),
+            kms,
+            catalog.name(),
+            tableIdent.namespace().level(0),
+            tableIdent.name());
+    FileIO rawFileIO = ops.io();
+    HiveTableOperations spyOps = spy(ops);
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            SCHEMA,
+            PartitionSpec.unpartitioned(),
+            catalog.defaultWarehouseLocation(tableIdent),
+            ImmutableMap.of(
+                TableProperties.FORMAT_VERSION,
+                "3",
+                TableProperties.ENCRYPTION_TABLE_KEY,
+                UnitestKMS.MASTER_KEY_NAME1));
+    doThrow(new InvalidObjectException("Rejected table"))
+        .when(spyOps)
+        .persistTable(any(), anyBoolean(), any());
+
+    try {
+      assertThatThrownBy(() -> spyOps.commit(null, metadata))
+          .isInstanceOf(ValidationException.class)
+          .hasMessage("Invalid Hive object for %s.%s", DB_NAME, tableIdent.name());
+      assertThat(spyOps.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+      assertThat(spyOps.io()).isSameAs(rawFileIO);
+      assertThat(catalog.tableExists(tableIdent)).isFalse();
+    } finally {
+      catalog.dropTable(tableIdent, true);
+    }
+  }
+
+  @Test
+  void encryptedCreateStatusRecoveryPreservesConcurrentSnapshotKeys() throws Exception {
+    TableIdentifier tableIdent = TableIdentifier.of(DB_NAME, "encrypted_create_status_recovery");
+    HiveCatalog encryptedCatalog =
+        (HiveCatalog)
+            CatalogUtil.loadCatalog(
+                HiveCatalog.class.getName(),
+                "encrypted-create-status-recovery",
+                ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()),
+                HIVE_METASTORE_EXTENSION.hiveConf());
+
+    try {
+      HiveTableOperations ops = (HiveTableOperations) encryptedCatalog.newTableOps(tableIdent);
+      HiveTableOperations spyOps = spy(ops);
+      TableMetadata metadata =
+          TableMetadata.newTableMetadata(
+              SCHEMA,
+              PartitionSpec.unpartitioned(),
+              encryptedCatalog.defaultWarehouseLocation(tableIdent),
+              ImmutableMap.of(
+                  TableProperties.FORMAT_VERSION,
+                  "3",
+                  TableProperties.ENCRYPTION_TABLE_KEY,
+                  UnitestKMS.MASTER_KEY_NAME1));
+      AtomicReference<HiveLock> lock = new AtomicReference<>();
+      AtomicReference<Snapshot> concurrentSnapshot = new AtomicReference<>();
+      doAnswer(
+              ignored -> {
+                lock.set(ops.lockObject(metadata));
+                return lock.get();
+              })
+          .when(spyOps)
+          .lockObject(metadata);
+      doAnswer(
+              invocation -> {
+                boolean updateHiveTable = invocation.getArgument(1, Boolean.class);
+                String metadataLocation = invocation.getArgument(2, String.class);
+                ops.persistTable(invocation.getArgument(0), updateHiveTable, metadataLocation);
+
+                lock.get().unlock();
+                Table concurrentTable = encryptedCatalog.loadTable(tableIdent);
+                DataFile file =
+                    DataFiles.builder(concurrentTable.spec())
+                        .withPath(concurrentTable.location() + "/data.parquet")
+                        .withRecordCount(1)
+                        .withFileSizeInBytes(1)
+                        .build();
+                concurrentTable.newFastAppend().appendFile(file).commit();
+                concurrentTable.refresh();
+                concurrentSnapshot.set(concurrentTable.currentSnapshot());
+                throw new TException("Datacenter on fire");
+              })
+          .when(spyOps)
+          .persistTable(any(), anyBoolean(), any());
+
+      spyOps.commit(null, metadata);
+
+      Snapshot snapshot = concurrentSnapshot.get();
+      FileIO retainedFileIO = spyOps.io();
+      assertThat(snapshot).isNotNull();
+      assertThat(snapshot.keyId()).isNotNull();
+      assertThat(retainedFileIO).isInstanceOf(EncryptingFileIO.class);
+      assertThat(snapshot.allManifests(retainedFileIO)).hasSize(1);
+    } finally {
+      encryptedCatalog.dropTable(tableIdent, true);
+      encryptedCatalog.close();
     }
   }
 

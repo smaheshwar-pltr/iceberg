@@ -19,6 +19,7 @@
 package org.apache.iceberg.hive;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,6 +39,8 @@ import org.apache.iceberg.BaseMetastoreTableOperations;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.ClientPool;
 import org.apache.iceberg.LocationProviders;
+import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.TableOperations;
@@ -50,6 +53,7 @@ import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
+import org.apache.iceberg.exceptions.CleanableFailure;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
@@ -92,6 +96,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final Object stateLock = new Object();
   private EncryptionManager encryptionManager;
   private EncryptingFileIO encryptingFileIO;
+  private String tableUUID;
   private String tableKeyId;
   private int encryptionDekLength;
 
@@ -177,21 +182,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       }
 
       if (tableKeyId != null) {
-        Preconditions.checkArgument(
-            keyManagementClient != null,
-            "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-            CatalogProperties.ENCRYPTION_KMS_IMPL);
-
-        Map<String, String> encryptionProperties =
-            ImmutableMap.of(
-                TableProperties.ENCRYPTION_TABLE_KEY,
-                tableKeyId,
-                TableProperties.ENCRYPTION_DEK_LENGTH,
-                String.valueOf(encryptionDekLength));
-
-        encryptionManager =
-            EncryptionUtil.createEncryptionManager(
-                encryptedKeys, encryptionProperties, keyManagementClient);
+        encryptionManager = createEncryptionManager(encryptedKeys, tableKeyId, encryptionDekLength);
       } else {
         return PlaintextEncryptionManager.instance();
       }
@@ -278,20 +269,19 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   @Override
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
-    final TableMetadata tableMetadata;
-    if (metadata.properties().get(TableProperties.ENCRYPTION_TABLE_KEY) != null) {
-      validatedDataKeyLength(metadata.properties().get(TableProperties.ENCRYPTION_DEK_LENGTH));
+    if (newTable) {
+      validateCreateEncryption(metadata);
+    } else {
+      validateExistingTableEncryption(metadata);
     }
 
-    encryptionPropsFromMetadata(metadata.properties());
-
-    String newMetadataLocation;
-    EncryptionManager encrManager = encryption();
-    if (encrManager instanceof StandardEncryptionManager) {
+    EncryptionManager existingEncryptionManager = newTable ? null : encryption();
+    TableMetadata tableMetadata;
+    if (existingEncryptionManager instanceof StandardEncryptionManager) {
       // Add new encryption keys to the metadata
       TableMetadata.Builder builder = TableMetadata.buildFrom(metadata);
       for (Map.Entry<String, EncryptedKey> entry :
-          EncryptionUtil.encryptionKeys(encrManager).entrySet()) {
+          EncryptionUtil.encryptionKeys(existingEncryptionManager).entrySet()) {
         builder.addEncryptionKey(entry.getValue());
       }
 
@@ -299,8 +289,12 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     } else {
       tableMetadata = metadata;
     }
+    validateSnapshotEncryption(base, tableMetadata);
 
-    newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
+    EncryptionManager proposedCreateEncryption =
+        newTable ? encryptionManagerFor(tableMetadata, proposedTableKeyId(tableMetadata)) : null;
+
+    String newMetadataLocation = writeNewMetadataIfRequired(newTable, tableMetadata);
 
     boolean hiveEngineEnabled = hiveEngineEnabled(tableMetadata, conf);
     boolean keepHiveStats = conf.getBoolean(ConfigProperties.KEEP_HIVE_STATS, false);
@@ -358,16 +352,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
             base.properties().keySet().stream()
                 .filter(key -> !tableMetadata.properties().containsKey(key))
                 .collect(Collectors.toSet());
-
-        Preconditions.checkArgument(
-            !removedProps.contains(TableProperties.ENCRYPTION_TABLE_KEY),
-            "Cannot remove key ID from an encrypted table");
-
-        Preconditions.checkArgument(
-            Objects.equals(
-                base.properties().get(TableProperties.ENCRYPTION_TABLE_KEY),
-                metadata.properties().get(TableProperties.ENCRYPTION_TABLE_KEY)),
-            "Cannot modify key ID of an encrypted table");
       }
 
       HMSTablePropertyHelper.updateHmsTableForIcebergTable(
@@ -468,6 +452,10 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       HiveOperationsBase.cleanupMetadataAndUnlock(io(), commitStatus, newMetadataLocation, lock);
     }
 
+    if (newTable) {
+      installCreateEncryptionStateIfUnrefreshed(tableMetadata, proposedCreateEncryption);
+    }
+
     LOG.info(
         "Committed to table {} with the new metadata location {}", fullName, newMetadataLocation);
   }
@@ -499,7 +487,20 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   @Override
   public TableOperations temp(TableMetadata uncommittedMetadata) {
+    // Use HMS authority only when staged metadata belongs to the accepted table incarnation.
+    String tempTableKeyId;
+    synchronized (stateLock) {
+      tempTableKeyId =
+          super.currentMetadataLocation() != null
+                  && Objects.equals(tableUUID, uncommittedMetadata.uuid())
+              ? tableKeyId
+              : proposedTableKeyId(uncommittedMetadata);
+    }
+
     return new TableOperations() {
+      private EncryptionManager tempEncryptionManager;
+      private FileIO tempFileIO;
+
       @Override
       public TableMetadata current() {
         return uncommittedMetadata;
@@ -529,13 +530,24 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
       @Override
       public FileIO io() {
-        HiveTableOperations.this.encryptionPropsFromMetadata(uncommittedMetadata.properties());
-        return HiveTableOperations.this.io();
+        if (tempFileIO == null) {
+          EncryptionManager tempEncryption = encryption();
+          tempFileIO =
+              tempEncryption instanceof PlaintextEncryptionManager
+                  ? fileIO
+                  : EncryptingFileIO.combine(fileIO, tempEncryption);
+        }
+
+        return tempFileIO;
       }
 
       @Override
       public EncryptionManager encryption() {
-        return HiveTableOperations.this.encryption();
+        if (tempEncryptionManager == null) {
+          tempEncryptionManager = encryptionManagerFor(uncommittedMetadata, tempTableKeyId);
+        }
+
+        return tempEncryptionManager;
       }
 
       @Override
@@ -599,21 +611,260 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
         ConfigProperties.LOCK_HIVE_ENABLED, TableProperties.HIVE_LOCK_ENABLED_DEFAULT);
   }
 
-  private void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
+  private EncryptionManager encryptionManagerFor(TableMetadata metadata, String encryptionKeyId) {
+    if (encryptionKeyId == null) {
+      return PlaintextEncryptionManager.instance();
+    }
+
+    int dataKeyLength =
+        validatedDataKeyLength(metadata.properties().get(TableProperties.ENCRYPTION_DEK_LENGTH));
+    return createEncryptionManager(metadata.encryptionKeys(), encryptionKeyId, dataKeyLength);
+  }
+
+  private EncryptionManager createEncryptionManager(
+      List<EncryptedKey> keys, String encryptionKeyId, int dataKeyLength) {
+    Preconditions.checkArgument(
+        keyManagementClient != null,
+        "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+        CatalogProperties.ENCRYPTION_KMS_IMPL);
+
+    Map<String, String> encryptionProperties =
+        ImmutableMap.of(
+            TableProperties.ENCRYPTION_TABLE_KEY,
+            encryptionKeyId,
+            TableProperties.ENCRYPTION_DEK_LENGTH,
+            String.valueOf(dataKeyLength));
+    return EncryptionUtil.createEncryptionManager(keys, encryptionProperties, keyManagementClient);
+  }
+
+  private void validateExistingTableEncryption(TableMetadata metadata) {
+    String proposedTableKeyId = proposedTableKeyId(metadata);
+    String acceptedTableKeyId;
     synchronized (stateLock) {
-      if (tableKeyId == null) {
-        tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
+      acceptedTableKeyId = tableKeyId;
+    }
+
+    if (acceptedTableKeyId != null && proposedTableKeyId == null) {
+      throw new InvalidEncryptionChangeException("Cannot remove key ID from an encrypted table");
+    }
+
+    if (!Objects.equals(acceptedTableKeyId, proposedTableKeyId)) {
+      throw new InvalidEncryptionChangeException("Cannot modify key ID of an encrypted table");
+    }
+
+    if (proposedTableKeyId != null) {
+      validatedDataKeyLength(metadata.properties().get(TableProperties.ENCRYPTION_DEK_LENGTH));
+    }
+  }
+
+  private static void validateCreateEncryption(TableMetadata metadata) {
+    String proposedTableKeyId = proposedTableKeyId(metadata);
+    if (proposedTableKeyId != null) {
+      validatedDataKeyLength(metadata.properties().get(TableProperties.ENCRYPTION_DEK_LENGTH));
+    }
+  }
+
+  private static void validateSnapshotEncryption(TableMetadata base, TableMetadata metadata) {
+    String proposedTableKeyId = proposedTableKeyId(metadata);
+    Map<String, EncryptedKey> acceptedKeysById =
+        base != null ? encryptionKeysById(base) : Collections.emptyMap();
+    Map<String, EncryptedKey> keysById = encryptionKeysById(metadata);
+    Set<Long> newlyReferencedSnapshots =
+        base != null ? newlyReferencedSnapshotIds(base, metadata) : Collections.emptySet();
+
+    for (Snapshot snapshot : metadata.snapshots()) {
+      Snapshot acceptedSnapshot = base != null ? base.snapshot(snapshot.snapshotId()) : null;
+      if (acceptedSnapshot != null) {
+        if (proposedTableKeyId != null) {
+          ValidationException.check(
+              Objects.equals(
+                      acceptedSnapshot.manifestListLocation(), snapshot.manifestListLocation())
+                  && Objects.equals(acceptedSnapshot.keyId(), snapshot.keyId()),
+              "Cannot commit table with encryption key %s: manifest list location or key ID changed for existing snapshot %s",
+              proposedTableKeyId,
+              snapshot.snapshotId());
+        }
+
+        if (hasSameEncryptionLineage(acceptedSnapshot, snapshot, acceptedKeysById, keysById)
+            && !newlyReferencedSnapshots.contains(snapshot.snapshotId())) {
+          continue;
+        }
       }
 
-      if (tableKeyId != null && encryptionDekLength <= 0) {
-        encryptionDekLength =
-            validatedDataKeyLength(tableProperties.get(TableProperties.ENCRYPTION_DEK_LENGTH));
+      String manifestListKeyId = snapshot.keyId();
+      if (proposedTableKeyId == null) {
+        ValidationException.check(
+            manifestListKeyId == null,
+            "Cannot commit unencrypted table: snapshot %s references manifest list key %s",
+            snapshot.snapshotId(),
+            manifestListKeyId);
+        continue;
       }
+
+      ValidationException.check(
+          manifestListKeyId != null,
+          "Cannot commit table with encryption key %s: snapshot %s is not encrypted",
+          proposedTableKeyId,
+          snapshot.snapshotId());
+      EncryptedKey manifestListKey = keysById.get(manifestListKeyId);
+      ValidationException.check(
+          manifestListKey != null,
+          "Cannot commit table with encryption key %s: snapshot %s references missing manifest list key %s",
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          manifestListKeyId);
+      validateUnchangedEncryptionKey(
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          "manifest list key",
+          acceptedKeysById.get(manifestListKeyId),
+          manifestListKey);
+      String keyEncryptionKeyId = manifestListKey.encryptedById();
+      ValidationException.check(
+          !proposedTableKeyId.equals(keyEncryptionKeyId),
+          "Cannot commit table with encryption key %s: snapshot %s manifest list key %s is encrypted directly by the table key",
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          manifestListKeyId);
+      ValidationException.check(
+          keyEncryptionKeyId != null,
+          "Cannot commit table with encryption key %s: snapshot %s manifest list key %s does not reference a key encryption key",
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          manifestListKeyId);
+      EncryptedKey keyEncryptionKey = keysById.get(keyEncryptionKeyId);
+      ValidationException.check(
+          keyEncryptionKey != null,
+          "Cannot commit table with encryption key %s: snapshot %s references missing key encryption key %s",
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          keyEncryptionKeyId);
+      validateUnchangedEncryptionKey(
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          "key encryption key",
+          acceptedKeysById.get(keyEncryptionKeyId),
+          keyEncryptionKey);
+      ValidationException.check(
+          proposedTableKeyId.equals(keyEncryptionKey.encryptedById()),
+          "Cannot commit table with encryption key %s: snapshot %s key encryption key %s is encrypted by %s",
+          proposedTableKeyId,
+          snapshot.snapshotId(),
+          keyEncryptionKeyId,
+          keyEncryptionKey.encryptedById());
     }
+  }
+
+  private static Set<Long> newlyReferencedSnapshotIds(
+      TableMetadata accepted, TableMetadata proposed) {
+    return proposed.refs().entrySet().stream()
+        .filter(
+            entry -> {
+              SnapshotRef acceptedRef = accepted.ref(entry.getKey());
+              SnapshotRef proposedRef = entry.getValue();
+              return acceptedRef == null
+                  || acceptedRef.snapshotId() != proposedRef.snapshotId()
+                  || acceptedRef.type() != proposedRef.type();
+            })
+        .map(entry -> entry.getValue().snapshotId())
+        .collect(Collectors.toSet());
+  }
+
+  private static void validateUnchangedEncryptionKey(
+      String tableKeyId,
+      long snapshotId,
+      String keyType,
+      EncryptedKey acceptedKey,
+      EncryptedKey proposedKey) {
+    if (acceptedKey != null && proposedKey != null) {
+      ValidationException.check(
+          sameEncryptedKey(acceptedKey, proposedKey),
+          "Cannot commit table with encryption key %s: %s %s changed from accepted metadata for snapshot %s",
+          tableKeyId,
+          keyType,
+          proposedKey.keyId(),
+          snapshotId);
+    }
+  }
+
+  private static Map<String, EncryptedKey> encryptionKeysById(TableMetadata metadata) {
+    Map<String, EncryptedKey> keysById = new LinkedHashMap<>();
+    for (EncryptedKey key : metadata.encryptionKeys()) {
+      keysById.put(key.keyId(), key);
+    }
+
+    return keysById;
+  }
+
+  private static boolean hasSameEncryptionLineage(
+      Snapshot acceptedSnapshot,
+      Snapshot proposedSnapshot,
+      Map<String, EncryptedKey> acceptedKeysById,
+      Map<String, EncryptedKey> proposedKeysById) {
+    if (!Objects.equals(
+            acceptedSnapshot.manifestListLocation(), proposedSnapshot.manifestListLocation())
+        || !Objects.equals(acceptedSnapshot.keyId(), proposedSnapshot.keyId())) {
+      return false;
+    }
+
+    EncryptedKey acceptedManifestListKey = acceptedKeysById.get(acceptedSnapshot.keyId());
+    EncryptedKey proposedManifestListKey = proposedKeysById.get(proposedSnapshot.keyId());
+    if (!sameEncryptedKey(acceptedManifestListKey, proposedManifestListKey)) {
+      return false;
+    }
+
+    String acceptedKeyEncryptionKeyId =
+        acceptedManifestListKey != null ? acceptedManifestListKey.encryptedById() : null;
+    String proposedKeyEncryptionKeyId =
+        proposedManifestListKey != null ? proposedManifestListKey.encryptedById() : null;
+    return sameEncryptedKey(
+        acceptedKeysById.get(acceptedKeyEncryptionKeyId),
+        proposedKeysById.get(proposedKeyEncryptionKeyId));
+  }
+
+  private static boolean sameEncryptedKey(EncryptedKey acceptedKey, EncryptedKey proposedKey) {
+    return acceptedKey == proposedKey
+        || (acceptedKey != null
+            && proposedKey != null
+            && Objects.equals(acceptedKey.keyId(), proposedKey.keyId())
+            && Objects.equals(
+                acceptedKey.encryptedKeyMetadata(), proposedKey.encryptedKeyMetadata())
+            && Objects.equals(acceptedKey.encryptedById(), proposedKey.encryptedById())
+            && Objects.equals(acceptedKey.properties(), proposedKey.properties()));
+  }
+
+  private void installCreateEncryptionStateIfUnrefreshed(
+      TableMetadata metadata, EncryptionManager createEncryptionManager) {
+    synchronized (stateLock) {
+      // Commit-status recovery may have refreshed later authoritative state, which must not be
+      // overwritten.
+      if (super.currentMetadataLocation() != null) {
+        return;
+      }
+
+      String proposedTableKeyId = proposedTableKeyId(metadata);
+      if (proposedTableKeyId == null) {
+        installEncryptionState(new EncryptionState(metadata.uuid(), null, 0, List.of()));
+        return;
+      }
+
+      this.tableUUID = metadata.uuid();
+      this.tableKeyId = proposedTableKeyId;
+      this.encryptionDekLength =
+          validatedDataKeyLength(metadata.properties().get(TableProperties.ENCRYPTION_DEK_LENGTH));
+      this.encryptedKeys = metadata.encryptionKeys();
+      this.encryptingFileIO = null;
+      this.encryptionManager = createEncryptionManager;
+    }
+  }
+
+  private static String proposedTableKeyId(TableMetadata metadata) {
+    return metadata.properties().get(TableProperties.ENCRYPTION_TABLE_KEY);
   }
 
   private void installEncryptionState(EncryptionState state) {
     synchronized (stateLock) {
+      this.tableUUID = state.tableUUID;
       this.tableKeyId = state.tableKeyId;
       this.encryptionDekLength = state.dekLength;
       this.encryptedKeys = state.encryptedKeys;
@@ -624,6 +875,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
 
   private void clearEncryptionState() {
     synchronized (stateLock) {
+      this.tableUUID = null;
       this.tableKeyId = null;
       this.encryptionDekLength = 0;
       this.encryptedKeys = List.of();
@@ -641,7 +893,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       Preconditions.checkState(
           encryptionKeyIdFromHMS == null,
           "Cannot validate encryption state without table metadata");
-      return new EncryptionState(null, 0, List.of());
+      return new EncryptionState(null, null, 0, List.of());
     }
 
     Map<String, String> propertiesFromMetadata = metadata.properties();
@@ -650,7 +902,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     String dekLengthFromMetadata =
         propertiesFromMetadata.get(TableProperties.ENCRYPTION_DEK_LENGTH);
     if (encryptionKeyIdFromHMS == null && encryptionKeyIdFromMetadata == null) {
-      return new EncryptionState(null, 0, List.of());
+      return new EncryptionState(metadata.uuid(), null, 0, List.of());
     }
 
     if (StringUtils.isNotEmpty(metadataHashFromHMS)) {
@@ -702,7 +954,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       }
     }
 
-    return new EncryptionState(encryptionKeyIdFromHMS, dekLength, acceptedEncryptedKeys);
+    return new EncryptionState(
+        metadata.uuid(), encryptionKeyIdFromHMS, dekLength, acceptedEncryptedKeys);
   }
 
   private static boolean isValidDekLength(int dekLength) {
@@ -741,14 +994,24 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   private static class EncryptionState {
+    private final String tableUUID;
     private final String tableKeyId;
     private final int dekLength;
     private final List<EncryptedKey> encryptedKeys;
 
-    private EncryptionState(String tableKeyId, int dekLength, List<EncryptedKey> encryptedKeys) {
+    private EncryptionState(
+        String tableUUID, String tableKeyId, int dekLength, List<EncryptedKey> encryptedKeys) {
+      this.tableUUID = tableUUID;
       this.tableKeyId = tableKeyId;
       this.dekLength = dekLength;
       this.encryptedKeys = encryptedKeys;
+    }
+  }
+
+  private static class InvalidEncryptionChangeException extends IllegalArgumentException
+      implements CleanableFailure {
+    private InvalidEncryptionChangeException(String message) {
+      super(message);
     }
   }
 }

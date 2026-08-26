@@ -29,6 +29,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -44,6 +45,7 @@ import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.ExpireSnapshots;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
@@ -155,6 +157,14 @@ public class TestTableEncryption extends CatalogTestBase {
     }
   }
 
+  private static DataFile newDataFile(Table table, String fileName) {
+    return DataFiles.builder(table.spec())
+        .withPath(table.location() + "/" + fileName)
+        .withFileSizeInBytes(1)
+        .withRecordCount(1)
+        .build();
+  }
+
   private static void assertSnapshotHasEncryptionKeys(Table table, Snapshot snapshot) {
     assertThat(snapshot.keyId()).as("manifest list key ID").isNotNull();
     TableMetadata metadata = ((HasTableOperations) table).operations().current();
@@ -167,6 +177,20 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThat(metadata.encryptionKeys())
         .as("key encryption key")
         .anyMatch(key -> key.keyId().equals(manifestListKey.encryptedById()));
+  }
+
+  private static String tableKeyId(Table table, Snapshot snapshot) {
+    TableMetadata metadata = ((HasTableOperations) table).operations().current();
+    EncryptedKey manifestListKey =
+        metadata.encryptionKeys().stream()
+            .filter(key -> key.keyId().equals(snapshot.keyId()))
+            .findFirst()
+            .orElseThrow();
+    return metadata.encryptionKeys().stream()
+        .filter(key -> key.keyId().equals(manifestListKey.encryptedById()))
+        .findFirst()
+        .orElseThrow()
+        .encryptedById();
   }
 
   @TestTemplate
@@ -338,6 +362,252 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
+  void rejectsReplaceToCreateWithDifferentEncryptionKey() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    Set<String> retainedManifests =
+        table.currentSnapshot().allManifests(table.io()).stream()
+            .map(manifest -> manifest.path())
+            .collect(Collectors.toSet());
+    Transaction replace =
+        validationCatalog
+            .buildTable(tableIdent, table.schema())
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
+            .createOrReplaceTransaction();
+    replace.newFastAppend().appendFile(currentDataFiles(table).get(0)).commit();
+    Snapshot stagedSnapshot = replace.table().currentSnapshot();
+    String stagedManifestList = stagedSnapshot.manifestListLocation();
+    List<String> stagedManifests =
+        stagedSnapshot.allManifests(replace.table().io()).stream()
+            .map(manifest -> manifest.path())
+            .filter(path -> !retainedManifests.contains(path))
+            .collect(Collectors.toList());
+    assertThat(stagedManifests).isNotEmpty();
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+
+    assertThatThrownBy(replace::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("snapshot")
+        .hasMessageContaining(UnitestKMS.MASTER_KEY_NAME2);
+    assertThat(validationCatalog.tableExists(tableIdent)).isFalse();
+    assertThat(localInput(stagedManifestList).exists()).isFalse();
+    assertThat(stagedManifests).allSatisfy(path -> assertThat(localInput(path).exists()).isFalse());
+  }
+
+  @TestTemplate
+  void rejectsStaleCreateOrReplaceAfterSameUuidRecreation() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table original = validationCatalog.loadTable(tableIdent);
+    String originalUUID = ((HasTableOperations) original).operations().current().uuid();
+    long originalSnapshotId = original.currentSnapshot().snapshotId();
+
+    Transaction staleReplace =
+        validationCatalog
+            .buildTable(tableIdent, original.schema())
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
+            .createOrReplaceTransaction();
+    Transaction recreatingReplace =
+        validationCatalog
+            .buildTable(tableIdent, original.schema())
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
+            .createOrReplaceTransaction();
+    assertThat(staleReplace.table().snapshot(originalSnapshotId)).isNotNull();
+
+    ExpireSnapshots expiration =
+        recreatingReplace.expireSnapshots().cleanupLevel(ExpireSnapshots.CleanupLevel.NONE);
+    for (Snapshot snapshot : recreatingReplace.table().snapshots()) {
+      expiration.expireSnapshotId(snapshot.snapshotId());
+    }
+    expiration.commit();
+    assertThat(recreatingReplace.table().snapshots()).isEmpty();
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    recreatingReplace.commitTransaction();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table recreated = validationCatalog.loadTable(tableIdent);
+    assertThat(((HasTableOperations) recreated).operations().current().uuid())
+        .isEqualTo(originalUUID);
+    assertThat(recreated.snapshots()).isEmpty();
+    assertThat(recreated.properties())
+        .containsEntry(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2);
+
+    assertThatThrownBy(staleReplace::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("snapshot")
+        .hasMessageContaining(UnitestKMS.MASTER_KEY_NAME2);
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table afterRejection = validationCatalog.loadTable(tableIdent);
+    assertThat(afterRejection.snapshots()).isEmpty();
+    afterRejection
+        .newFastAppend()
+        .appendFile(newDataFile(afterRejection, "same-uuid-recreation.parquet"))
+        .commit();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table afterAppend = validationCatalog.loadTable(tableIdent);
+    Snapshot appendedSnapshot = afterAppend.currentSnapshot();
+    assertThat(planSnapshot(afterAppend, appendedSnapshot.snapshotId())).hasSize(1);
+  }
+
+  @TestTemplate
+  void rejectedEncryptedReplaceCleansStagedMetadata() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    Set<String> retainedManifests =
+        table.currentSnapshot().allManifests(table.io()).stream()
+            .map(manifest -> manifest.path())
+            .collect(Collectors.toSet());
+    Transaction replace =
+        validationCatalog
+            .buildTable(tableIdent, table.schema())
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
+            .replaceTransaction();
+    replace.newFastAppend().appendFile(currentDataFiles(table).get(0)).commit();
+    Snapshot stagedSnapshot = replace.table().currentSnapshot();
+    String stagedManifestList = stagedSnapshot.manifestListLocation();
+    List<String> stagedManifests =
+        stagedSnapshot.allManifests(replace.table().io()).stream()
+            .map(manifest -> manifest.path())
+            .filter(path -> !retainedManifests.contains(path))
+            .collect(Collectors.toList());
+    assertThat(stagedManifests).isNotEmpty();
+
+    assertThatThrownBy(replace::commitTransaction)
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot modify key ID of an encrypted table");
+    assertThat(localInput(stagedManifestList).exists()).isFalse();
+    assertThat(stagedManifests).allSatisfy(path -> assertThat(localInput(path).exists()).isFalse());
+  }
+
+  @TestTemplate
+  void allowsReplaceToCreateWithSameEncryptionKey() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    long retainedSnapshotId = table.currentSnapshot().snapshotId();
+    Transaction replace =
+        validationCatalog
+            .buildTable(tableIdent, table.schema())
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+            .createOrReplaceTransaction();
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    replace.commitTransaction();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    assertThat(reloaded.snapshot(retainedSnapshotId)).isNotNull();
+    assertThat(planSnapshot(reloaded, retainedSnapshotId)).isNotEmpty();
+  }
+
+  @TestTemplate
+  void createTransactionWithTwoAppendsPersistsSnapshotKeys() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table original = validationCatalog.loadTable(tableIdent);
+    Schema schema = original.schema();
+    DataFile file = currentDataFiles(original).get(0);
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+
+    Transaction create =
+        validationCatalog
+            .buildTable(tableIdent, schema)
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+            .createTransaction();
+    create.newFastAppend().appendFile(file).commit();
+    create.newFastAppend().appendFile(file).commit();
+    create.commitTransaction();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    assertThat(reloaded.snapshots()).hasSize(2);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertSnapshotHasEncryptionKeys(reloaded, snapshot);
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
+  }
+
+  @TestTemplate
+  void sameTableTransactionUsesAcceptedEncryptionKey() {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    Transaction transaction = table.newTransaction();
+    transaction
+        .updateProperties()
+        .set(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2)
+        .commit();
+
+    transaction
+        .newFastAppend()
+        .appendFile(newDataFile(transaction.table(), "same-table-authority.parquet"))
+        .commit();
+
+    assertThat(tableKeyId(transaction.table(), transaction.table().currentSnapshot()))
+        .isEqualTo(UnitestKMS.MASTER_KEY_NAME1);
+  }
+
+  @TestTemplate
+  void encryptedTransactionRebaseCleansSupersededManifestList() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    DataFile file = currentDataFiles(table).get(0);
+    Transaction transaction = table.newTransaction();
+    transaction.newFastAppend().appendFile(file).commit();
+    String supersededManifestList = transaction.table().currentSnapshot().manifestListLocation();
+
+    validationCatalog.loadTable(tableIdent).newFastAppend().appendFile(file).commit();
+    transaction.commitTransaction();
+
+    assertThat(localInput(supersededManifestList).exists()).isFalse();
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    Snapshot snapshot = reloaded.currentSnapshot();
+    assertSnapshotHasEncryptionKeys(reloaded, snapshot);
+    assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+  }
+
+  @TestTemplate
+  void rejectedEncryptionPropertyChangeDoesNotPoisonPlaintextTable() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table encrypted = validationCatalog.loadTable(tableIdent);
+    Schema schema = encrypted.schema();
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    Table plaintext =
+        validationCatalog
+            .buildTable(tableIdent, schema)
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .create();
+
+    assertThatThrownBy(
+            () ->
+                plaintext
+                    .updateProperties()
+                    .set(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+                    .commit())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot modify key ID of an encrypted table");
+    assertThat(plaintext.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+    assertThat(plaintext.io()).isNotInstanceOf(EncryptingFileIO.class);
+
+    plaintext
+        .newFastAppend()
+        .appendFile(newDataFile(plaintext, "plain-after-failure.parquet"))
+        .commit();
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    Snapshot snapshot = reloaded.currentSnapshot();
+    assertThat(snapshot.keyId()).isNull();
+    assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+  }
+
+  @TestTemplate
   void retainedEncryptedHandleFollowsPlaintextRecreation() throws IOException {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table retained = validationCatalog.loadTable(tableIdent);
@@ -375,6 +645,139 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThat(snapshot).isNotNull();
     assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
     assertThat(snapshot.keyId()).isNull();
+  }
+
+  @TestTemplate
+  void staleTransactionIoDoesNotMutatePlaintextRecreation() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table retained = validationCatalog.loadTable(tableIdent);
+    Schema schema = retained.schema();
+    Transaction staleTransaction = retained.newTransaction();
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    assertThatThrownBy(retained::refresh)
+        .isInstanceOf(NoSuchTableException.class)
+        .hasMessage("No such table: %s", tableIdent);
+    validationCatalog
+        .buildTable(tableIdent, schema)
+        .withProperty(TableProperties.FORMAT_VERSION, "3")
+        .create();
+    retained.refresh();
+
+    assertThat(staleTransaction.table().encryption())
+        .isNotSameAs(PlaintextEncryptionManager.instance());
+    assertThat(staleTransaction.table().io()).isInstanceOf(EncryptingFileIO.class);
+    assertThat(retained.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+    assertThat(retained.io()).isNotInstanceOf(EncryptingFileIO.class);
+
+    retained
+        .newFastAppend()
+        .appendFile(newDataFile(retained, "plain-after-stale-io.parquet"))
+        .commit();
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    Snapshot snapshot = reloaded.currentSnapshot();
+    assertThat(snapshot.keyId()).isNull();
+    assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+  }
+
+  @TestTemplate
+  void staleTransactionRetainsEncryptionAfterPlaintextRecreation() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table retained = validationCatalog.loadTable(tableIdent);
+    Schema schema = retained.schema();
+    Set<String> retainedManifests =
+        retained.currentSnapshot().allManifests(retained.io()).stream()
+            .map(manifest -> manifest.path())
+            .collect(Collectors.toSet());
+    Transaction staleTransaction = retained.newTransaction();
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    assertThatThrownBy(retained::refresh)
+        .isInstanceOf(NoSuchTableException.class)
+        .hasMessage("No such table: %s", tableIdent);
+    validationCatalog
+        .buildTable(tableIdent, schema)
+        .withProperty(TableProperties.FORMAT_VERSION, "3")
+        .create();
+    retained.refresh();
+
+    staleTransaction.updateProperties().set("stale-property", "value").commit();
+    assertThat(staleTransaction.table().encryption())
+        .isNotSameAs(PlaintextEncryptionManager.instance());
+    assertThat(staleTransaction.table().io()).isInstanceOf(EncryptingFileIO.class);
+
+    staleTransaction
+        .newFastAppend()
+        .appendFile(newDataFile(staleTransaction.table(), "stale-append.parquet"))
+        .commit();
+    Snapshot stagedSnapshot = staleTransaction.table().currentSnapshot();
+    String stagedManifestList = stagedSnapshot.manifestListLocation();
+    List<String> stagedManifests =
+        stagedSnapshot.allManifests(staleTransaction.table().io()).stream()
+            .map(manifest -> manifest.path())
+            .filter(path -> !retainedManifests.contains(path))
+            .collect(Collectors.toList());
+    assertThat(stagedManifests).isNotEmpty();
+    assertThat(tableKeyId(staleTransaction.table(), stagedSnapshot))
+        .isEqualTo(UnitestKMS.MASTER_KEY_NAME1);
+
+    assertThatThrownBy(staleTransaction::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("table UUID does not match");
+    assertThat(localInput(stagedManifestList).exists()).isFalse();
+    assertThat(stagedManifests).allSatisfy(path -> assertThat(localInput(path).exists()).isFalse());
+    assertThat(retainedManifests)
+        .allSatisfy(path -> assertThat(localInput(path).exists()).isTrue());
+  }
+
+  @TestTemplate
+  void staleTransactionCannotCommitAfterPlaintextRecreation() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table retained = validationCatalog.loadTable(tableIdent);
+    Schema schema = retained.schema();
+    Set<String> retainedManifests =
+        retained.currentSnapshot().allManifests(retained.io()).stream()
+            .map(manifest -> manifest.path())
+            .collect(Collectors.toSet());
+    Transaction staleTransaction = retained.newTransaction();
+    staleTransaction.newFastAppend().appendFile(currentDataFiles(retained).get(0)).commit();
+
+    Snapshot stagedSnapshot = staleTransaction.table().currentSnapshot();
+    String stagedManifestList = stagedSnapshot.manifestListLocation();
+    List<String> stagedManifests =
+        stagedSnapshot.allManifests(staleTransaction.table().io()).stream()
+            .map(manifest -> manifest.path())
+            .filter(path -> !retainedManifests.contains(path))
+            .collect(Collectors.toList());
+
+    assertThat(validationCatalog.dropTable(tableIdent, false)).isTrue();
+    assertThatThrownBy(retained::refresh)
+        .isInstanceOf(NoSuchTableException.class)
+        .hasMessage("No such table: %s", tableIdent);
+
+    validationCatalog
+        .buildTable(tableIdent, schema)
+        .withProperty(TableProperties.FORMAT_VERSION, "3")
+        .create();
+    retained.refresh();
+
+    assertThatThrownBy(staleTransaction::commitTransaction)
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("table UUID does not match");
+    assertThat(localInput(stagedManifestList).exists()).isFalse();
+    assertThat(stagedManifests).allSatisfy(path -> assertThat(localInput(path).exists()).isFalse());
+
+    retained
+        .newFastAppend()
+        .appendFile(newDataFile(retained, "plain-after-stale-transaction.parquet"))
+        .commit();
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    Snapshot snapshot = reloaded.currentSnapshot();
+    assertThat(snapshot.keyId()).isNull();
+    assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
   }
 
   @TestTemplate
