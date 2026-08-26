@@ -25,9 +25,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumFileSystem;
@@ -41,11 +48,14 @@ import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.UnitestKMS;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
@@ -63,10 +73,12 @@ import org.junit.jupiter.api.TestTemplate;
 import org.mockito.internal.util.collections.Iterables;
 
 public class TestTableEncryption extends CatalogTestBase {
+  private static final int INTERLEAVING_TIMEOUT_SECONDS = 30;
+
   private static Map<String, String> appendCatalogEncryptionProperties(Map<String, String> props) {
     Map<String, String> newProps = Maps.newHashMap();
     newProps.putAll(props);
-    newProps.put(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getCanonicalName());
+    newProps.put(CatalogProperties.ENCRYPTION_KMS_IMPL, CoordinatedKMS.class.getName());
     return newProps;
   }
 
@@ -83,6 +95,7 @@ public class TestTableEncryption extends CatalogTestBase {
 
   @BeforeEach
   public void createTables() {
+    CoordinatedKMS.reset();
     sql(
         "CREATE TABLE %s (id bigint, data string, float float) USING iceberg "
             + "TBLPROPERTIES ( "
@@ -94,6 +107,7 @@ public class TestTableEncryption extends CatalogTestBase {
 
   @AfterEach
   public void removeTables() {
+    CoordinatedKMS.reset();
     sql("DROP TABLE IF EXISTS %s", tableName);
   }
 
@@ -109,6 +123,27 @@ public class TestTableEncryption extends CatalogTestBase {
     return Streams.stream(table.newScan().planFiles())
         .map(FileScanTask::file)
         .collect(Collectors.toList());
+  }
+
+  private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(snapshotId).planFiles()) {
+      return ImmutableList.copyOf(tasks);
+    }
+  }
+
+  private static void assertSnapshotHasEncryptionKeys(Table table, Snapshot snapshot) {
+    assertThat(snapshot.keyId()).as("manifest list key ID").isNotNull();
+    TableMetadata metadata = ((HasTableOperations) table).operations().current();
+    EncryptedKey manifestListKey =
+        metadata.encryptionKeys().stream()
+            .filter(key -> key.keyId().equals(snapshot.keyId()))
+            .findFirst()
+            .orElse(null);
+    assertThat(manifestListKey).as("manifest list key").isNotNull();
+    assertThat(metadata.encryptionKeys())
+        .as("key encryption key")
+        .anyMatch(key -> key.keyId().equals(manifestListKey.encryptedById()));
   }
 
   @TestTemplate
@@ -160,6 +195,60 @@ public class TestTableEncryption extends CatalogTestBase {
     transaction.commitTransaction();
 
     assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 2);
+  }
+
+  @TestTemplate
+  void concurrentAppendsPreserveManifestListKeys() throws Exception {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    List<DataFile> initialFiles = currentDataFiles(table);
+    int initialSnapshotCount = (int) Streams.stream(table.snapshots()).count();
+
+    CoordinatedKMS.blockNextTwoUnwraps();
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<?> firstAppend =
+          executor.submit(() -> table.newFastAppend().appendFile(initialFiles.get(0)).commit());
+      awaitUnwrapOrAppendFailure(firstAppend, CoordinatedKMS::awaitFirstUnwrap);
+
+      Future<?> secondAppend =
+          executor.submit(() -> table.newFastAppend().appendFile(initialFiles.get(0)).commit());
+      awaitUnwrapOrAppendFailure(secondAppend, CoordinatedKMS::awaitSecondUnwrap);
+
+      // The second refresh replaced the shared manager while the first writer still owns the old
+      // one.
+      CoordinatedKMS.releaseFirstUnwrap();
+      firstAppend.get(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+      CoordinatedKMS.releaseSecondUnwrap();
+      secondAppend.get(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    } finally {
+      CoordinatedKMS.reset();
+      executor.shutdownNow();
+      assertThat(executor.awaitTermination(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+          .isTrue();
+    }
+
+    validationCatalog.invalidateTable(tableIdent);
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    assertThat(reloaded.snapshots()).hasSize(initialSnapshotCount + 2);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertSnapshotHasEncryptionKeys(reloaded, snapshot);
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
+  }
+
+  private static void awaitUnwrapOrAppendFailure(Future<?> append, Runnable awaitUnwrap)
+      throws Exception {
+    try {
+      awaitUnwrap.run();
+    } catch (AssertionError e) {
+      if (append.isDone()) {
+        append.get();
+      }
+
+      throw e;
+    }
   }
 
   // See CatalogTests#testConcurrentReplaceTransactions
@@ -371,5 +460,107 @@ public class TestTableEncryption extends CatalogTestBase {
     stream.read(magic);
     stream.close();
     assertThat(magic).isEqualTo(Ciphers.GCM_STREAM_MAGIC_STRING.getBytes(StandardCharsets.UTF_8));
+  }
+
+  public static class CoordinatedKMS extends UnitestKMS {
+    private static volatile UnwrapInterleaving interleaving;
+
+    static void blockNextTwoUnwraps() {
+      if (interleaving != null) {
+        throw new IllegalStateException("An unwrap interleaving is already active");
+      }
+
+      interleaving = new UnwrapInterleaving();
+    }
+
+    static void awaitFirstUnwrap() {
+      currentInterleaving().awaitFirstUnwrap();
+    }
+
+    static void awaitSecondUnwrap() {
+      currentInterleaving().awaitSecondUnwrap();
+    }
+
+    static void releaseFirstUnwrap() {
+      currentInterleaving().releaseFirstUnwrap();
+    }
+
+    static void releaseSecondUnwrap() {
+      currentInterleaving().releaseSecondUnwrap();
+    }
+
+    static void reset() {
+      UnwrapInterleaving current = interleaving;
+      if (current != null) {
+        current.releaseFirstUnwrap();
+        current.releaseSecondUnwrap();
+        interleaving = null;
+      }
+    }
+
+    @Override
+    public ByteBuffer unwrapKey(ByteBuffer wrappedKey, String wrappingKeyId) {
+      UnwrapInterleaving current = interleaving;
+      if (current != null) {
+        current.blockNextUnwrap();
+      }
+
+      return super.unwrapKey(wrappedKey, wrappingKeyId);
+    }
+
+    private static UnwrapInterleaving currentInterleaving() {
+      UnwrapInterleaving current = interleaving;
+      if (current == null) {
+        throw new IllegalStateException("No unwrap interleaving is active");
+      }
+
+      return current;
+    }
+  }
+
+  private static class UnwrapInterleaving {
+    private final AtomicInteger unwrapCalls = new AtomicInteger();
+    private final CountDownLatch firstUnwrapEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseFirstUnwrap = new CountDownLatch(1);
+    private final CountDownLatch secondUnwrapEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseSecondUnwrap = new CountDownLatch(1);
+
+    private void blockNextUnwrap() {
+      int call = unwrapCalls.incrementAndGet();
+      if (call == 1) {
+        firstUnwrapEntered.countDown();
+        await(releaseFirstUnwrap, "release the first key unwrap");
+      } else if (call == 2) {
+        secondUnwrapEntered.countDown();
+        await(releaseSecondUnwrap, "release the second key unwrap");
+      }
+    }
+
+    private void awaitFirstUnwrap() {
+      await(firstUnwrapEntered, "the first key unwrap");
+    }
+
+    private void awaitSecondUnwrap() {
+      await(secondUnwrapEntered, "the second key unwrap");
+    }
+
+    private void releaseFirstUnwrap() {
+      releaseFirstUnwrap.countDown();
+    }
+
+    private void releaseSecondUnwrap() {
+      releaseSecondUnwrap.countDown();
+    }
+
+    private static void await(CountDownLatch latch, String action) {
+      try {
+        if (!latch.await(INTERLEAVING_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+          throw new AssertionError("Timed out waiting for " + action);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("Interrupted while waiting for " + action, e);
+      }
+    }
   }
 }
