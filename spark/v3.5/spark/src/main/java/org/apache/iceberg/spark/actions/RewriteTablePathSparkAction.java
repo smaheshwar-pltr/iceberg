@@ -62,6 +62,7 @@ import org.apache.iceberg.data.orc.GenericOrcWriter;
 import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.deletes.PositionDeleteWriter;
 import org.apache.iceberg.encryption.EncryptedFiles;
+import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.formats.FormatModelRegistry;
 import org.apache.iceberg.io.CloseableIterable;
@@ -198,6 +199,9 @@ public class RewriteTablePathSparkAction extends BaseSparkAction<RewriteTablePat
         !sourcePrefix.equals(targetPrefix),
         "Source prefix cannot be the same as target prefix (%s)",
         sourcePrefix);
+    Preconditions.checkArgument(
+        !(table.io() instanceof EncryptingFileIO),
+        "Cannot rewrite table paths for encrypted tables");
 
     validateAndSetEndVersion();
     validateAndSetStartVersion();
