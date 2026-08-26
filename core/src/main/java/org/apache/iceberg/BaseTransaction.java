@@ -39,6 +39,7 @@ import org.apache.iceberg.exceptions.CleanableFailure;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.metrics.LoggingMetricsReporter;
@@ -65,7 +66,7 @@ public class BaseTransaction implements Transaction {
   private final String tableName;
   private final TableOperations ops;
   private final TransactionTable transactionTable;
-  private final TableOperations transactionOps;
+  private final TransactionTableOperations transactionOps;
   private final List<PendingUpdate> updates;
   private final Set<String> deletedFiles =
       Sets.newHashSet(); // keep track of files deleted in the most recent commit
@@ -93,7 +94,7 @@ public class BaseTransaction implements Transaction {
     this.current = start;
     this.transactionOps = new TransactionTableOperations();
     this.updates = Lists.newArrayList();
-    this.base = ops.current();
+    this.base = type == TransactionType.SIMPLE ? start : ops.current();
     this.type = type;
     this.hasLastOpCommitted = true;
     this.reporter = reporter;
@@ -311,21 +312,26 @@ public class BaseTransaction implements Transaction {
           .onlyRetryOn(CommitFailedException.class)
           .run(
               underlyingOps -> {
+                TableMetadata refreshed;
                 try {
-                  underlyingOps.refresh();
+                  refreshed = underlyingOps.refresh();
                 } catch (NoSuchTableException e) {
                   if (!orCreate) {
                     throw e;
                   }
+
+                  refreshed = null;
+                } catch (IllegalStateException e) {
+                  throw new ValidationException(e, "Cannot commit transaction: %s", e.getMessage());
                 }
 
                 // because this is a replace table, it will always completely replace the table
                 // metadata. even if it was just updated.
-                if (base != underlyingOps.current()) {
-                  this.base = underlyingOps.current(); // just refreshed
+                if (base != refreshed) {
+                  this.base = refreshed;
                 }
 
-                underlyingOps.commit(base, current);
+                underlyingOps.commit(refreshed, current);
               });
 
     } catch (CommitStateUnknownException e) {
@@ -399,7 +405,7 @@ public class BaseTransaction implements Transaction {
         }
       }
 
-      Set<String> committedFiles = committedFiles(ops.io(), newSnapshots);
+      Set<String> committedFiles = committedFiles(transactionOps.io(), newSnapshots);
       // delete all the files that were deleted in the most recent set of operation commits
       Set<String> uncommittedFiles =
           deletedFiles.stream()
@@ -436,10 +442,28 @@ public class BaseTransaction implements Transaction {
   }
 
   private void applyUpdates(TableOperations underlyingOps) {
-    if (base != underlyingOps.refresh()) {
-      // use refreshed the metadata
-      this.base = underlyingOps.current();
-      this.current = underlyingOps.current();
+    TableMetadata refreshed;
+    try {
+      refreshed = underlyingOps.refresh();
+    } catch (IllegalStateException e) {
+      // Refresh failed before the underlying commit, so staged transaction files are safe to clean.
+      throw new ValidationException(e, "Cannot commit transaction: %s", e.getMessage());
+    }
+
+    if (base != refreshed) {
+      if (base != null && refreshed != null) {
+        String baseUUID = base.uuid();
+        String refreshedUUID = refreshed.uuid();
+        ValidationException.check(
+            baseUUID == null || baseUUID.equals(refreshedUUID),
+            "Cannot commit transaction: table UUID does not match: base=%s != refreshed=%s",
+            baseUUID,
+            refreshedUUID);
+      }
+
+      this.base = refreshed;
+      this.current = refreshed;
+      transactionOps.resetTempOps();
       for (PendingUpdate update : updates) {
         // re-commit each update in the chain to apply it and update current
         try {
@@ -516,6 +540,10 @@ public class BaseTransaction implements Transaction {
     @Override
     public long newSnapshotId() {
       return tempOps.newSnapshotId();
+    }
+
+    private void resetTempOps() {
+      this.tempOps = ops.temp(current);
     }
   }
 
