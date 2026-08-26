@@ -46,8 +46,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.events.CreateSnapshotEvent;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.exceptions.CleanableFailure;
@@ -114,6 +117,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
   private TableMetadata base;
+  private List<EncryptedKey> manifestListKeys = List.of();
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
   private SnapshotAncestryValidator snapshotAncestryValidator =
@@ -291,6 +295,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
   @Override
   public Snapshot apply() {
+    this.manifestListKeys = List.of();
     refresh();
     Snapshot parentSnapshot = SnapshotUtil.latestSnapshot(base, targetBranch);
 
@@ -303,11 +308,12 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
+    EncryptionManager encryption = ops.encryption();
     ManifestListWriter writer =
         ManifestLists.write(
             ops.current().formatVersion(),
             manifestList,
-            ops.encryption(),
+            encryption,
             snapshotId(),
             parentSnapshotId,
             sequenceNumber,
@@ -354,6 +360,26 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
           replacedRecords);
     }
 
+    ManifestListFile manifestListFile = writer.toManifestListFile();
+    if (manifestListFile.encryptionKeyID() != null) {
+      String manifestListKeyID = manifestListFile.encryptionKeyID();
+      Map<String, EncryptedKey> encryptionKeys = EncryptionUtil.encryptionKeys(encryption);
+      EncryptedKey manifestListKey = encryptionKeys.get(manifestListKeyID);
+      Preconditions.checkState(
+          manifestListKey != null,
+          "Cannot find manifest list key metadata with id %s",
+          manifestListKeyID);
+
+      String keyEncryptionKeyID = manifestListKey.encryptedById();
+      EncryptedKey keyEncryptionKey = encryptionKeys.get(keyEncryptionKeyID);
+      Preconditions.checkState(
+          keyEncryptionKey != null,
+          "Cannot find key encryption key with id %s",
+          keyEncryptionKeyID);
+
+      this.manifestListKeys = List.of(keyEncryptionKey, manifestListKey);
+    }
+
     return new BaseSnapshot(
         sequenceNumber,
         snapshotId(),
@@ -365,7 +391,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         manifestList.location(),
         nextRowId,
         assignedRows,
-        writer.toManifestListFile().encryptionKeyID());
+        manifestListFile.encryptionKeyID());
   }
 
   private void runValidations(Snapshot parentSnapshot) {
@@ -499,10 +525,13 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
                   if (base.snapshot(newSnapshot.snapshotId()) != null) {
                     // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
-                  } else if (stageOnly) {
-                    update.addSnapshot(newSnapshot);
                   } else {
-                    update.setBranchSnapshot(newSnapshot, targetBranch);
+                    manifestListKeys.forEach(update::addEncryptionKey);
+                    if (stageOnly) {
+                      update.addSnapshot(newSnapshot);
+                    } else {
+                      update.setBranchSnapshot(newSnapshot, targetBranch);
+                    }
                   }
 
                   TableMetadata updated = update.build();
