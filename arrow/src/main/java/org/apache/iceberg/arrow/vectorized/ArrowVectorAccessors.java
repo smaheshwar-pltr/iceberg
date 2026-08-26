@@ -22,7 +22,7 @@ import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.function.Supplier;
-import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.iceberg.arrow.vectorized.GenericArrowVectorAccessorFactory.DecimalFactory;
 import org.apache.iceberg.arrow.vectorized.GenericArrowVectorAccessorFactory.StringFactory;
 
@@ -61,8 +61,17 @@ final class ArrowVectorAccessors {
     }
 
     @Override
-    public String ofRow(VarCharVector vector, int rowId) {
-      return ofBytes(vector.get(rowId));
+    public String ofRow(LargeVarCharVector vector, int rowId) {
+      // Read straight from the offset and data buffers rather than calling LargeVarCharVector#get.
+      // The large-vector get always consults the Arrow validity buffer, which Iceberg may not
+      // maintain (nulls are tracked via NullabilityHolder and filtered out by the caller), so a
+      // direct read is both correct and independent of the null-checking configuration.
+      long start = vector.getOffsetBuffer().getLong((long) rowId * LargeVarCharVector.OFFSET_WIDTH);
+      long end =
+          vector.getOffsetBuffer().getLong((long) (rowId + 1) * LargeVarCharVector.OFFSET_WIDTH);
+      byte[] bytes = new byte[(int) (end - start)];
+      vector.getDataBuffer().getBytes(start, bytes, 0, bytes.length);
+      return ofBytes(bytes);
     }
 
     @Override

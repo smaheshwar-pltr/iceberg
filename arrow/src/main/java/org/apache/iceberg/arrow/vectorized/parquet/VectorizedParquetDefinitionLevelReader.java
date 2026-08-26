@@ -21,7 +21,7 @@ package org.apache.iceberg.arrow.vectorized.parquet;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import org.apache.arrow.memory.ArrowBuf;
-import org.apache.arrow.vector.BaseVariableWidthVector;
+import org.apache.arrow.vector.BaseLargeVariableWidthVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.BitVectorHelper;
 import org.apache.arrow.vector.FieldVector;
@@ -595,8 +595,12 @@ public final class VectorizedParquetDefinitionLevelReader
       ByteBuffer buffer = valuesReader.readBinary(len).toByteBuffer();
       // Calling setValueLengthSafe takes care of allocating a larger buffer if
       // running out of space.
-      ((BaseVariableWidthVector) vector).setValueLengthSafe(idx, len);
-      int startOffset = ((BaseVariableWidthVector) vector).getStartOffset(idx);
+      ((BaseLargeVariableWidthVector) vector).setValueLengthSafe(idx, len);
+      // Read the 64-bit start offset directly from the offset buffer. getStartOffset is not public
+      // on the large-vector class, and the offset must be read after setValueLengthSafe since the
+      // buffer may have been reallocated.
+      long startOffset =
+          vector.getOffsetBuffer().getLong((long) idx * BaseLargeVariableWidthVector.OFFSET_WIDTH);
       // It is possible that the data buffer was reallocated. So it is important to
       // not cache the data buffer reference but instead use vector.getDataBuffer().
       vector.getDataBuffer().setBytes(startOffset, buffer);
@@ -622,7 +626,7 @@ public final class VectorizedParquetDefinitionLevelReader
             .varWidthBinaryDictEncodedReader()
             .nextBatch(vector, idx, numValues, dict, holder, typeWidth);
       } else if (Mode.PACKED.equals(mode)) {
-        ((BaseVariableWidthVector) vector)
+        ((BaseLargeVariableWidthVector) vector)
             .setSafe(idx, dict.decodeToBinary(reader.readInteger()).getBytesUnsafe());
       }
     }

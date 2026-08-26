@@ -53,13 +53,13 @@ import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarBinaryVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeStampMicroTZVector;
 import org.apache.arrow.vector.TimeStampMicroVector;
 import org.apache.arrow.vector.TimeStampNanoTZVector;
 import org.apache.arrow.vector.TimeStampNanoVector;
-import org.apache.arrow.vector.VarBinaryVector;
-import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.Types.MinorType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -1344,12 +1344,17 @@ public class TestArrowReader {
                         org.apache.arrow.vector.types.TimeUnit.MICROSECOND, "UTC"),
                     null),
                 null),
-            new Field("string", new FieldType(false, MinorType.VARCHAR.getType(), null), null),
+            new Field("string", new FieldType(false, MinorType.LARGEVARCHAR.getType(), null), null),
             new Field(
-                "string_nullable", new FieldType(true, MinorType.VARCHAR.getType(), null), null),
-            new Field("bytes", new FieldType(false, MinorType.VARBINARY.getType(), null), null),
+                "string_nullable",
+                new FieldType(true, MinorType.LARGEVARCHAR.getType(), null),
+                null),
             new Field(
-                "bytes_nullable", new FieldType(true, MinorType.VARBINARY.getType(), null), null),
+                "bytes", new FieldType(false, MinorType.LARGEVARBINARY.getType(), null), null),
+            new Field(
+                "bytes_nullable",
+                new FieldType(true, MinorType.LARGEVARBINARY.getType(), null),
+                null),
             new Field("date", new FieldType(false, MinorType.DATEDAY.getType(), null), null),
             new Field(
                 "date_nullable", new FieldType(true, MinorType.DATEDAY.getType(), null), null),
@@ -1571,10 +1576,10 @@ public class TestArrowReader {
     assertEqualsForField(root, columnSet, "double_nullable", Float8Vector.class);
     assertEqualsForField(root, columnSet, "timestamp_tz", TimeStampMicroTZVector.class);
     assertEqualsForField(root, columnSet, "timestamp_tz_nullable", TimeStampMicroTZVector.class);
-    assertEqualsForField(root, columnSet, "string", VarCharVector.class);
-    assertEqualsForField(root, columnSet, "string_nullable", VarCharVector.class);
-    assertEqualsForField(root, columnSet, "bytes", VarBinaryVector.class);
-    assertEqualsForField(root, columnSet, "bytes_nullable", VarBinaryVector.class);
+    assertEqualsForField(root, columnSet, "string", LargeVarCharVector.class);
+    assertEqualsForField(root, columnSet, "string_nullable", LargeVarCharVector.class);
+    assertEqualsForField(root, columnSet, "bytes", LargeVarBinaryVector.class);
+    assertEqualsForField(root, columnSet, "bytes_nullable", LargeVarBinaryVector.class);
     assertEqualsForField(root, columnSet, "date", DateDayVector.class);
     assertEqualsForField(root, columnSet, "date_nullable", DateDayVector.class);
     assertEqualsForField(root, columnSet, "time", TimeMicroVector.class);
@@ -1729,7 +1734,7 @@ public class TestArrowReader {
         columnSet,
         "string",
         (records, i) -> records.get(i).getField("string"),
-        (vector, i) -> new String(((VarCharVector) vector).get(i), StandardCharsets.UTF_8));
+        (vector, i) -> new String(((LargeVarCharVector) vector).get(i), StandardCharsets.UTF_8));
     checkVectorValues(
         expectedNumRows,
         expectedRows,
@@ -1737,7 +1742,7 @@ public class TestArrowReader {
         columnSet,
         "string_nullable",
         (records, i) -> records.get(i).getField("string_nullable"),
-        (vector, i) -> new String(((VarCharVector) vector).get(i), StandardCharsets.UTF_8));
+        (vector, i) -> new String(((LargeVarCharVector) vector).get(i), StandardCharsets.UTF_8));
     checkVectorValues(
         expectedNumRows,
         expectedRows,
@@ -1745,7 +1750,7 @@ public class TestArrowReader {
         columnSet,
         "bytes",
         (records, i) -> records.get(i).getField("bytes"),
-        (vector, i) -> ByteBuffer.wrap(((VarBinaryVector) vector).get(i)));
+        (vector, i) -> ByteBuffer.wrap(((LargeVarBinaryVector) vector).get(i)));
     checkVectorValues(
         expectedNumRows,
         expectedRows,
@@ -1753,7 +1758,7 @@ public class TestArrowReader {
         columnSet,
         "bytes_nullable",
         (records, i) -> records.get(i).getField("bytes_nullable"),
-        (vector, i) -> ByteBuffer.wrap(((VarBinaryVector) vector).get(i)));
+        (vector, i) -> ByteBuffer.wrap(((LargeVarBinaryVector) vector).get(i)));
     checkVectorValues(
         expectedNumRows,
         expectedRows,

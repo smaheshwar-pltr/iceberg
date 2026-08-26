@@ -377,8 +377,8 @@ public class TestParquetVectorizedReads extends AvroDataTestBase {
 
   @Test
   public void testVectorizedReadsWithReallocatedArrowBuffers() throws IOException {
-    // With a batch size of 2, 256 bytes are allocated in the VarCharVector. By adding strings of
-    // length 512, the vector will need to be reallocated for storing the batch.
+    // With a batch size of 2, 256 bytes are allocated in the LargeVarCharVector. By adding strings
+    // of length 512, the vector will need to be reallocated for storing the batch.
     Schema schema =
         new Schema(
             Lists.newArrayList(
