@@ -41,11 +41,13 @@ import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.UnitestKMS;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
@@ -109,6 +111,13 @@ public class TestTableEncryption extends CatalogTestBase {
     return Streams.stream(table.newScan().planFiles())
         .map(FileScanTask::file)
         .collect(Collectors.toList());
+  }
+
+  private static List<FileScanTask> planSnapshot(Table table, long snapshotId) throws IOException {
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().useSnapshot(snapshotId).planFiles()) {
+      return ImmutableList.copyOf(tasks);
+    }
   }
 
   @TestTemplate
@@ -192,6 +201,28 @@ public class TestTableEncryption extends CatalogTestBase {
 
     Table afterSecondReplace = validationCatalog.loadTable(tableIdent);
     assertThat(currentDataFiles(afterSecondReplace)).hasSize(1);
+  }
+
+  @TestTemplate
+  public void testTransactionInterleavedWithDirectCommitOnSharedTable() throws IOException {
+    validationCatalog.initialize(catalogName, catalogConfig);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    DataFile file = currentDataFiles(table).get(0);
+
+    Transaction transaction = table.newTransaction();
+    transaction.newFastAppend().appendFile(file).commit();
+
+    // A direct commit on the same instance lands between the transaction's operations.
+    table.newFastAppend().appendFile(file).commit();
+
+    transaction.newFastAppend().appendFile(file).commit();
+    transaction.commitTransaction();
+
+    Table reloaded = validationCatalog.loadTable(tableIdent);
+    for (Snapshot snapshot : reloaded.snapshots()) {
+      assertThat(planSnapshot(reloaded, snapshot.snapshotId())).isNotEmpty();
+    }
   }
 
   @TestTemplate
