@@ -32,6 +32,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
 
 public class TestEncryptionUtil {
+
   @Test
   public void testClassLoader()
       throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
@@ -67,6 +68,35 @@ public class TestEncryptionUtil {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage(
             "Cannot set both KMS type (aws) and KMS impl (org.apache.iceberg.aws.AwsKeyManagementClient)");
+  }
+
+  @Test
+  public void returnsMutableDetachedKeySnapshot() {
+    StandardEncryptionManager manager =
+        EncryptionTestHelpers.createStandardEncryptionManager(new UnitestKMS());
+    String manifestListKeyId =
+        manager.addManifestListKeyMetadata(EncryptionTestHelpers.keyMetadata());
+    Map<String, EncryptedKey> snapshot = EncryptionUtil.encryptionKeys(manager);
+    EncryptedKey manifestListKey = snapshot.get(manifestListKeyId);
+    EncryptedKey keyEncryptionKey = snapshot.get(manifestListKey.encryptedById());
+    byte metadataByte = manifestListKey.encryptedKeyMetadata().get(0);
+    String timestamp = keyEncryptionKey.properties().get(StandardEncryptionManager.KEY_TIMESTAMP);
+
+    manifestListKey.encryptedKeyMetadata().put(0, (byte) (metadataByte + 1));
+    keyEncryptionKey.properties().put(StandardEncryptionManager.KEY_TIMESTAMP, "changed");
+    snapshot.clear();
+
+    Map<String, EncryptedKey> current = EncryptionUtil.encryptionKeys(manager);
+    assertThat(snapshot).isEmpty();
+    assertThat(current).hasSize(2);
+    assertThat(current.get(manifestListKeyId).encryptedKeyMetadata().get(0))
+        .isEqualTo(metadataByte);
+    assertThat(
+            current
+                .get(manifestListKey.encryptedById())
+                .properties()
+                .get(StandardEncryptionManager.KEY_TIMESTAMP))
+        .isEqualTo(timestamp);
   }
 
   static class UnitTestCustomClassLoader extends ClassLoader {

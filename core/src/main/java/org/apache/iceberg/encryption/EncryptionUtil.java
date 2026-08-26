@@ -173,12 +173,17 @@ public class EncryptionUtil {
     return ByteBuffer.wrap(decryptedKeyMetadata);
   }
 
+  /**
+   * Returns a mutable, point-in-time copy of an encryption manager's keys.
+   *
+   * <p>Changes to the returned map or keys do not affect the manager.
+   */
   public static Map<String, EncryptedKey> encryptionKeys(EncryptionManager em) {
     Preconditions.checkState(
         em instanceof StandardEncryptionManager,
         "Retrieving encryption keys requires a StandardEncryptionManager");
     StandardEncryptionManager sem = (StandardEncryptionManager) em;
-    return sem.encryptionKeys();
+    return sem.copyEncryptionKeys();
   }
 
   /**

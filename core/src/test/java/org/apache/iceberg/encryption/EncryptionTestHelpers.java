@@ -40,6 +40,16 @@ public class EncryptionTestHelpers {
         List.of(), tableProperties, EncryptionUtil.createKmsClient(catalogProperties));
   }
 
+  public static StandardEncryptionManager createStandardEncryptionManager(UnitestKMS kms) {
+    kms.initialize(Map.of());
+    kms.masterKeys = Maps.newHashMap(kms.masterKeys);
+    return new StandardEncryptionManager(List.of(), UnitestKMS.MASTER_KEY_NAME1, 16, kms);
+  }
+
+  public static NativeEncryptionKeyMetadata keyMetadata() {
+    return new StandardKeyMetadata(new byte[16], new byte[16]);
+  }
+
   public static String keyEncryptionKeyID(EncryptionManager em) {
     Preconditions.checkState(
         em instanceof StandardEncryptionManager,
