@@ -33,12 +33,21 @@ import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -58,31 +67,45 @@ import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.MetadataUpdate;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotParser;
+import org.apache.iceberg.SnapshotRef;
+import org.apache.iceberg.SnapshotRefType;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.SortOrderParser;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
+import org.apache.iceberg.UpdateRequirements;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.CatalogTests;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.BaseEncryptedKey;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
+import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.rest.CatalogHandlers;
+import org.apache.iceberg.rest.requests.UpdateTableRequest;
 import org.apache.iceberg.transforms.Transform;
 import org.apache.iceberg.transforms.Transforms;
 import org.apache.iceberg.types.Types;
@@ -94,6 +117,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -1286,6 +1310,219 @@ public class TestHiveCatalog extends CatalogTests<HiveCatalog> {
     }
   }
 
+  @ParameterizedTest
+  @EnumSource(IncompatibleCreateTransition.class)
+  void rejectsIncompatibleHistoricalSnapshotBeforePersistence(
+      IncompatibleCreateTransition transition) throws TException, InterruptedException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "invalid_encrypted_create");
+    FileIO fileIO = mock(FileIO.class);
+    HiveTableOperations operations =
+        spy(
+            new HiveTableOperations(
+                catalog.getConf(),
+                catalog.clientPool(),
+                fileIO,
+                new UnitestKMS(),
+                catalog.name(),
+                DB_NAME,
+                identifier.name()));
+    TableMetadata metadata = incompatibleCreateMetadata(transition);
+
+    assertThatThrownBy(() -> operations.commit(null, metadata))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("snapshot 1");
+    verify(fileIO, never()).newOutputFile(anyString());
+    verify(operations, never()).persistTable(any(), anyBoolean(), any());
+    assertThat(catalog.tableExists(identifier)).isFalse();
+  }
+
+  @Test
+  void rejectsRestSnapshotReplacementWithReusedId() throws IOException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "reused_snapshot_id");
+    HiveCatalog encryptionCatalog =
+        initCatalog(
+            "reused-snapshot-id",
+            ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()));
+
+    try {
+      TableMetadata accepted = createEncryptedSnapshotTable(encryptionCatalog, identifier);
+      List<MetadataUpdate> updates =
+          List.of(
+              new MetadataUpdate.RemoveSnapshots(1L),
+              new MetadataUpdate.AddSnapshot(
+                  snapshot(1L, null, "a-mlk", "file:/replacement-manifest-list-1.avro")),
+              new MetadataUpdate.SetSnapshotRef(
+                  SnapshotRef.MAIN_BRANCH, 1L, SnapshotRefType.BRANCH, null, null, null));
+      UpdateTableRequest request =
+          new UpdateTableRequest(UpdateRequirements.forUpdateTable(accepted, updates), updates);
+
+      assertThatThrownBy(() -> CatalogHandlers.updateTable(encryptionCatalog, identifier, request))
+          .isInstanceOf(ValidationException.class)
+          .hasMessageContaining("snapshot 1")
+          .hasMessageContaining(UnitestKMS.MASTER_KEY_NAME1);
+
+      TableMetadata reloaded = encryptionCatalog.newTableOps(identifier).refresh();
+      assertThat(reloaded.currentSnapshot().manifestListLocation())
+          .isEqualTo("file:/manifest-list-1.avro");
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, false);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @Test
+  void rejectsRestEncryptionKeyReplacementWithReusedId() throws IOException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "reused_encryption_key_id");
+    HiveCatalog encryptionCatalog =
+        initCatalog(
+            "reused-encryption-key-id",
+            ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()));
+
+    try {
+      TableMetadata accepted = createEncryptedSnapshotTable(encryptionCatalog, identifier);
+      List<MetadataUpdate> updates =
+          List.of(
+              new MetadataUpdate.RemoveEncryptionKey("a-kek"),
+              new MetadataUpdate.AddEncryptionKey(
+                  new BaseEncryptedKey(
+                      "a-kek",
+                      ByteBuffer.wrap(new byte[] {9}),
+                      UnitestKMS.MASTER_KEY_NAME1,
+                      Map.of())));
+      UpdateTableRequest request =
+          new UpdateTableRequest(UpdateRequirements.forUpdateTable(accepted, updates), updates);
+
+      assertThatThrownBy(() -> CatalogHandlers.updateTable(encryptionCatalog, identifier, request))
+          .isInstanceOf(ValidationException.class)
+          .hasMessageContaining("key encryption key a-kek")
+          .hasMessageContaining(UnitestKMS.MASTER_KEY_NAME1);
+
+      TableMetadata reloaded = encryptionCatalog.newTableOps(identifier).refresh();
+      assertThat(reloaded.encryptionKeys())
+          .filteredOn(key -> "a-kek".equals(key.keyId()))
+          .singleElement()
+          .satisfies(
+              key -> {
+                assertThat(key.encryptedKeyMetadata()).isEqualTo(ByteBuffer.wrap(new byte[] {2}));
+                assertThat(key.encryptedById()).isEqualTo(UnitestKMS.MASTER_KEY_NAME1);
+              });
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, false);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @Test
+  void rejectsRollbackToGrandfatheredIncompatibleSnapshot() throws IOException, TException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "incompatible_rollback");
+    HiveCatalog encryptionCatalog =
+        initCatalog(
+            "incompatible-rollback",
+            ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()));
+
+    try {
+      Snapshot incompatible = snapshot(2L, null, "b-mlk");
+      Snapshot valid = snapshot(3L, 2L, "a-mlk");
+      Table table =
+          loadTableWithGrandfatheredSnapshots(
+              encryptionCatalog,
+              identifier,
+              List.of(incompatible, valid),
+              valid.snapshotId(),
+              Map.of());
+
+      assertThatThrownBy(
+              () -> table.manageSnapshots().rollbackTo(incompatible.snapshotId()).commit())
+          .isInstanceOf(ValidationException.class)
+          .hasMessageContaining("snapshot 2")
+          .hasMessageContaining(UnitestKMS.MASTER_KEY_NAME1);
+
+      encryptionCatalog.invalidateTable(identifier);
+      assertThat(encryptionCatalog.loadTable(identifier).currentSnapshot().snapshotId())
+          .isEqualTo(valid.snapshotId());
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, false);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @Test
+  void rejectsFastForwardToGrandfatheredIncompatibleSnapshot() throws IOException, TException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "incompatible_fast_forward");
+    HiveCatalog encryptionCatalog =
+        initCatalog(
+            "incompatible-fast-forward",
+            ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()));
+
+    try {
+      Snapshot valid = snapshot(2L, null, "a-mlk");
+      Snapshot incompatible = snapshot(3L, 2L, "b-mlk");
+      Table table =
+          loadTableWithGrandfatheredSnapshots(
+              encryptionCatalog,
+              identifier,
+              List.of(valid, incompatible),
+              valid.snapshotId(),
+              Map.of("incompatible", SnapshotRef.branchBuilder(incompatible.snapshotId()).build()));
+
+      assertThatThrownBy(
+              () ->
+                  table
+                      .manageSnapshots()
+                      .fastForwardBranch(SnapshotRef.MAIN_BRANCH, "incompatible")
+                      .commit())
+          .isInstanceOf(ValidationException.class)
+          .hasMessageContaining("snapshot 3")
+          .hasMessageContaining(UnitestKMS.MASTER_KEY_NAME1);
+
+      encryptionCatalog.invalidateTable(identifier);
+      assertThat(encryptionCatalog.loadTable(identifier).currentSnapshot().snapshotId())
+          .isEqualTo(valid.snapshotId());
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, false);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
+  @Test
+  void encryptedCreateReturnsTableWithImmediateEncryptionState() throws IOException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "immediate_encrypted_create");
+    HiveCatalog encryptionCatalog =
+        initCatalog(
+            "encrypted",
+            ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()));
+
+    try {
+      Table created =
+          encryptionCatalog
+              .buildTable(identifier, getTestSchema())
+              .withProperty(TableProperties.FORMAT_VERSION, "3")
+              .withProperty(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+              .create();
+
+      assertThat(created.encryption()).isNotSameAs(PlaintextEncryptionManager.instance());
+      assertThat(created.io()).isInstanceOf(EncryptingFileIO.class);
+    } finally {
+      try {
+        encryptionCatalog.dropTable(identifier, true);
+      } finally {
+        encryptionCatalog.close();
+      }
+    }
+  }
+
   @Test
   public void testListTablesFiltersOutNonIcebergTables() throws TException {
     Namespace ns = Namespace.of(DB_NAME);
@@ -1319,6 +1556,156 @@ public class TestHiveCatalog extends CatalogTests<HiveCatalog> {
     } finally {
       catalog.dropTable(t1);
       catalog.dropTable(t2);
+    }
+  }
+
+  private TableMetadata incompatibleCreateMetadata(IncompatibleCreateTransition transition) {
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put(TableProperties.FORMAT_VERSION, "3");
+    if (transition.targetKeyId != null) {
+      properties.put(TableProperties.ENCRYPTION_TABLE_KEY, transition.targetKeyId);
+    }
+
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            getTestSchema(),
+            PartitionSpec.unpartitioned(),
+            temp.resolve("invalid-encrypted-create").toUri().toString(),
+            properties);
+    TableMetadata.Builder builder = TableMetadata.buildFrom(metadata);
+    addKeyChain(builder, "a", UnitestKMS.MASTER_KEY_NAME1);
+    addKeyChain(builder, "b", UnitestKMS.MASTER_KEY_NAME2);
+    if (transition.directlyRootedManifestListKey) {
+      builder.addEncryptionKey(
+          new BaseEncryptedKey(
+              "direct-mlk", ByteBuffer.wrap(new byte[] {3}), transition.targetKeyId, Map.of()));
+      builder.addEncryptionKey(
+          new BaseEncryptedKey(
+              transition.targetKeyId,
+              ByteBuffer.wrap(new byte[] {4}),
+              transition.targetKeyId,
+              Map.of()));
+    }
+
+    Snapshot historical = snapshot(1L, null, transition.historicalKeyId);
+    Snapshot current = snapshot(2L, 1L, transition.currentKeyId);
+    return builder.addSnapshot(historical).setBranchSnapshot(current, "main").build();
+  }
+
+  private TableMetadata createEncryptedSnapshotTable(
+      HiveCatalog encryptionCatalog, TableIdentifier identifier) {
+    Map<String, String> properties =
+        Map.of(
+            TableProperties.FORMAT_VERSION,
+            "3",
+            TableProperties.ENCRYPTION_TABLE_KEY,
+            UnitestKMS.MASTER_KEY_NAME1);
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            getTestSchema(),
+            PartitionSpec.unpartitioned(),
+            temp.resolve(identifier.name()).toUri().toString(),
+            properties);
+    TableMetadata.Builder builder = TableMetadata.buildFrom(metadata);
+    addKeyChain(builder, "a", UnitestKMS.MASTER_KEY_NAME1);
+    addKeyChain(builder, "b", UnitestKMS.MASTER_KEY_NAME2);
+
+    TableOperations operations = encryptionCatalog.newTableOps(identifier);
+    operations.commit(
+        null,
+        builder.setBranchSnapshot(snapshot(1L, null, "a-mlk"), SnapshotRef.MAIN_BRANCH).build());
+    return operations.refresh();
+  }
+
+  private Table loadTableWithGrandfatheredSnapshots(
+      HiveCatalog encryptionCatalog,
+      TableIdentifier identifier,
+      List<Snapshot> snapshots,
+      long currentSnapshotId,
+      Map<String, SnapshotRef> additionalRefs)
+      throws IOException, TException {
+    createEncryptedSnapshotTable(encryptionCatalog, identifier);
+    TableOperations operations = encryptionCatalog.newTableOps(identifier);
+    TableMetadata accepted = operations.refresh();
+    TableMetadata.Builder builder =
+        TableMetadata.buildFrom(accepted).removeSnapshots(accepted.snapshots());
+    snapshots.forEach(builder::addSnapshot);
+    builder.setBranchSnapshot(currentSnapshotId, SnapshotRef.MAIN_BRANCH);
+    additionalRefs.forEach(builder::setRef);
+    TableMetadata grandfathered = builder.build();
+    String metadataLocation =
+        operations.metadataFileLocation("injected-grandfathered.metadata.json");
+    TableMetadataParser.overwrite(grandfathered, operations.io().newOutputFile(metadataLocation));
+
+    org.apache.hadoop.hive.metastore.api.Table hmsTable =
+        HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+    hmsTable.getParameters().put(HiveTableOperations.METADATA_LOCATION_PROP, metadataLocation);
+    HMSTablePropertyHelper.setMetadataHash(grandfathered, hmsTable.getParameters());
+    HIVE_METASTORE_EXTENSION.metastoreClient().alter_table(DB_NAME, identifier.name(), hmsTable);
+
+    encryptionCatalog.invalidateTable(identifier);
+    return encryptionCatalog.loadTable(identifier);
+  }
+
+  private static Snapshot snapshot(long snapshotId, Long parentId, String keyId) {
+    return snapshot(
+        snapshotId,
+        parentId,
+        keyId,
+        String.format(Locale.ROOT, "file:/manifest-list-%d.avro", snapshotId));
+  }
+
+  private static Snapshot snapshot(
+      long snapshotId, Long parentId, String keyId, String manifestListLocation) {
+    String parent =
+        parentId != null ? String.format(Locale.ROOT, ",\"parent-snapshot-id\":%d", parentId) : "";
+    String key = keyId != null ? String.format(Locale.ROOT, ",\"key-id\":\"%s\"", keyId) : "";
+    return SnapshotParser.fromJson(
+        String.format(
+            Locale.ROOT,
+            "{\"sequence-number\":%d,\"snapshot-id\":%d%s,\"timestamp-ms\":%d,"
+                + "\"manifest-list\":\"%s\",\"schema-id\":0,"
+                + "\"first-row-id\":0,\"added-rows\":0%s}",
+            snapshotId,
+            snapshotId,
+            parent,
+            snapshotId,
+            manifestListLocation,
+            key));
+  }
+
+  private static void addKeyChain(
+      TableMetadata.Builder builder, String prefix, String masterKeyId) {
+    String keyEncryptionKeyId = prefix + "-kek";
+    builder.addEncryptionKey(
+        new BaseEncryptedKey(
+            prefix + "-mlk", ByteBuffer.wrap(new byte[] {1}), keyEncryptionKeyId, Map.of()));
+    builder.addEncryptionKey(
+        new BaseEncryptedKey(
+            keyEncryptionKeyId, ByteBuffer.wrap(new byte[] {2}), masterKeyId, Map.of()));
+  }
+
+  private enum IncompatibleCreateTransition {
+    ENCRYPTED_A_TO_B("a-mlk", "b-mlk", UnitestKMS.MASTER_KEY_NAME2, false),
+    ENCRYPTED_A_TO_PLAINTEXT("a-mlk", null, null, false),
+    PLAINTEXT_TO_ENCRYPTED_B(null, "b-mlk", UnitestKMS.MASTER_KEY_NAME2, false),
+    MANIFEST_LIST_KEY_ENCRYPTED_BY_TABLE_KEY(
+        "direct-mlk", "b-mlk", UnitestKMS.MASTER_KEY_NAME2, true);
+
+    private final String historicalKeyId;
+    private final String currentKeyId;
+    private final String targetKeyId;
+    private final boolean directlyRootedManifestListKey;
+
+    IncompatibleCreateTransition(
+        String historicalKeyId,
+        String currentKeyId,
+        String targetKeyId,
+        boolean directlyRootedManifestListKey) {
+      this.historicalKeyId = historicalKeyId;
+      this.currentKeyId = currentKeyId;
+      this.targetKeyId = targetKeyId;
+      this.directlyRootedManifestListKey = directlyRootedManifestListKey;
     }
   }
 
