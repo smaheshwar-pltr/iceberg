@@ -88,11 +88,16 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   private final KeyManagementClient keyManagementClient;
   private final ClientPool<IMetaStoreClient, TException> metaClients;
 
+  // Concurrent commits on a shared table refresh and rebuild the encryption state. All access to
+  // the encryption fields below is guarded by encryptionLock -- a dedicated lock, not `this`, so
+  // this internal locking can't contend with external code that locks the TableOperations. Only
+  // tableKeyId is volatile, for the lock-free fast path in io()/encryption() (set once from null,
+  // never reset).
+  private final Object encryptionLock = new Object();
+  private volatile String tableKeyId;
   private EncryptionManager encryptionManager;
   private EncryptingFileIO encryptingFileIO;
-  private String tableKeyId;
   private int encryptionDekLength;
-
   private List<EncryptedKey> encryptedKeys = List.of();
 
   protected HiveTableOperations(
@@ -130,40 +135,42 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
       return fileIO;
     }
 
-    if (encryptingFileIO == null) {
-      encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
-    }
+    synchronized (encryptionLock) {
+      if (encryptingFileIO == null) {
+        encryptingFileIO = EncryptingFileIO.combine(fileIO, encryption());
+      }
 
-    return encryptingFileIO;
+      return encryptingFileIO;
+    }
   }
 
   @Override
   public EncryptionManager encryption() {
-    if (encryptionManager != null) {
-      return encryptionManager;
-    }
-
-    if (tableKeyId != null) {
-      Preconditions.checkArgument(
-          keyManagementClient != null,
-          "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
-          CatalogProperties.ENCRYPTION_KMS_IMPL);
-
-      Map<String, String> encryptionProperties =
-          ImmutableMap.of(
-              TableProperties.ENCRYPTION_TABLE_KEY,
-              tableKeyId,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              String.valueOf(encryptionDekLength));
-
-      encryptionManager =
-          EncryptionUtil.createEncryptionManager(
-              encryptedKeys, encryptionProperties, keyManagementClient);
-    } else {
+    if (tableKeyId == null) {
       return PlaintextEncryptionManager.instance();
     }
 
-    return encryptionManager;
+    synchronized (encryptionLock) {
+      if (encryptionManager == null) {
+        Preconditions.checkArgument(
+            keyManagementClient != null,
+            "Cannot create encryption manager without a key management client. Consider setting the '%s' catalog property",
+            CatalogProperties.ENCRYPTION_KMS_IMPL);
+
+        Map<String, String> encryptionProperties =
+            ImmutableMap.of(
+                TableProperties.ENCRYPTION_TABLE_KEY,
+                tableKeyId,
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                String.valueOf(encryptionDekLength));
+
+        encryptionManager =
+            EncryptionUtil.createEncryptionManager(
+                encryptedKeys, encryptionProperties, keyManagementClient);
+      }
+
+      return encryptionManager;
+    }
   }
 
   @Override
@@ -208,31 +215,33 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
     if (tableKeyIdFromHMS != null) {
       checkIntegrityForEncryption(tableKeyIdFromHMS, dekLengthFromHMS, metadataHashFromHMS);
 
-      tableKeyId = tableKeyIdFromHMS;
-      encryptionDekLength =
-          (dekLengthFromHMS != null)
-              ? Integer.parseInt(dekLengthFromHMS)
-              : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
+      synchronized (encryptionLock) {
+        encryptionDekLength =
+            (dekLengthFromHMS != null)
+                ? Integer.parseInt(dekLengthFromHMS)
+                : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-      encryptedKeys =
-          Optional.ofNullable(current().encryptionKeys())
-              .map(Lists::newLinkedList)
-              .orElseGet(Lists::newLinkedList);
+        encryptedKeys =
+            Optional.ofNullable(current().encryptionKeys())
+                .map(Lists::newLinkedList)
+                .orElseGet(Lists::newLinkedList);
 
-      if (encryptionManager != null) {
-        Set<String> keyIdsFromMetadata =
-            encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
+        if (encryptionManager != null) {
+          Set<String> keyIdsFromMetadata =
+              encryptedKeys.stream().map(EncryptedKey::keyId).collect(Collectors.toSet());
 
-        for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
-          if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
-            encryptedKeys.add(keyFromEM);
+          for (EncryptedKey keyFromEM : EncryptionUtil.encryptionKeys(encryptionManager).values()) {
+            if (!keyIdsFromMetadata.contains(keyFromEM.keyId())) {
+              encryptedKeys.add(keyFromEM);
+            }
           }
         }
-      }
 
-      // Force re-creation of encryption manager with updated keys
-      encryptingFileIO = null;
-      encryptionManager = null;
+        // Force re-creation of encryption manager with updated keys
+        encryptingFileIO = null;
+        encryptionManager = null;
+        tableKeyId = tableKeyIdFromHMS;
+      }
     }
   }
 
@@ -558,16 +567,18 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   }
 
   private void encryptionPropsFromMetadata(Map<String, String> tableProperties) {
-    if (tableKeyId == null) {
-      tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
-    }
+    synchronized (encryptionLock) {
+      if (tableKeyId == null) {
+        tableKeyId = tableProperties.get(TableProperties.ENCRYPTION_TABLE_KEY);
+      }
 
-    if (tableKeyId != null && encryptionDekLength <= 0) {
-      encryptionDekLength =
-          PropertyUtil.propertyAsInt(
-              tableProperties,
-              TableProperties.ENCRYPTION_DEK_LENGTH,
-              TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+      if (tableKeyId != null && encryptionDekLength <= 0) {
+        encryptionDekLength =
+            PropertyUtil.propertyAsInt(
+                tableProperties,
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT);
+      }
     }
   }
 
