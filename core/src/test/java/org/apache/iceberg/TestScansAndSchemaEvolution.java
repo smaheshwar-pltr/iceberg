@@ -22,6 +22,7 @@ import static org.apache.iceberg.TestHelpers.ALL_VERSIONS;
 import static org.apache.iceberg.TestHelpers.V3_AND_ABOVE;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 import java.io.File;
@@ -33,6 +34,7 @@ import java.util.stream.Collectors;
 import org.apache.avro.generic.GenericData;
 import org.apache.iceberg.avro.Avro;
 import org.apache.iceberg.avro.RandomAvroData;
+import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.inmemory.InMemoryOutputFile;
@@ -316,6 +318,112 @@ public class TestScansAndSchemaEvolution {
                 .filter(Expressions.equal("data", "xyz"))
                 .planFiles());
     assertThat(tasks).hasSize(2);
+  }
+
+  @TestTemplate
+  public void timeTravelDoesNotDependOnUnrelatedCommits() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+    table.newAppend().appendFile(createDataFile("one")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // a schema-only change creates no snapshot, so snapshotId is still the current snapshot
+    table.updateSchema().deleteColumn("data").commit();
+
+    // "data" existed in this snapshot, so a filter on it resolves in the snapshot's schema
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
+                    .filter(Expressions.equal("data", "xyz"))
+                    .planFiles()))
+        .hasSize(1);
+
+    // an unrelated writer appends. Nothing about the selected snapshot or its schema changed.
+    table.newAppend().appendFile(createDataFile("two", table.schema(), table.spec())).commit();
+
+    // the identical scan still succeeds, which it did not before this was the caller's choice
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
+                    .filter(Expressions.equal("data", "xyz"))
+                    .planFiles()))
+        .hasSize(1);
+  }
+
+  @TestTemplate
+  public void pinnedSnapshotResolvesNamesInTheTableSchema() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+    table.newAppend().appendFile(createDataFile("one")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // a schema-only change, so the pinned snapshot does not record the new column
+    table.updateSchema().addColumn("extra", Types.IntegerType.get()).commit();
+
+    // a pin freezes the file set without moving the schema, so "extra" still resolves
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.TABLE)
+                    .filter(Expressions.isNull("extra"))
+                    .planFiles()))
+        .hasSize(1);
+
+    // and the old column is gone from a pinned read once it is dropped
+    table.updateSchema().deleteColumn("data").commit();
+    assertThatThrownBy(
+            () ->
+                Lists.newArrayList(
+                    table
+                        .newScan()
+                        .useSnapshot(snapshotId, BindingSchema.TABLE)
+                        .filter(Expressions.equal("data", "xyz"))
+                        .planFiles()))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("Cannot find field 'data'");
+  }
+
+  @TestTemplate
+  public void plansBranchSnapshotWhenMainIsEmpty() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table.newAppend().appendFile(createDataFile("one")).toBranch("branch").commit();
+    long snapshotId = table.snapshot("branch").snapshotId();
+    assertThat(table.currentSnapshot()).isNull();
+
+    table.updateSchema().deleteColumn("data").commit();
+
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
+                    .filter(Expressions.equal("data", "xyz"))
+                    .planFiles()))
+        .hasSize(1);
+  }
+
+  @TestTemplate
+  public void metadataScansCannotUseTheSnapshotSchema() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+    table.newAppend().appendFile(createDataFile("one")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    Table filesTable =
+        MetadataTableUtils.createMetadataTableInstance(table, MetadataTableType.FILES);
+
+    // a metadata table's schema is derived, not the table's data schema, so there is no snapshot
+    // schema to resolve against
+    assertThatThrownBy(() -> filesTable.newScan().useSnapshot(snapshotId, BindingSchema.SNAPSHOT))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Cannot use the snapshot schema");
+
+    // the table binding schema is what these scans already do
+    assertThat(filesTable.newScan().useSnapshot(snapshotId, BindingSchema.TABLE).schema())
+        .isNotNull();
   }
 
   @TestTemplate

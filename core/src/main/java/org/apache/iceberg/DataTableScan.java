@@ -51,7 +51,7 @@ public class DataTableScan extends BaseTableScan {
   }
 
   @Override
-  protected boolean useSnapshotSchema() {
+  protected boolean hasDataSchema() {
     return true;
   }
 

@@ -46,8 +46,14 @@ public class BatchScanAdapter implements BatchScan {
   }
 
   @Override
+  @SuppressWarnings("deprecation")
   public BatchScan useSnapshot(long snapshotId) {
     return new BatchScanAdapter(scan.useSnapshot(snapshotId));
+  }
+
+  @Override
+  public BatchScan useSnapshot(long snapshotId, BindingSchema bindingSchema) {
+    return new BatchScanAdapter(scan.useSnapshot(snapshotId, bindingSchema));
   }
 
   @Override
@@ -56,8 +62,14 @@ public class BatchScanAdapter implements BatchScan {
   }
 
   @Override
+  @SuppressWarnings("deprecation")
   public BatchScan asOfTime(long timestampMillis) {
     return new BatchScanAdapter(scan.asOfTime(timestampMillis));
+  }
+
+  @Override
+  public BatchScan asOfTime(long timestampMillis, BindingSchema bindingSchema) {
+    return new BatchScanAdapter(scan.asOfTime(timestampMillis, bindingSchema));
   }
 
   @Override

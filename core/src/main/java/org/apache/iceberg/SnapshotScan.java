@@ -69,7 +69,22 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
 
   protected abstract CloseableIterable<T> doPlanFiles();
 
-  // controls whether to use the snapshot schema while time travelling
+  /**
+   * Whether this scan's schema is the table's data schema.
+   *
+   * <p>False for scans whose schema is derived rather than the table's own, such as metadata table
+   * scans and position deletes scans. Those cannot resolve a data schema, so partition specs must
+   * not be bound to their schema and {@link BindingSchema#SNAPSHOT} is not available to them.
+   */
+  protected boolean hasDataSchema() {
+    return useSnapshotSchema();
+  }
+
+  /**
+   * @deprecated since 1.12.0, will be removed in 1.13.0; override {@link #hasDataSchema()} instead.
+   *     The name described a behaviour that is now the caller's choice, not the scan's.
+   */
+  @Deprecated
   protected boolean useSnapshotSchema() {
     return false;
   }
@@ -101,22 +116,26 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
    */
   protected Map<Integer, PartitionSpec> specs(Set<Integer> specIds) {
     Map<Integer, PartitionSpec> specs = table().specs();
-    // requires latest schema
-    if (!useSnapshotSchema()
-        || snapshotId() == null
-        || table().currentSnapshot() == null
-        || snapshotId().equals(table().currentSnapshot().snapshotId())) {
+
+    // scans without a data schema cannot bind data partition specs to it
+    if (!hasDataSchema() || snapshotId() == null) {
       return specs;
     }
 
-    // this is a time travel request
-    Schema snapshotSchema = tableSchema();
+    Schema scanSchema = tableSchema();
+
+    // table specs are already bound to the table schema, so rebinding them to it is a no-op. This
+    // is the common case for BindingSchema.TABLE.
+    if (scanSchema.schemaId() == table().schema().schemaId()) {
+      return specs;
+    }
+
     ImmutableMap.Builder<Integer, PartitionSpec> newSpecs =
         ImmutableMap.builderWithExpectedSize(specIds.size());
     for (Integer specId : specIds) {
       PartitionSpec spec = specs.get(specId);
       Preconditions.checkArgument(spec != null, "Cannot find partition spec with ID %s", specId);
-      newSpecs.put(specId, spec.toUnbound().bind(snapshotSchema, true));
+      newSpecs.put(specId, spec.toUnbound().bind(scanSchema, true));
     }
 
     return newSpecs.build();
@@ -137,17 +156,44 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     return specIds;
   }
 
+  /**
+   * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #useSnapshot(long,
+   *     BindingSchema)}.
+   */
+  @Deprecated
   public ThisT useSnapshot(long scanSnapshotId) {
+    return useSnapshot(scanSnapshotId, defaultBindingSchema());
+  }
+
+  public ThisT useSnapshot(long scanSnapshotId, BindingSchema bindingSchema) {
+    Preconditions.checkArgument(bindingSchema != null, "Invalid binding schema: null");
     Preconditions.checkArgument(
         snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
     Preconditions.checkArgument(
         table().snapshot(scanSnapshotId) != null,
         "Cannot find snapshot with ID %s",
         scanSnapshotId);
+    Preconditions.checkArgument(
+        bindingSchema == BindingSchema.TABLE || hasDataSchema(),
+        "Cannot use the snapshot schema for %s: it has no data schema",
+        getClass().getSimpleName());
+
     Schema newSchema =
-        useSnapshotSchema() ? SnapshotUtil.schemaFor(table(), scanSnapshotId) : tableSchema();
+        bindingSchema == BindingSchema.SNAPSHOT
+            ? SnapshotUtil.schemaFor(table(), scanSnapshotId)
+            : tableSchema();
     TableScanContext newContext = context().useSnapshotId(scanSnapshotId);
     return newRefinedScan(table(), newSchema, newContext);
+  }
+
+  /**
+   * The binding schema used by the selectors that do not take one.
+   *
+   * <p>Data scans default to the selected snapshot's schema, which is what a snapshot ID, timestamp
+   * or tag read has always been documented to use. Scans without a data schema keep their own.
+   */
+  private BindingSchema defaultBindingSchema() {
+    return hasDataSchema() ? BindingSchema.SNAPSHOT : BindingSchema.TABLE;
   }
 
   public ThisT useRef(String name) {
@@ -160,15 +206,25 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     Snapshot snapshot = table().snapshot(name);
     Preconditions.checkArgument(snapshot != null, "Cannot find ref %s", name);
     TableScanContext newContext = context().useSnapshotId(snapshot.snapshotId());
-    Schema newSchema = useSnapshotSchema() ? SnapshotUtil.schemaFor(table(), name) : tableSchema();
+    // a branch keeps the table schema and a tag uses the snapshot schema, which is the same
+    // distinction BindingSchema makes, expressed by ref instead of by ID
+    Schema newSchema = hasDataSchema() ? SnapshotUtil.schemaFor(table(), name) : tableSchema();
     return newRefinedScan(table(), newSchema, newContext);
   }
 
+  /**
+   * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #asOfTime(long, BindingSchema)}.
+   */
+  @Deprecated
   public ThisT asOfTime(long timestampMillis) {
+    return asOfTime(timestampMillis, defaultBindingSchema());
+  }
+
+  public ThisT asOfTime(long timestampMillis, BindingSchema bindingSchema) {
     Preconditions.checkArgument(
         snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
 
-    return useSnapshot(SnapshotUtil.snapshotIdAsOfTime(table(), timestampMillis));
+    return useSnapshot(SnapshotUtil.snapshotIdAsOfTime(table(), timestampMillis), bindingSchema);
   }
 
   @Override

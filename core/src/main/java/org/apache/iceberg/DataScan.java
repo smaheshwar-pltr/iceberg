@@ -29,7 +29,7 @@ abstract class DataScan<ThisT, T extends ScanTask, G extends ScanTaskGroup<T>>
   }
 
   @Override
-  protected boolean useSnapshotSchema() {
+  protected boolean hasDataSchema() {
     return true;
   }
 

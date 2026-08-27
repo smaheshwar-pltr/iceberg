@@ -34,8 +34,25 @@ public interface TableScan extends Scan<TableScan, FileScanTask, CombinedScanTas
    * @param snapshotId a snapshot ID
    * @return a new scan based on this with the given snapshot ID
    * @throws IllegalArgumentException if the snapshot cannot be found
+   * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #useSnapshot(long,
+   *     BindingSchema)} to state which schema the scan should resolve names against.
    */
+  @Deprecated
   TableScan useSnapshot(long snapshotId);
+
+  /**
+   * Create a new {@link TableScan} from this scan's configuration that will use the given snapshot
+   * by ID, resolving names and types against the given {@link BindingSchema}.
+   *
+   * @param snapshotId a snapshot ID
+   * @param bindingSchema which schema the scan should resolve names and types against
+   * @return a new scan based on this with the given snapshot ID and binding schema
+   * @throws IllegalArgumentException if the snapshot cannot be found
+   * @throws UnsupportedOperationException if this scan cannot use the given binding schema
+   */
+  default TableScan useSnapshot(long snapshotId, BindingSchema bindingSchema) {
+    throw new UnsupportedOperationException("Selecting a binding schema is not supported");
+  }
 
   /**
    * Create a new {@link TableScan} from this scan's configuration that will use the given
@@ -58,8 +75,26 @@ public interface TableScan extends Scan<TableScan, FileScanTask, CombinedScanTas
    * @return a new scan based on this with the current snapshot at the given time
    * @throws IllegalArgumentException if the snapshot cannot be found or time travel is attempted on
    *     a tag
+   * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #asOfTime(long, BindingSchema)}
+   *     to state which schema the scan should resolve names against.
    */
+  @Deprecated
   TableScan asOfTime(long timestampMillis);
+
+  /**
+   * Create a new {@link TableScan} from this scan's configuration that will use the most recent
+   * snapshot as of the given time in milliseconds, resolving names and types against the given
+   * {@link BindingSchema}.
+   *
+   * @param timestampMillis a timestamp in milliseconds
+   * @param bindingSchema which schema the scan should resolve names and types against
+   * @return a new scan based on this with the snapshot at the given time and binding schema
+   * @throws IllegalArgumentException if the snapshot cannot be found
+   * @throws UnsupportedOperationException if this scan cannot use the given binding schema
+   */
+  default TableScan asOfTime(long timestampMillis, BindingSchema bindingSchema) {
+    throw new UnsupportedOperationException("Selecting a binding schema is not supported");
+  }
 
   /**
    * Create a new {@link TableScan} to read appended data from {@code fromSnapshotId} exclusive to
