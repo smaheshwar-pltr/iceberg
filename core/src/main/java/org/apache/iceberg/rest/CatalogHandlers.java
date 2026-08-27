@@ -49,6 +49,7 @@ import java.util.stream.Collectors;
 import org.apache.iceberg.BaseMetadataTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.BaseTransaction;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.MetadataUpdate.UpgradeFormatVersion;
@@ -833,7 +834,11 @@ public class CatalogHandlers {
       TableScan tableScan = table.newScan();
 
       if (request.snapshotId() != null) {
-        tableScan = tableScan.useSnapshot(request.snapshotId());
+        // the request states which schema the client resolved its names against
+        tableScan =
+            tableScan.useSnapshot(
+                request.snapshotId(),
+                request.useSnapshotSchema() ? BindingSchema.SNAPSHOT : BindingSchema.TABLE);
       }
 
       // Apply filters and projections using common method
@@ -848,10 +853,9 @@ public class CatalogHandlers {
           table.uuid().toString(),
           tasksPerPlanTask.applyAsInt(configuredScan),
           request.minRowsRequested());
-      return PlanTableScanResponse.builder()
+      return PlanTableScanResponse.builder(table.specs())
           .withPlanId(asyncPlanId)
           .withPlanStatus(PlanStatus.SUBMITTED)
-          .withSpecsById(table.specs())
           .build();
     }
 
@@ -868,11 +872,10 @@ public class CatalogHandlers {
             ? Collections.emptyList()
             : IN_MEMORY_PLANNING_STATE.nextPlanTask(initial.second());
     PlanTableScanResponse.Builder builder =
-        PlanTableScanResponse.builder()
+        PlanTableScanResponse.builder(table.specs())
             .withPlanStatus(PlanStatus.COMPLETED)
             .withPlanId(planId)
-            .withFileScanTasks(initial.first())
-            .withSpecsById(table.specs());
+            .withFileScanTasks(initial.first());
 
     if (!nextPlanTasks.isEmpty()) {
       builder.withPlanTasks(nextPlanTasks);
@@ -898,11 +901,10 @@ public class CatalogHandlers {
     }
 
     Pair<List<FileScanTask>, String> initial = IN_MEMORY_PLANNING_STATE.initialScanTasksFor(planId);
-    return FetchPlanningResultResponse.builder()
+    return FetchPlanningResultResponse.builder(table.specs())
         .withPlanStatus(PlanStatus.COMPLETED)
         .withFileScanTasks(initial.first())
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(initial.second()))
-        .withSpecsById(table.specs())
         .build();
   }
 
@@ -920,10 +922,9 @@ public class CatalogHandlers {
     String planTask = request.planTask();
     List<FileScanTask> fileScanTasks = IN_MEMORY_PLANNING_STATE.fileScanTasksForPlanTask(planTask);
 
-    return FetchScanTasksResponse.builder()
+    return FetchScanTasksResponse.builder(table.specs())
         .withFileScanTasks(fileScanTasks)
         .withPlanTasks(IN_MEMORY_PLANNING_STATE.nextPlanTask(planTask))
-        .withSpecsById(table.specs())
         .build();
   }
 

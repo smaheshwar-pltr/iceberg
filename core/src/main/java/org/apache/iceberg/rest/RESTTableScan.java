@@ -28,6 +28,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataTableScan;
@@ -87,7 +88,9 @@ class RESTTableScan extends DataTableScan {
   private final Object hadoopConf;
   private String planId = null;
   private FileIO scanFileIO = null;
-  private boolean useSnapshotSchema = false;
+  // the binding schema the caller selected. Not recoverable from the scan's schema afterwards, and
+  // the server needs it to plan and serialize with the same specs the client will decode with.
+  private BindingSchema bindingSchema = BindingSchema.TABLE;
 
   RESTTableScan(
       Table table,
@@ -133,21 +136,21 @@ class RESTTableScan extends DataTableScan {
             supportedEndpoints,
             catalogProperties,
             hadoopConf);
-    scan.useSnapshotSchema = useSnapshotSchema;
+    scan.bindingSchema = bindingSchema;
     return scan;
   }
 
   @Override
   public TableScan useRef(String name) {
     SnapshotRef ref = table().refs().get(name);
-    this.useSnapshotSchema = ref != null && ref.isTag();
+    this.bindingSchema = ref != null && ref.isTag() ? BindingSchema.SNAPSHOT : BindingSchema.TABLE;
     return super.useRef(name);
   }
 
   @Override
-  public TableScan useSnapshot(long snapshotId) {
-    this.useSnapshotSchema = true;
-    return super.useSnapshot(snapshotId);
+  public TableScan useSnapshot(long snapshotId, BindingSchema schema) {
+    this.bindingSchema = schema;
+    return super.useSnapshot(snapshotId, schema);
   }
 
   @Override
@@ -190,7 +193,9 @@ class RESTTableScan extends DataTableScan {
           .withEndSnapshotId(endSnapshotId)
           .withUseSnapshotSchema(true);
     } else if (snapshotId != null) {
-      builder.withSnapshotId(snapshotId).withUseSnapshotSchema(useSnapshotSchema);
+      builder
+          .withSnapshotId(snapshotId)
+          .withUseSnapshotSchema(bindingSchema == BindingSchema.SNAPSHOT);
     }
 
     return planTableScan(builder.build());

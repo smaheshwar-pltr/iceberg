@@ -19,6 +19,7 @@
 package org.apache.iceberg.data;
 
 import java.util.Collection;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
@@ -77,13 +78,35 @@ public class IcebergGenerics {
       return this;
     }
 
+    /**
+     * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #useSnapshot(long,
+     *     BindingSchema)}.
+     */
+    @Deprecated
+    @SuppressWarnings("deprecation")
     public ScanBuilder useSnapshot(long scanSnapshotId) {
       this.tableScan = tableScan.useSnapshot(scanSnapshotId);
       return this;
     }
 
+    public ScanBuilder useSnapshot(long scanSnapshotId, BindingSchema bindingSchema) {
+      this.tableScan = tableScan.useSnapshot(scanSnapshotId, bindingSchema);
+      return this;
+    }
+
+    /**
+     * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #asOfTime(long,
+     *     BindingSchema)}.
+     */
+    @Deprecated
+    @SuppressWarnings("deprecation")
     public ScanBuilder asOfTime(long scanTimestampMillis) {
       this.tableScan = tableScan.asOfTime(scanTimestampMillis);
+      return this;
+    }
+
+    public ScanBuilder asOfTime(long scanTimestampMillis, BindingSchema bindingSchema) {
+      this.tableScan = tableScan.asOfTime(scanTimestampMillis, bindingSchema);
       return this;
     }
 
