@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.spark.CatalogTestBase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.TestTemplate;
@@ -59,6 +60,38 @@ public class TestSnapshotBindingSchema extends CatalogTestBase {
 
     // a projection of the new column resolves too
     assertThat(sql("SELECT extra FROM %s", tableName)).hasSize(2);
+  }
+
+  @TestTemplate
+  public void timeTravelWithDistributedPlanning() {
+    // distributed planning derives its own spec map, on a path that local planning does not touch
+    sql(
+        "CREATE TABLE %s (a string, b string) USING iceberg TBLPROPERTIES ("
+            + "'%s' = 'distributed', '%s' = 'distributed', '%s' = '2')",
+        tableName,
+        TableProperties.DATA_PLANNING_MODE,
+        TableProperties.DELETE_PLANNING_MODE,
+        TableProperties.FORMAT_VERSION);
+    sql("INSERT INTO %s VALUES ('x', 'y')", tableName);
+
+    Table table = validationCatalog.loadTable(tableIdent);
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // swap the names, then partition by the new "a", which is the field the old "b" used. Binding
+    // this spec to the selected snapshot's schema fails, and that snapshot never references it.
+    sql("ALTER TABLE %s RENAME COLUMN a TO c", tableName);
+    sql("ALTER TABLE %s RENAME COLUMN b TO a", tableName);
+    // ADD PARTITION FIELD needs the Iceberg SQL extensions, which this module does not load
+    validationCatalog.loadTable(tableIdent).updateSpec().addField("a").commit();
+    sql("INSERT INTO %s VALUES ('x2', 'y2')", tableName);
+
+    // the read resolves names in the selected snapshot's schema, where "a" is still the first
+    // column and holds 'x'. The later "a" is a different field entirely.
+    assertThat(sql("SELECT * FROM %s VERSION AS OF %d", tableName, snapshotId)).hasSize(1);
+    assertThat(sql("SELECT * FROM %s VERSION AS OF %d WHERE a = 'x'", tableName, snapshotId))
+        .hasSize(1);
+    assertThat(sql("SELECT * FROM %s VERSION AS OF %d WHERE a = 'y'", tableName, snapshotId))
+        .isEmpty();
   }
 
   @TestTemplate
