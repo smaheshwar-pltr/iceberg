@@ -47,8 +47,10 @@ public interface TableScan extends Scan<TableScan, FileScanTask, CombinedScanTas
    * @param snapshotId a snapshot ID
    * @param bindingSchema which schema the scan should resolve names and types against
    * @return a new scan based on this with the given snapshot ID and binding schema
-   * @throws IllegalArgumentException if the snapshot cannot be found
-   * @throws UnsupportedOperationException if this scan cannot use the given binding schema
+   * @throws IllegalArgumentException if the snapshot cannot be found, if bindingSchema is null, or
+   *     if {@link BindingSchema#SNAPSHOT} is requested for a scan whose schema is not the table's
+   *     data schema
+   * @throws UnsupportedOperationException if this scan does not support selecting a binding schema
    */
   default TableScan useSnapshot(long snapshotId, BindingSchema bindingSchema) {
     throw new UnsupportedOperationException("Selecting a binding schema is not supported");
@@ -89,8 +91,10 @@ public interface TableScan extends Scan<TableScan, FileScanTask, CombinedScanTas
    * @param timestampMillis a timestamp in milliseconds
    * @param bindingSchema which schema the scan should resolve names and types against
    * @return a new scan based on this with the snapshot at the given time and binding schema
-   * @throws IllegalArgumentException if the snapshot cannot be found
-   * @throws UnsupportedOperationException if this scan cannot use the given binding schema
+   * @throws IllegalArgumentException if the snapshot cannot be found, if time travel is attempted
+   *     on a tag, if bindingSchema is null, or if {@link BindingSchema#SNAPSHOT} is requested for a
+   *     scan whose schema is not the table's data schema
+   * @throws UnsupportedOperationException if this scan does not support selecting a binding schema
    */
   default TableScan asOfTime(long timestampMillis, BindingSchema bindingSchema) {
     throw new UnsupportedOperationException("Selecting a binding schema is not supported");

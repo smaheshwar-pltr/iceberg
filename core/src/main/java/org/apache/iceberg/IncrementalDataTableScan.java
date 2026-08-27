@@ -37,6 +37,7 @@ class IncrementalDataTableScan extends DataTableScan {
   }
 
   @Override
+  @Deprecated
   public TableScan asOfTime(long timestampMillis) {
     throw new UnsupportedOperationException(
         String.format(

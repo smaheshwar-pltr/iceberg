@@ -329,7 +329,8 @@ public class TestScansAndSchemaEvolution {
     // a schema-only change creates no snapshot, so snapshotId is still the current snapshot
     table.updateSchema().deleteColumn("data").commit();
 
-    // "data" existed in this snapshot, so a filter on it resolves in the snapshot's schema
+    // "data" existed in this snapshot, so a filter on it resolves in the snapshot's schema. Assert
+    // on the residual too: a task count alone would also hold if the filter were silently dropped.
     assertThat(
             Lists.newArrayList(
                 table
@@ -337,12 +338,15 @@ public class TestScansAndSchemaEvolution {
                     .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
                     .filter(Expressions.equal("data", "xyz"))
                     .planFiles()))
-        .hasSize(1);
+        .singleElement()
+        .satisfies(
+            task ->
+                assertThat(task.residual().toString()).isEqualTo("ref(name=\"data\") == \"xyz\""));
 
     // an unrelated writer appends. Nothing about the selected snapshot or its schema changed.
     table.newAppend().appendFile(createDataFile("two", table.schema(), table.spec())).commit();
 
-    // the identical scan still succeeds, which it did not before this was the caller's choice
+    // the identical scan still succeeds, with the same residual
     assertThat(
             Lists.newArrayList(
                 table
@@ -350,7 +354,10 @@ public class TestScansAndSchemaEvolution {
                     .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
                     .filter(Expressions.equal("data", "xyz"))
                     .planFiles()))
-        .hasSize(1);
+        .singleElement()
+        .satisfies(
+            task ->
+                assertThat(task.residual().toString()).isEqualTo("ref(name=\"data\") == \"xyz\""));
   }
 
   @TestTemplate
@@ -362,7 +369,8 @@ public class TestScansAndSchemaEvolution {
     // a schema-only change, so the pinned snapshot does not record the new column
     table.updateSchema().addColumn("extra", Types.IntegerType.get()).commit();
 
-    // a pin freezes the file set without moving the schema, so "extra" still resolves
+    // a pin freezes the file set without moving the schema, so "extra" still resolves. The residual
+    // proves the filter was bound rather than dropped.
     assertThat(
             Lists.newArrayList(
                 table
@@ -370,7 +378,10 @@ public class TestScansAndSchemaEvolution {
                     .useSnapshot(snapshotId, BindingSchema.TABLE)
                     .filter(Expressions.isNull("extra"))
                     .planFiles()))
-        .hasSize(1);
+        .singleElement()
+        .satisfies(
+            task ->
+                assertThat(task.residual().toString()).isEqualTo("is_null(ref(name=\"extra\"))"));
 
     // and the old column is gone from a pinned read once it is dropped
     table.updateSchema().deleteColumn("data").commit();
@@ -421,9 +432,11 @@ public class TestScansAndSchemaEvolution {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Cannot use the snapshot schema");
 
-    // the table binding schema is what these scans already do
-    assertThat(filesTable.newScan().useSnapshot(snapshotId, BindingSchema.TABLE).schema())
-        .isNotNull();
+    // the table binding schema is what these scans already do, so the scan keeps the metadata
+    // table's own schema rather than picking up a data schema
+    assertThat(
+            filesTable.newScan().useSnapshot(snapshotId, BindingSchema.TABLE).schema().asStruct())
+        .isEqualTo(filesTable.schema().asStruct());
   }
 
   @TestTemplate

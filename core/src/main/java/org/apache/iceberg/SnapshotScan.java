@@ -125,8 +125,9 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     Schema scanSchema = tableSchema();
 
     // table specs are already bound to the table schema, so rebinding them to it is a no-op. This
-    // is the common case for BindingSchema.TABLE.
-    if (scanSchema.schemaId() == table().schema().schemaId()) {
+    // is the common case for BindingSchema.TABLE. Compare identity, not schema ID: IDs are recycled
+    // once RemoveSnapshots collects an unreachable schema, so equal IDs do not imply equal content.
+    if (scanSchema == table().schema()) {
       return specs;
     }
 
@@ -158,7 +159,10 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
 
   /**
    * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #useSnapshot(long,
-   *     BindingSchema)}.
+   *     BindingSchema)}. Pass {@link BindingSchema#SNAPSHOT} to read the table as it was at the
+   *     snapshot, or {@link BindingSchema#TABLE} to freeze the snapshot's file set while keeping
+   *     the table's schema. This method selects the former for scans whose schema is the table's
+   *     data schema, and the latter for the rest.
    */
   @Deprecated
   public ThisT useSnapshot(long scanSnapshotId) {

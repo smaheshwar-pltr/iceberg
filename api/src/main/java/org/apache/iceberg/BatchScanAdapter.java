@@ -46,6 +46,7 @@ public class BatchScanAdapter implements BatchScan {
   }
 
   @Override
+  @Deprecated
   @SuppressWarnings("deprecation")
   public BatchScan useSnapshot(long snapshotId) {
     return new BatchScanAdapter(scan.useSnapshot(snapshotId));
@@ -62,6 +63,7 @@ public class BatchScanAdapter implements BatchScan {
   }
 
   @Override
+  @Deprecated
   @SuppressWarnings("deprecation")
   public BatchScan asOfTime(long timestampMillis) {
     return new BatchScanAdapter(scan.asOfTime(timestampMillis));

@@ -447,7 +447,9 @@ public class SnapshotUtil {
       return metadata.schema();
     }
 
-    return metadata.schemas().get(schemaId);
+    // schemas() is a list, so indexing it by schema ID is only correct when IDs happen to match
+    // positions
+    return metadata.schemasById().get(schemaId);
   }
 
   /**

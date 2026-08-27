@@ -22,6 +22,7 @@ import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -283,9 +284,34 @@ public class TestSnapshotUtil {
             .build();
 
     // the Table overload falls back to the table schema for these snapshots. This overload used to
-    // return null instead, because it looked the schema up by a null ID without checking.
+    // throw NPE instead, unboxing the null ID to index a list.
     assertThat(SnapshotUtil.schemaFor(metadata, "legacy").asStruct())
         .isEqualTo(metadata.schema().asStruct());
+  }
+
+  @Test
+  public void schemaForTagResolvesBySchemaIdNotListPosition() {
+    // expiring snapshots removes the schemas they were the only reference to, which leaves the
+    // remaining schema IDs non-contiguous. Indexing metadata.schemas() by ID is then wrong.
+    table.updateSchema().addColumn("c1", Types.IntegerType.get()).commit();
+    table.newFastAppend().appendFile(FILE_A).commit();
+    table.updateSchema().addColumn("c2", Types.IntegerType.get()).commit();
+    long taggedSnapshotId = appendFileToMain().snapshotId();
+    table.manageSnapshots().createTag("tag", taggedSnapshotId).commit();
+
+    // drop every other snapshot, so the schemas only they referenced are removed too
+    table.expireSnapshots().cleanExpiredMetadata(true).expireOlderThan(Long.MAX_VALUE).commit();
+
+    TableMetadata metadata = table.operations().current();
+    int taggedSchemaId = metadata.snapshot(taggedSnapshotId).schemaId();
+    assumeThat(metadata.schemas().size())
+        .as("expected schema removal to leave IDs non-contiguous")
+        .isLessThanOrEqualTo(taggedSchemaId);
+
+    // the Table and TableMetadata overloads must agree, and both must resolve by ID
+    assertThat(SnapshotUtil.schemaFor(metadata, "tag").schemaId()).isEqualTo(taggedSchemaId);
+    assertThat(SnapshotUtil.schemaFor(metadata, "tag").asStruct())
+        .isEqualTo(SnapshotUtil.schemaFor(table, "tag").asStruct());
   }
 
   @Test
