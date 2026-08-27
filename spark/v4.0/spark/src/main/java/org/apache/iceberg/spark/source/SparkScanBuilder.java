@@ -27,6 +27,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.BatchScan;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.IncrementalChangelogScan;
@@ -677,7 +678,8 @@ public class SparkScanBuilder
 
     BatchScan scan =
         newBatchScan()
-            .useSnapshot(snapshotId)
+            // a consistency pin: filterExpression() was written against the table schema
+            .useSnapshot(snapshotId, BindingSchema.TABLE)
             .caseSensitive(caseSensitive)
             .filter(filterExpression())
             .project(expectedSchema)
@@ -713,7 +715,8 @@ public class SparkScanBuilder
     BatchScan scan =
         table
             .newBatchScan()
-            .useSnapshot(snapshot.snapshotId())
+            // a consistency pin: filterExpression() was written against the table schema
+            .useSnapshot(snapshot.snapshotId(), BindingSchema.TABLE)
             .ignoreResiduals()
             .caseSensitive(caseSensitive)
             .filter(filterExpression())
