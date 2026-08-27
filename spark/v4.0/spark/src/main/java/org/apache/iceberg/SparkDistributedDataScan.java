@@ -132,7 +132,9 @@ public class SparkDistributedDataScan extends BaseDistributedDataScan {
     JavaRDD<DataFile> dataFileRDD =
         sparkContext
             .parallelize(toBeans(dataManifests), dataManifests.size())
-            .flatMap(new ReadDataManifest(tableBroadcast(), specs(), context(), withColumnStats));
+            .flatMap(
+                new ReadDataManifest(
+                    tableBroadcast(), specs(specIdsIn(dataManifests)), context(), withColumnStats));
     List<List<DataFile>> dataFileGroups = collectPartitions(dataFileRDD);
 
     int matchingFilesCount = dataFileGroups.stream().mapToInt(List::size).sum();
@@ -159,7 +161,9 @@ public class SparkDistributedDataScan extends BaseDistributedDataScan {
     List<DeleteFile> deleteFiles =
         sparkContext
             .parallelize(toBeans(deleteManifests), deleteManifests.size())
-            .flatMap(new ReadDeleteManifest(tableBroadcast(), specs(), context()))
+            .flatMap(
+                new ReadDeleteManifest(
+                    tableBroadcast(), specs(specIdsIn(deleteManifests)), context()))
             .collect();
 
     int skippedFilesCount = liveFilesCount(deleteManifests) - deleteFiles.size();

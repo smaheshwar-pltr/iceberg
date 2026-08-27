@@ -54,7 +54,7 @@ abstract class DataScan<ThisT, T extends ScanTask, G extends ScanTaskGroup<T>>
             .select(withColumnStats ? SCAN_WITH_STATS_COLUMNS : SCAN_COLUMNS)
             .filterData(filter())
             .schemasById(schemas())
-            .specsById(specs())
+            .specsById(specs(specIdsIn(dataManifests, deleteManifests)))
             .scanMetrics(scanMetrics())
             .ignoreDeleted()
             .columnsToKeepStats(columnsToKeepStats());

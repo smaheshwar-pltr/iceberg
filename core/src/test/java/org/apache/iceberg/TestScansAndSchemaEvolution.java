@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.avro.generic.GenericData;
@@ -315,6 +316,80 @@ public class TestScansAndSchemaEvolution {
                 .filter(Expressions.equal("data", "xyz"))
                 .planFiles());
     assertThat(tasks).hasSize(2);
+  }
+
+  @TestTemplate
+  public void planningIgnoresSpecsAddedAfterTheSelectedSnapshot() throws IOException {
+    // an unpartitioned table, so the name swap below is not blocked by an existing spec
+    Schema schema =
+        new Schema(
+            required(1, "a", Types.StringType.get()), required(2, "b", Types.StringType.get()));
+    Table table =
+        TestTables.create(temp, "test", schema, PartitionSpec.unpartitioned(), formatVersion);
+
+    table.newAppend().appendFile(dataFile(table.spec(), null)).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // swap the two column names. field IDs are unchanged, so "a" now refers to field 2.
+    table.updateSchema().renameColumn("a", "c").commit();
+    table.updateSchema().renameColumn("b", "a").commit();
+
+    // spec 1 partitions by the new "a", which is field 2. In the selected snapshot's schema, the
+    // name "a" resolves to field 1 instead, so binding this spec to that schema fails. The selected
+    // snapshot cannot reference spec 1, so planning must not bind it.
+    table.updateSpec().addField("a").commit();
+    table.newAppend().appendFile(dataFile(table.spec(), "x")).commit();
+
+    assertThat(table.snapshot(snapshotId).dataManifests(table.io()))
+        .allMatch(manifest -> manifest.partitionSpecId() == 0);
+
+    List<FileScanTask> tasks =
+        Lists.newArrayList(table.newScan().useSnapshot(snapshotId).planFiles());
+    assertThat(tasks).hasSize(1);
+  }
+
+  @TestTemplate
+  public void planningBindsSpecsWhoseSourceColumnWasDropped() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table.newAppend().appendFile(createDataFile("one")).commit();
+
+    // dropping the partition field and then its source column is allowed, and leaves spec 0
+    // referencing a column that no longer exists in any later schema
+    table.updateSpec().removeField("part").commit();
+    table.updateSchema().deleteColumn("part").commit();
+
+    table.newAppend().appendFile(dataFile(table.spec(), null)).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.newAppend().appendFile(dataFile(table.spec(), null)).commit();
+
+    // spec 0 is still referenced by manifests carried into this snapshot, so it is bound. It only
+    // binds because missing source fields are tolerated.
+    assertThat(specIdsIn(table.snapshot(snapshotId).dataManifests(table.io()))).contains(0);
+
+    List<FileScanTask> tasks =
+        Lists.newArrayList(table.newScan().useSnapshot(snapshotId).planFiles());
+    assertThat(tasks).hasSize(2);
+  }
+
+  private static Set<Integer> specIdsIn(List<ManifestFile> manifests) {
+    return manifests.stream().map(ManifestFile::partitionSpecId).collect(Collectors.toSet());
+  }
+
+  private DataFile dataFile(PartitionSpec spec, String partValue) {
+    DataFiles.Builder builder =
+        DataFiles.builder(spec)
+            .withPath("/path/to/" + UUID.randomUUID() + ".parquet")
+            .withFileSizeInBytes(10)
+            .withRecordCount(100);
+
+    if (!spec.fields().isEmpty()) {
+      PartitionData partition = new PartitionData(spec.partitionType());
+      partition.set(0, partValue);
+      builder.withPartition(partition);
+    }
+
+    return builder.build();
   }
 
   @TestTemplate

@@ -20,6 +20,7 @@ package org.apache.iceberg;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.events.ScanEvent;
@@ -36,6 +37,7 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.util.DateTimeUtil;
 import org.apache.iceberg.util.SnapshotUtil;
@@ -81,6 +83,23 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
   }
 
   protected Map<Integer, PartitionSpec> specs() {
+    return specs(table().specs().keySet());
+  }
+
+  /**
+   * Returns the partition specs with the given IDs, bound to this scan's schema when time
+   * travelling.
+   *
+   * <p>Callers that know which specs a scan can reach should pass only those IDs. A manifest
+   * written at or before the selected snapshot can only reference a spec that existed then, so
+   * specs created afterwards are never used for planning. Binding them anyway is wasted work and
+   * can fail: a spec added after the selected snapshot may name a column that did not exist yet, or
+   * may carry a partition field whose name resolves to a different field in the older schema.
+   *
+   * @param specIds the IDs of the specs this scan can reference
+   * @return the requested specs, bound to this scan's schema when time travelling
+   */
+  protected Map<Integer, PartitionSpec> specs(Set<Integer> specIds) {
     Map<Integer, PartitionSpec> specs = table().specs();
     // requires latest schema
     if (!useSnapshotSchema()
@@ -93,12 +112,29 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     // this is a time travel request
     Schema snapshotSchema = tableSchema();
     ImmutableMap.Builder<Integer, PartitionSpec> newSpecs =
-        ImmutableMap.builderWithExpectedSize(specs.size());
-    for (Map.Entry<Integer, PartitionSpec> entry : specs.entrySet()) {
-      newSpecs.put(entry.getKey(), entry.getValue().toUnbound().bind(snapshotSchema, true));
+        ImmutableMap.builderWithExpectedSize(specIds.size());
+    for (Integer specId : specIds) {
+      PartitionSpec spec = specs.get(specId);
+      Preconditions.checkArgument(spec != null, "Cannot find partition spec with ID %s", specId);
+      newSpecs.put(specId, spec.toUnbound().bind(snapshotSchema, true));
     }
 
     return newSpecs.build();
+  }
+
+  /** Returns the IDs of the partition specs referenced by the given manifests. */
+  protected static Set<Integer> specIdsIn(List<ManifestFile> manifests) {
+    Set<Integer> specIds = Sets.newHashSet();
+    manifests.forEach(manifest -> specIds.add(manifest.partitionSpecId()));
+    return specIds;
+  }
+
+  /** Returns the IDs of the partition specs referenced by the given data and delete manifests. */
+  protected static Set<Integer> specIdsIn(
+      List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests) {
+    Set<Integer> specIds = specIdsIn(dataManifests);
+    deleteManifests.forEach(manifest -> specIds.add(manifest.partitionSpecId()));
+    return specIds;
   }
 
   public ThisT useSnapshot(long scanSnapshotId) {

@@ -75,7 +75,7 @@ public class DataTableScan extends BaseTableScan {
             .select(scanColumns())
             .filterData(filter())
             .schemasById(schemas())
-            .specsById(specs())
+            .specsById(specs(specIdsIn(dataManifests, deleteManifests)))
             .scanMetrics(scanMetrics())
             .ignoreDeleted()
             .columnsToKeepStats(columnsToKeepStats());
