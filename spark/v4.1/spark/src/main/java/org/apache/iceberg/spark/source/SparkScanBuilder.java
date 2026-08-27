@@ -25,6 +25,7 @@ import java.util.stream.Collectors;
 import org.apache.iceberg.BaseMetadataTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.BatchScan;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.MetricsConfig;
@@ -350,7 +351,13 @@ public class SparkScanBuilder extends BaseSparkScanBuilder
             .metricsReporter(metricsReporter());
 
     if (shouldPinSnapshot() || timeTravel != null) {
-      scan = scan.useSnapshot(snapshot.snapshotId());
+      // explicit time travel on the main table reads the table as it was, so names resolve in the
+      // snapshot's schema. Everything else here is a consistency pin: it freezes the file set so
+      // that planning, runtime filtering and reading see one snapshot, while names keep resolving
+      // in the schema Spark projected. Metadata tables have no data schema, so they pin too.
+      BindingSchema bindingSchema =
+          timeTravel != null && isMainTable() ? BindingSchema.SNAPSHOT : BindingSchema.TABLE;
+      scan = scan.useSnapshot(snapshot.snapshotId(), bindingSchema);
     }
 
     Preconditions.checkState(

@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFiles;
 import org.apache.iceberg.FileScanTask;
@@ -234,7 +235,8 @@ public class SparkTable extends BaseSparkTable
     if (scanBranch != null) {
       scan = scan.useRef(scanBranch);
     } else if (snapshot != null) {
-      scan = scan.useSnapshot(snapshot.snapshotId());
+      // a consistency pin: deleteExpr was written against this table's schema
+      scan = scan.useSnapshot(snapshot.snapshotId(), BindingSchema.TABLE);
     }
 
     try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {

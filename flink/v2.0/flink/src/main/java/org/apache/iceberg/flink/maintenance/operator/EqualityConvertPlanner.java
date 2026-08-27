@@ -38,6 +38,7 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.util.OutputTag;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
@@ -627,7 +628,8 @@ public class EqualityConvertPlanner extends AbstractStreamOperator<ReadCommand>
     long commitSnapshotId = mainSnapshot.snapshotId();
 
     try (CloseableIterable<FileScanTask> tasks =
-        table.newScan().useSnapshot(commitSnapshotId).planFiles()) {
+        // a consistency pin: the plan is driven by the table's current schema
+        table.newScan().useSnapshot(commitSnapshotId, BindingSchema.TABLE).planFiles()) {
       for (FileScanTask task : tasks) {
         output.collect(
             new StreamRecord<>(
