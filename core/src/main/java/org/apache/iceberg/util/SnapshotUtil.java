@@ -439,7 +439,15 @@ public class SnapshotUtil {
     }
 
     Snapshot snapshot = metadata.snapshot(snapshotRef.snapshotId());
-    return metadata.schemas().get(snapshot.schemaId());
+    Integer schemaId = snapshot.schemaId();
+
+    // schemaId could be null, if snapshot was created before Iceberg added schema id to snapshot
+    if (schemaId == null) {
+      // TODO: recover the schema by reading previous metadata files
+      return metadata.schema();
+    }
+
+    return metadata.schemas().get(schemaId);
   }
 
   /**

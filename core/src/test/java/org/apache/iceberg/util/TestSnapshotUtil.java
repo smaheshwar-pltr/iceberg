@@ -38,10 +38,14 @@ import org.apache.iceberg.MetadataTableUtils;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotParser;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TestHelpers;
 import org.apache.iceberg.TestTables;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -255,6 +259,33 @@ public class TestSnapshotUtil {
 
     assertThat(table.schema().asStruct()).isEqualTo(expected.asStruct());
     assertThat(SnapshotUtil.schemaFor(table, tag).asStruct()).isEqualTo(initialSchema.asStruct());
+  }
+
+  @Test
+  public void schemaForTagOnSnapshotWithoutSchemaId() {
+    // snapshots written before Iceberg recorded a schema ID have none
+    Snapshot legacySnapshot =
+        SnapshotParser.fromJson(
+            "{\"snapshot-id\":42,\"timestamp-ms\":1234,"
+                + "\"manifest-list\":\"file:/tmp/manifest-list.avro\","
+                + "\"summary\":{\"operation\":\"append\"}}");
+    assertThat(legacySnapshot.schemaId()).isNull();
+
+    TableMetadata metadata =
+        TableMetadata.buildFrom(
+                TableMetadata.newTableMetadata(
+                    SCHEMA,
+                    SPEC,
+                    "file:/tmp/legacy",
+                    ImmutableMap.of(TableProperties.FORMAT_VERSION, "1")))
+            .addSnapshot(legacySnapshot)
+            .setRef("legacy", SnapshotRef.tagBuilder(42).build())
+            .build();
+
+    // the Table overload falls back to the table schema for these snapshots. This overload used to
+    // return null instead, because it looked the schema up by a null ID without checking.
+    assertThat(SnapshotUtil.schemaFor(metadata, "legacy").asStruct())
+        .isEqualTo(metadata.schema().asStruct());
   }
 
   @Test
