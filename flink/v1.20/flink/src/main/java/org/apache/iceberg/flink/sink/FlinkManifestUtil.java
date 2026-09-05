@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.ManifestFile;
@@ -29,11 +30,13 @@ import org.apache.iceberg.ManifestFiles;
 import org.apache.iceberg.ManifestWriter;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,7 +76,7 @@ public class FlinkManifestUtil {
       String operatorUniqueId,
       int subTaskId,
       long attemptNumber) {
-    return new ManifestOutputFileFactory(
+    return createOutputFileFactory(
         tableSupplier, tableProps, flinkJobId, operatorUniqueId, subTaskId, attemptNumber, null);
   }
 
@@ -85,8 +88,38 @@ public class FlinkManifestUtil {
       int subTaskId,
       long attemptNumber,
       String suffix) {
+    checkNotEncrypted(tableSupplier.get());
     return new ManifestOutputFileFactory(
         tableSupplier, tableProps, flinkJobId, operatorUniqueId, subTaskId, attemptNumber, suffix);
+  }
+
+  /**
+   * Rejects encrypted tables. Flink writes its per-checkpoint manifests through the plaintext
+   * {@link ManifestFiles#write(int, PartitionSpec, OutputFile, Long)} overload, so a manifest would
+   * expose the data encryption keys of the encrypted data files it lists. Client-side encryption
+   * has never been implemented for Flink; this makes that limitation explicit instead of silently
+   * producing a table whose data files are encrypted but whose keys are readable.
+   */
+  private static void checkNotEncrypted(Table table) {
+    Preconditions.checkArgument(
+        !(table.encryption() instanceof StandardEncryptionManager),
+        "Cannot write to an encrypted table with Flink: %s",
+        table.name());
+  }
+
+  /**
+   * Backstop for {@link #writeCompletedFiles}, which does not have the table in scope. Every
+   * production caller obtains its manifest {@link OutputFile} from a {@link
+   * ManifestOutputFileFactory} built by {@link #createOutputFileFactory}, so this only guards
+   * against a future write path that skips that factory.
+   */
+  private static void checkNotEncrypted(ContentFile<?>[] files) {
+    for (ContentFile<?> file : files) {
+      Preconditions.checkArgument(
+          file.keyMetadata() == null,
+          "Cannot write an encrypted file to a plaintext Flink manifest: %s",
+          file.location());
+    }
   }
 
   /**
@@ -107,6 +140,7 @@ public class FlinkManifestUtil {
 
     // Write the completed data files into a newly created data manifest file.
     if (result.dataFiles() != null && result.dataFiles().length > 0) {
+      checkNotEncrypted(result.dataFiles());
       dataManifest =
           writeDataFiles(
               outputFileSupplier.get(),
@@ -117,6 +151,7 @@ public class FlinkManifestUtil {
 
     // Write the completed delete files into a newly created delete manifest file.
     if (result.deleteFiles() != null && result.deleteFiles().length > 0) {
+      checkNotEncrypted(result.deleteFiles());
       OutputFile deleteManifestFile = outputFileSupplier.get();
 
       ManifestWriter<DeleteFile> deleteManifestWriter =
