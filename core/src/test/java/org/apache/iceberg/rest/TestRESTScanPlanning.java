@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
@@ -910,6 +911,31 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
       PlanTableScanRequest request = captureLastPlanRequest();
       assertThat(request.useSnapshotSchema())
           .as("useRef() with a branch should not use snapshot schema")
+          .isFalse();
+    }
+
+    // Test 5: an explicit binding schema is sent as given, in both directions
+    try (CloseableIterable<FileScanTask> ignored =
+        table.newScan().useSnapshot(snapshotId, BindingSchema.SNAPSHOT).planFiles()) {
+      assertThat(captureLastPlanRequest().useSnapshotSchema())
+          .as("BindingSchema.SNAPSHOT should set useSnapshotSchema=true")
+          .isTrue();
+    }
+
+    try (CloseableIterable<FileScanTask> ignored =
+        table.newScan().useSnapshot(snapshotId, BindingSchema.TABLE).planFiles()) {
+      assertThat(captureLastPlanRequest().useSnapshotSchema())
+          .as("BindingSchema.TABLE should set useSnapshotSchema=false")
+          .isFalse();
+    }
+
+    try (CloseableIterable<FileScanTask> ignored =
+        table
+            .newScan()
+            .asOfTime(table.currentSnapshot().timestampMillis(), BindingSchema.TABLE)
+            .planFiles()) {
+      assertThat(captureLastPlanRequest().useSnapshotSchema())
+          .as("asOfTime with BindingSchema.TABLE should set useSnapshotSchema=false")
           .isFalse();
     }
   }

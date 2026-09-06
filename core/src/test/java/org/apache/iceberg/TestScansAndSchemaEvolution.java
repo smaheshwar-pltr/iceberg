@@ -22,16 +22,19 @@ import static org.apache.iceberg.TestHelpers.ALL_VERSIONS;
 import static org.apache.iceberg.TestHelpers.V3_AND_ABOVE;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.avro.generic.GenericData;
 import org.apache.iceberg.avro.Avro;
 import org.apache.iceberg.avro.RandomAvroData;
+import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.inmemory.InMemoryOutputFile;
@@ -315,6 +318,199 @@ public class TestScansAndSchemaEvolution {
                 .filter(Expressions.equal("data", "xyz"))
                 .planFiles());
     assertThat(tasks).hasSize(2);
+  }
+
+  @TestTemplate
+  public void timeTravelDoesNotDependOnUnrelatedCommits() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+    table.newAppend().appendFile(createDataFile("one")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // a schema-only change creates no snapshot, so snapshotId is still the current snapshot
+    table.updateSchema().deleteColumn("data").commit();
+
+    // "data" existed in this snapshot, so a filter on it resolves in the snapshot's schema. Assert
+    // on the residual too: a task count alone would also hold if the filter were silently dropped.
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
+                    .filter(Expressions.equal("data", "xyz"))
+                    .planFiles()))
+        .singleElement()
+        .satisfies(
+            task ->
+                assertThat(task.residual().toString()).isEqualTo("ref(name=\"data\") == \"xyz\""));
+
+    // an unrelated writer appends. Nothing about the selected snapshot or its schema changed.
+    table.newAppend().appendFile(createDataFile("two", table.schema(), table.spec())).commit();
+
+    // the identical scan still succeeds, with the same residual
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
+                    .filter(Expressions.equal("data", "xyz"))
+                    .planFiles()))
+        .singleElement()
+        .satisfies(
+            task ->
+                assertThat(task.residual().toString()).isEqualTo("ref(name=\"data\") == \"xyz\""));
+  }
+
+  @TestTemplate
+  public void pinnedSnapshotResolvesNamesInTheTableSchema() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+    table.newAppend().appendFile(createDataFile("one")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // a schema-only change, so the pinned snapshot does not record the new column
+    table.updateSchema().addColumn("extra", Types.IntegerType.get()).commit();
+
+    // a pin freezes the file set without moving the schema, so "extra" still resolves. The residual
+    // proves the filter was bound rather than dropped.
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.TABLE)
+                    .filter(Expressions.isNull("extra"))
+                    .planFiles()))
+        .singleElement()
+        .satisfies(
+            task ->
+                assertThat(task.residual().toString()).isEqualTo("is_null(ref(name=\"extra\"))"));
+
+    // and the old column is gone from a pinned read once it is dropped
+    table.updateSchema().deleteColumn("data").commit();
+    assertThatThrownBy(
+            () ->
+                Lists.newArrayList(
+                    table
+                        .newScan()
+                        .useSnapshot(snapshotId, BindingSchema.TABLE)
+                        .filter(Expressions.equal("data", "xyz"))
+                        .planFiles()))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("Cannot find field 'data'");
+  }
+
+  @TestTemplate
+  public void plansBranchSnapshotWhenMainIsEmpty() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table.newAppend().appendFile(createDataFile("one")).toBranch("branch").commit();
+    long snapshotId = table.snapshot("branch").snapshotId();
+    assertThat(table.currentSnapshot()).isNull();
+
+    table.updateSchema().deleteColumn("data").commit();
+
+    assertThat(
+            Lists.newArrayList(
+                table
+                    .newScan()
+                    .useSnapshot(snapshotId, BindingSchema.SNAPSHOT)
+                    .filter(Expressions.equal("data", "xyz"))
+                    .planFiles()))
+        .hasSize(1);
+  }
+
+  @TestTemplate
+  public void metadataScansCannotUseTheSnapshotSchema() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+    table.newAppend().appendFile(createDataFile("one")).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    Table filesTable =
+        MetadataTableUtils.createMetadataTableInstance(table, MetadataTableType.FILES);
+
+    // a metadata table's schema is derived, not the table's data schema, so there is no snapshot
+    // schema to resolve against
+    assertThatThrownBy(() -> filesTable.newScan().useSnapshot(snapshotId, BindingSchema.SNAPSHOT))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Cannot use the snapshot schema");
+
+    // the table binding schema is what these scans already do, so the scan keeps the metadata
+    // table's own schema rather than picking up a data schema
+    assertThat(
+            filesTable.newScan().useSnapshot(snapshotId, BindingSchema.TABLE).schema().asStruct())
+        .isEqualTo(filesTable.schema().asStruct());
+  }
+
+  @TestTemplate
+  public void planningIgnoresSpecsAddedAfterTheSelectedSnapshot() throws IOException {
+    // an unpartitioned table, so the name swap below is not blocked by an existing spec
+    Schema schema =
+        new Schema(
+            required(1, "a", Types.StringType.get()), required(2, "b", Types.StringType.get()));
+    Table table =
+        TestTables.create(temp, "test", schema, PartitionSpec.unpartitioned(), formatVersion);
+
+    table.newAppend().appendFile(dataFile(table.spec(), null)).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+
+    // swap the two column names. field IDs are unchanged, so "a" now refers to field 2.
+    table.updateSchema().renameColumn("a", "c").commit();
+    table.updateSchema().renameColumn("b", "a").commit();
+
+    // spec 1 partitions by the new "a", which is field 2. In the selected snapshot's schema, the
+    // name "a" resolves to field 1 instead, so binding this spec to that schema fails. The selected
+    // snapshot cannot reference spec 1, so planning must not bind it.
+    table.updateSpec().addField("a").commit();
+    table.newAppend().appendFile(dataFile(table.spec(), "x")).commit();
+
+    assertThat(table.snapshot(snapshotId).dataManifests(table.io()))
+        .allMatch(manifest -> manifest.partitionSpecId() == 0);
+
+    List<FileScanTask> tasks =
+        Lists.newArrayList(table.newScan().useSnapshot(snapshotId).planFiles());
+    assertThat(tasks).hasSize(1);
+  }
+
+  @TestTemplate
+  public void planningBindsSpecsWhoseSourceColumnWasDropped() throws IOException {
+    Table table = TestTables.create(temp, "test", SCHEMA, SPEC, formatVersion);
+
+    table.newAppend().appendFile(createDataFile("one")).commit();
+
+    // dropping the partition field and then its source column is allowed, and leaves spec 0
+    // referencing a column that no longer exists in any later schema
+    table.updateSpec().removeField("part").commit();
+    table.updateSchema().deleteColumn("part").commit();
+
+    table.newAppend().appendFile(dataFile(table.spec(), null)).commit();
+    long snapshotId = table.currentSnapshot().snapshotId();
+    table.newAppend().appendFile(dataFile(table.spec(), null)).commit();
+
+    // spec 0 is still referenced by manifests carried into this snapshot, so it is bound. It only
+    // binds because missing source fields are tolerated.
+    assertThat(specIdsIn(table.snapshot(snapshotId).dataManifests(table.io()))).contains(0);
+
+    List<FileScanTask> tasks =
+        Lists.newArrayList(table.newScan().useSnapshot(snapshotId).planFiles());
+    assertThat(tasks).hasSize(2);
+  }
+
+  private static Set<Integer> specIdsIn(List<ManifestFile> manifests) {
+    return manifests.stream().map(ManifestFile::partitionSpecId).collect(Collectors.toSet());
+  }
+
+  private DataFile dataFile(PartitionSpec spec, String partValue) {
+    DataFiles.Builder builder =
+        DataFiles.builder(spec)
+            .withPath("/path/to/" + UUID.randomUUID() + ".parquet")
+            .withFileSizeInBytes(10)
+            .withRecordCount(100);
+
+    if (!spec.fields().isEmpty()) {
+      PartitionData partition = new PartitionData(spec.partitionType());
+      partition.set(0, partValue);
+      builder.withPartition(partition);
+    }
+
+    return builder.build();
   }
 
   @TestTemplate

@@ -20,6 +20,7 @@ package org.apache.iceberg;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.iceberg.events.Listeners;
 import org.apache.iceberg.events.ScanEvent;
@@ -36,6 +37,7 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.util.DateTimeUtil;
 import org.apache.iceberg.util.SnapshotUtil;
@@ -67,7 +69,22 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
 
   protected abstract CloseableIterable<T> doPlanFiles();
 
-  // controls whether to use the snapshot schema while time travelling
+  /**
+   * Whether this scan's schema is the table's data schema.
+   *
+   * <p>False for scans whose schema is derived rather than the table's own, such as metadata table
+   * scans and position deletes scans. Those cannot resolve a data schema, so partition specs must
+   * not be bound to their schema and {@link BindingSchema#SNAPSHOT} is not available to them.
+   */
+  protected boolean hasDataSchema() {
+    return useSnapshotSchema();
+  }
+
+  /**
+   * @deprecated since 1.12.0, will be removed in 1.13.0; override {@link #hasDataSchema()} instead.
+   *     The name described a behaviour that is now the caller's choice, not the scan's.
+   */
+  @Deprecated
   protected boolean useSnapshotSchema() {
     return false;
   }
@@ -81,37 +98,106 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
   }
 
   protected Map<Integer, PartitionSpec> specs() {
+    return specs(table().specs().keySet());
+  }
+
+  /**
+   * Returns the partition specs with the given IDs, bound to this scan's schema when time
+   * travelling.
+   *
+   * <p>Callers that know which specs a scan can reach should pass only those IDs. A manifest
+   * written at or before the selected snapshot can only reference a spec that existed then, so
+   * specs created afterwards are never used for planning. Binding them anyway is wasted work and
+   * can fail: a spec added after the selected snapshot may name a column that did not exist yet, or
+   * may carry a partition field whose name resolves to a different field in the older schema.
+   *
+   * @param specIds the IDs of the specs this scan can reference
+   * @return the requested specs, bound to this scan's schema when time travelling
+   */
+  protected Map<Integer, PartitionSpec> specs(Set<Integer> specIds) {
     Map<Integer, PartitionSpec> specs = table().specs();
-    // requires latest schema
-    if (!useSnapshotSchema()
-        || snapshotId() == null
-        || table().currentSnapshot() == null
-        || snapshotId().equals(table().currentSnapshot().snapshotId())) {
+
+    // scans without a data schema cannot bind data partition specs to it
+    if (!hasDataSchema() || snapshotId() == null) {
       return specs;
     }
 
-    // this is a time travel request
-    Schema snapshotSchema = tableSchema();
+    Schema scanSchema = tableSchema();
+
+    // table specs are already bound to the table schema, so rebinding them to it is a no-op. This
+    // is the common case for BindingSchema.TABLE. Compare identity, not schema ID: IDs are recycled
+    // once RemoveSnapshots collects an unreachable schema, so equal IDs do not imply equal content.
+    if (scanSchema == table().schema()) {
+      return specs;
+    }
+
     ImmutableMap.Builder<Integer, PartitionSpec> newSpecs =
-        ImmutableMap.builderWithExpectedSize(specs.size());
-    for (Map.Entry<Integer, PartitionSpec> entry : specs.entrySet()) {
-      newSpecs.put(entry.getKey(), entry.getValue().toUnbound().bind(snapshotSchema, true));
+        ImmutableMap.builderWithExpectedSize(specIds.size());
+    for (Integer specId : specIds) {
+      PartitionSpec spec = specs.get(specId);
+      Preconditions.checkArgument(spec != null, "Cannot find partition spec with ID %s", specId);
+      newSpecs.put(specId, spec.toUnbound().bind(scanSchema, true));
     }
 
     return newSpecs.build();
   }
 
+  /** Returns the IDs of the partition specs referenced by the given manifests. */
+  protected static Set<Integer> specIdsIn(List<ManifestFile> manifests) {
+    Set<Integer> specIds = Sets.newHashSet();
+    manifests.forEach(manifest -> specIds.add(manifest.partitionSpecId()));
+    return specIds;
+  }
+
+  /** Returns the IDs of the partition specs referenced by the given data and delete manifests. */
+  protected static Set<Integer> specIdsIn(
+      List<ManifestFile> dataManifests, List<ManifestFile> deleteManifests) {
+    Set<Integer> specIds = specIdsIn(dataManifests);
+    deleteManifests.forEach(manifest -> specIds.add(manifest.partitionSpecId()));
+    return specIds;
+  }
+
+  /**
+   * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #useSnapshot(long,
+   *     BindingSchema)}. Pass {@link BindingSchema#SNAPSHOT} to read the table as it was at the
+   *     snapshot, or {@link BindingSchema#TABLE} to freeze the snapshot's file set while keeping
+   *     the table's schema. This method selects the former for scans whose schema is the table's
+   *     data schema, and the latter for the rest.
+   */
+  @Deprecated
   public ThisT useSnapshot(long scanSnapshotId) {
+    return useSnapshot(scanSnapshotId, defaultBindingSchema());
+  }
+
+  public ThisT useSnapshot(long scanSnapshotId, BindingSchema bindingSchema) {
+    Preconditions.checkArgument(bindingSchema != null, "Invalid binding schema: null");
     Preconditions.checkArgument(
         snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
     Preconditions.checkArgument(
         table().snapshot(scanSnapshotId) != null,
         "Cannot find snapshot with ID %s",
         scanSnapshotId);
+    Preconditions.checkArgument(
+        bindingSchema == BindingSchema.TABLE || hasDataSchema(),
+        "Cannot use the snapshot schema for %s: it has no data schema",
+        getClass().getSimpleName());
+
     Schema newSchema =
-        useSnapshotSchema() ? SnapshotUtil.schemaFor(table(), scanSnapshotId) : tableSchema();
+        bindingSchema == BindingSchema.SNAPSHOT
+            ? SnapshotUtil.schemaFor(table(), scanSnapshotId)
+            : tableSchema();
     TableScanContext newContext = context().useSnapshotId(scanSnapshotId);
     return newRefinedScan(table(), newSchema, newContext);
+  }
+
+  /**
+   * The binding schema used by the selectors that do not take one.
+   *
+   * <p>Data scans default to the selected snapshot's schema, which is what a snapshot ID, timestamp
+   * or tag read has always been documented to use. Scans without a data schema keep their own.
+   */
+  private BindingSchema defaultBindingSchema() {
+    return hasDataSchema() ? BindingSchema.SNAPSHOT : BindingSchema.TABLE;
   }
 
   public ThisT useRef(String name) {
@@ -124,15 +210,25 @@ public abstract class SnapshotScan<ThisT, T extends ScanTask, G extends ScanTask
     Snapshot snapshot = table().snapshot(name);
     Preconditions.checkArgument(snapshot != null, "Cannot find ref %s", name);
     TableScanContext newContext = context().useSnapshotId(snapshot.snapshotId());
-    Schema newSchema = useSnapshotSchema() ? SnapshotUtil.schemaFor(table(), name) : tableSchema();
+    // a branch keeps the table schema and a tag uses the snapshot schema, which is the same
+    // distinction BindingSchema makes, expressed by ref instead of by ID
+    Schema newSchema = hasDataSchema() ? SnapshotUtil.schemaFor(table(), name) : tableSchema();
     return newRefinedScan(table(), newSchema, newContext);
   }
 
+  /**
+   * @deprecated since 1.12.0, will be removed in 2.0.0; use {@link #asOfTime(long, BindingSchema)}.
+   */
+  @Deprecated
   public ThisT asOfTime(long timestampMillis) {
+    return asOfTime(timestampMillis, defaultBindingSchema());
+  }
+
+  public ThisT asOfTime(long timestampMillis, BindingSchema bindingSchema) {
     Preconditions.checkArgument(
         snapshotId() == null, "Cannot override snapshot, already set snapshot id=%s", snapshotId());
 
-    return useSnapshot(SnapshotUtil.snapshotIdAsOfTime(table(), timestampMillis));
+    return useSnapshot(SnapshotUtil.snapshotIdAsOfTime(table(), timestampMillis), bindingSchema);
   }
 
   @Override

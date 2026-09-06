@@ -28,7 +28,10 @@ abstract class DataScan<ThisT, T extends ScanTask, G extends ScanTaskGroup<T>>
     super(table, schema, context);
   }
 
+  // overrides the deprecated name so that hasDataSchema() keeps delegating to it. An out-of-tree
+  // subclass may override either name and still be honoured.
   @Override
+  @Deprecated
   protected boolean useSnapshotSchema() {
     return true;
   }
@@ -54,7 +57,7 @@ abstract class DataScan<ThisT, T extends ScanTask, G extends ScanTaskGroup<T>>
             .select(withColumnStats ? SCAN_WITH_STATS_COLUMNS : SCAN_COLUMNS)
             .filterData(filter())
             .schemasById(schemas())
-            .specsById(specs())
+            .specsById(specs(specIdsIn(dataManifests, deleteManifests)))
             .scanMetrics(scanMetrics())
             .ignoreDeleted()
             .columnsToKeepStats(columnsToKeepStats());
