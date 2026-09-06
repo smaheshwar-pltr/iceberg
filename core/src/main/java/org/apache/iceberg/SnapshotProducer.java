@@ -68,7 +68,6 @@ import org.apache.iceberg.metrics.MetricsReporter;
 import org.apache.iceberg.metrics.Timer.Timed;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
-import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
@@ -118,10 +117,8 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
   private MetricsReporter reporter = LoggingMetricsReporter.instance();
   private volatile Long snapshotId = null;
   private TableMetadata base;
-  // Encryption keys for the manifest list written by the current commit attempt. These are
-  // committed in the same metadata update as the snapshot that references them, so they are
-  // scoped to a single attempt and reset before each one.
-  private List<EncryptedKey> manifestListKeys = ImmutableList.of();
+  // Encryption keys for the manifest list written by the current commit attempt.
+  private List<EncryptedKey> manifestListKeys = List.of();
   private boolean stageOnly = false;
   private Consumer<String> deleteFunc = defaultDelete;
   private SnapshotAncestryValidator snapshotAncestryValidator =
@@ -367,7 +364,7 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     // toManifestListFile mints a new manifest list key, so it must be called exactly once
     ManifestListFile manifestListFile = writer.toManifestListFile();
-    this.manifestListKeys = manifestListKeys(encryption, manifestListFile.encryptionKeyID());
+    this.manifestListKeys = findManifestListKeys(encryption, manifestListFile.encryptionKeyID());
 
     return new BaseSnapshot(
         sequenceNumber,
@@ -383,37 +380,28 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
         manifestListFile.encryptionKeyID());
   }
 
-  /**
-   * Returns the encryption keys that a snapshot needs to read its manifest list: the manifest list
-   * key and the key encryption key that wraps it.
-   *
-   * @param encryption the encryption manager that minted the manifest list key
-   * @param manifestListKeyId the manifest list key ID, or null if the manifest list is not
-   *     encrypted
-   * @return the keys to commit with the snapshot, or an empty list if the manifest list is not
-   *     encrypted
-   */
-  private static List<EncryptedKey> manifestListKeys(
+  private static List<EncryptedKey> findManifestListKeys(
       EncryptionManager encryption, String manifestListKeyId) {
     if (manifestListKeyId == null) {
-      return ImmutableList.of();
+      return List.of();
     }
 
     Map<String, EncryptedKey> encryptionKeys = EncryptionUtil.encryptionKeys(encryption);
     EncryptedKey manifestListKey = encryptionKeys.get(manifestListKeyId);
-    Preconditions.checkState(
-        manifestListKey != null, "Cannot find manifest list key with id %s", manifestListKeyId);
+    if (manifestListKey == null) {
+      throw new CommitFailedException(
+          "Cannot find manifest list key with id %s", manifestListKeyId);
+    }
 
     String keyEncryptionKeyId = manifestListKey.encryptedById();
     EncryptedKey keyEncryptionKey = encryptionKeys.get(keyEncryptionKeyId);
-    Preconditions.checkState(
-        keyEncryptionKey != null,
-        "Cannot find key encryption key with id %s, which wraps manifest list key %s",
-        keyEncryptionKeyId,
-        manifestListKeyId);
+    if (keyEncryptionKey == null) {
+      throw new CommitFailedException(
+          "Cannot find key encryption key with id %s, which wraps manifest list key %s",
+          keyEncryptionKeyId, manifestListKeyId);
+    }
 
-    // the key encryption key is added first so that it is present before the key it wraps
-    return ImmutableList.of(keyEncryptionKey, manifestListKey);
+    return List.of(keyEncryptionKey, manifestListKey);
   }
 
   private void runValidations(Snapshot parentSnapshot) {
@@ -541,19 +529,15 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
             .countAttempts(commitMetrics().attempts())
             .run(
                 taskOps -> {
-                  // discard any keys held by a previous attempt so that only the keys minted by
-                  // the attempt that commits are persisted
-                  this.manifestListKeys = ImmutableList.of();
+                  this.manifestListKeys = List.of();
                   Snapshot newSnapshot = apply();
                   newSnapshotId.set(newSnapshot.snapshotId());
                   TableMetadata.Builder update = TableMetadata.buildFrom(base);
                   if (base.snapshot(newSnapshot.snapshotId()) != null) {
-                    // this is a rollback operation. the snapshot is already in the metadata, along
-                    // with the keys it needs, so no keys are added here
+                    // this is a rollback operation
                     update.setBranchSnapshot(newSnapshot.snapshotId(), targetBranch);
                   } else {
-                    // a snapshot is only ever added in the same metadata update that adds the keys
-                    // required to read its manifest list
+                    // add the snapshot and its manifest list keys in the same metadata update
                     manifestListKeys.forEach(update::addEncryptionKey);
                     if (stageOnly) {
                       update.addSnapshot(newSnapshot);

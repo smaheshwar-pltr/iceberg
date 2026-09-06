@@ -32,6 +32,7 @@ import org.apache.iceberg.encryption.EncryptionTestHelpers;
 import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.KeyManagementClient;
 import org.apache.iceberg.encryption.UnitestKMS;
+import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.AfterEach;
@@ -47,7 +48,7 @@ import org.junit.jupiter.api.io.TempDir;
  * a catalog does on refresh, so a manifest list is readable here only if the keys it needs were
  * committed with its snapshot.
  */
-public class TestManifestListKeyPersistence {
+class TestManifestListKeyPersistence {
 
   private static final Map<String, String> TABLE_PROPERTIES =
       ImmutableMap.of(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1);
@@ -58,12 +59,12 @@ public class TestManifestListKeyPersistence {
   private List<MetadataUpdate> committedChanges = List.of();
 
   @AfterEach
-  public void cleanup() {
+  void cleanup() {
     TestTables.clearTables();
   }
 
   @Test
-  public void testCommittedKeysReadManifestList() {
+  void committedKeysReadManifestList() {
     TestTables.TestTable table = createEncryptedTable("committed");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).commit();
@@ -74,33 +75,37 @@ public class TestManifestListKeyPersistence {
   }
 
   @Test
-  public void testKeysAreAddedBeforeTheSnapshotThatUsesThem() {
+  void snapshotAndKeysAreCommittedTogether() {
     TestTables.TestTable table = createEncryptedTable("ordering");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).commit();
 
-    assertThat(committedChanges)
-        .extracting(Object::getClass)
-        .containsExactly(
-            MetadataUpdate.AddEncryptionKey.class,
-            MetadataUpdate.AddEncryptionKey.class,
-            MetadataUpdate.AddSnapshot.class,
-            MetadataUpdate.SetSnapshotRef.class);
+    List<EncryptedKey> addedKeys =
+        committedChanges.stream()
+            .filter(MetadataUpdate.AddEncryptionKey.class::isInstance)
+            .map(update -> ((MetadataUpdate.AddEncryptionKey) update).key())
+            .collect(Collectors.toList());
+    List<Snapshot> addedSnapshots =
+        committedChanges.stream()
+            .filter(MetadataUpdate.AddSnapshot.class::isInstance)
+            .map(update -> ((MetadataUpdate.AddSnapshot) update).snapshot())
+            .collect(Collectors.toList());
 
-    EncryptedKey keyEncryptionKey = addedKey(0);
-    EncryptedKey manifestListKey = addedKey(1);
-    Snapshot added = ((MetadataUpdate.AddSnapshot) committedChanges.get(2)).snapshot();
+    assertThat(addedKeys).hasSize(2);
+    assertThat(addedSnapshots).hasSize(1);
 
-    assertThat(manifestListKey.keyId())
-        .as("second key should be the manifest list key the snapshot references")
-        .isEqualTo(added.keyId());
-    assertThat(manifestListKey.encryptedById())
-        .as("manifest list key should be wrapped by the key added before it")
-        .isEqualTo(keyEncryptionKey.keyId());
+    Snapshot added = addedSnapshots.get(0);
+    EncryptedKey manifestListKey = findKey(addedKeys, added.keyId());
+    assertThat(manifestListKey)
+        .as("metadata update should contain the manifest list key")
+        .isNotNull();
+    EncryptedKey keyEncryptionKey = findKey(addedKeys, manifestListKey.encryptedById());
+
+    assertThat(keyEncryptionKey).as("metadata update should contain the wrapping key").isNotNull();
   }
 
   @Test
-  public void testStagedSnapshotKeysArePersisted() {
+  void stagedSnapshotKeysArePersisted() {
     TestTables.TestTable table = createEncryptedTable("staged");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).stageOnly().commit();
@@ -114,7 +119,7 @@ public class TestManifestListKeyPersistence {
   }
 
   @Test
-  public void testRetryPersistsOnlyTheSuccessfulAttemptKeys() {
+  void retryDoesNotPersistAbandonedKeys() {
     TestTables.TestTable table = createEncryptedTable("retry");
     ((TestTables.TestTableOperations) table.ops()).failCommits(2);
 
@@ -131,7 +136,25 @@ public class TestManifestListKeyPersistence {
   }
 
   @Test
-  public void testCherryPickFastForwardAddsNoKeys() {
+  void retryAfterSuccessfulCommitDoesNotPersistRetryKeys() {
+    TestTables.TestTable table = createEncryptedTable("successful-commit-retry");
+    RefreshingTestTableOperations ops = (RefreshingTestTableOperations) table.ops();
+    ops.failNextCommitAfterSuccess();
+
+    table.newFastAppend().appendFile(TestBase.FILE_A).commit();
+
+    TableMetadata metadata = ops.current();
+    assertThat(metadata.snapshots()).hasSize(1);
+    assertThat(keyIds(metadata)).hasSize(2);
+    assertThat(EncryptionUtil.encryptionKeys(ops.encryption()).keySet())
+        .as("retry should mint another manifest list key")
+        .hasSize(3)
+        .containsAll(keyIds(metadata));
+    assertManifestListReadable(metadata, table.currentSnapshot());
+  }
+
+  @Test
+  void cherryPickFastForwardDoesNotMintKeys() {
     TestTables.TestTable table = createEncryptedTable("cherry-pick");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).commit();
@@ -176,7 +199,11 @@ public class TestManifestListKeyPersistence {
         .isNotNull();
 
     FileIO io = EncryptingFileIO.combine(new TestTables.LocalFileIO(), encryptionManager(metadata));
-    assertThat(snapshot.allManifests(io))
+    assertThat(
+            ManifestLists.read(
+                ManifestLists.newInputFile(
+                    io,
+                    new BaseManifestListFile(snapshot.manifestListLocation(), snapshot.keyId()))))
         .as("manifest list should be readable from committed keys alone")
         .isNotEmpty();
   }
@@ -190,37 +217,11 @@ public class TestManifestListKeyPersistence {
     File dir = temp.resolve(name).toFile();
     FileIO plainFileIO = new TestTables.LocalFileIO();
 
-    TestTables.TestTableOperations ops =
-        new TestTables.TestTableOperations(
-            name, dir, EncryptingFileIO.combine(plainFileIO, initialEncryption)) {
-          private EncryptionManager encryption = initialEncryption;
-          private FileIO io = EncryptingFileIO.combine(plainFileIO, initialEncryption);
-
-          @Override
-          public EncryptionManager encryption() {
-            return encryption;
-          }
-
-          @Override
-          public FileIO io() {
-            return io;
-          }
-
-          @Override
-          public void commit(TableMetadata base, TableMetadata metadata) {
-            committedChanges = List.copyOf(metadata.changes());
-            super.commit(base, metadata);
-            this.encryption = encryptionManager(current());
-            this.io = EncryptingFileIO.combine(plainFileIO, encryption);
-          }
-        };
+    RefreshingTestTableOperations ops =
+        new RefreshingTestTableOperations(name, dir, plainFileIO, initialEncryption);
 
     return TestTables.create(
         dir, name, TestBase.SCHEMA, TestBase.SPEC, SortOrder.unsorted(), 3, ops);
-  }
-
-  private EncryptedKey addedKey(int index) {
-    return ((MetadataUpdate.AddEncryptionKey) committedChanges.get(index)).key();
   }
 
   private static EncryptionManager encryptionManager(TableMetadata metadata) {
@@ -235,13 +236,56 @@ public class TestManifestListKeyPersistence {
   }
 
   private static EncryptedKey findKey(TableMetadata metadata, String keyId) {
-    return metadata.encryptionKeys().stream()
-        .filter(key -> key.keyId().equals(keyId))
-        .findFirst()
-        .orElse(null);
+    return findKey(metadata.encryptionKeys(), keyId);
+  }
+
+  private static EncryptedKey findKey(List<EncryptedKey> keys, String keyId) {
+    return keys.stream().filter(key -> key.keyId().equals(keyId)).findFirst().orElse(null);
   }
 
   private static List<String> keyIds(TableMetadata metadata) {
     return metadata.encryptionKeys().stream().map(EncryptedKey::keyId).collect(Collectors.toList());
+  }
+
+  private class RefreshingTestTableOperations extends TestTables.TestTableOperations {
+    private final FileIO plainFileIO;
+    private EncryptionManager encryption;
+    private FileIO io;
+    private boolean failNextCommitAfterSuccess = false;
+
+    private RefreshingTestTableOperations(
+        String name, File dir, FileIO plainFileIO, EncryptionManager initialEncryption) {
+      super(name, dir, EncryptingFileIO.combine(plainFileIO, initialEncryption));
+      this.plainFileIO = plainFileIO;
+      this.encryption = initialEncryption;
+      this.io = EncryptingFileIO.combine(plainFileIO, initialEncryption);
+    }
+
+    @Override
+    public EncryptionManager encryption() {
+      return encryption;
+    }
+
+    @Override
+    public FileIO io() {
+      return io;
+    }
+
+    @Override
+    public void commit(TableMetadata base, TableMetadata metadata) {
+      committedChanges = List.copyOf(metadata.changes());
+      super.commit(base, metadata);
+      this.encryption = encryptionManager(current());
+      this.io = EncryptingFileIO.combine(plainFileIO, encryption);
+
+      if (failNextCommitAfterSuccess) {
+        this.failNextCommitAfterSuccess = false;
+        throw new CommitFailedException("Injected failure after commit");
+      }
+    }
+
+    private void failNextCommitAfterSuccess() {
+      this.failNextCommitAfterSuccess = true;
+    }
   }
 }

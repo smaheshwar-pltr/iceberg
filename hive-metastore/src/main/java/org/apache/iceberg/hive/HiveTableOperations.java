@@ -22,7 +22,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
@@ -58,7 +57,6 @@ import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
-import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
@@ -213,12 +211,7 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
               ? Integer.parseInt(dekLengthFromHMS)
               : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
 
-      // every snapshot's manifest list key is committed with the snapshot, so refreshed metadata
-      // is the complete and authoritative source of the table's encryption keys
-      encryptedKeys =
-          Optional.ofNullable(current().encryptionKeys())
-              .map(Lists::newLinkedList)
-              .orElseGet(Lists::newLinkedList);
+      this.encryptedKeys = current().encryptionKeys();
 
       // Force re-creation of encryption manager with updated keys
       encryptingFileIO = null;
@@ -231,6 +224,8 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
     encryptionPropsFromMetadata(metadata.properties());
+    // Validate encryption configuration even when registering prewritten metadata.
+    encryption();
 
     String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);
 
