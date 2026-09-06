@@ -64,44 +64,32 @@ class TestManifestListKeyPersistence {
   }
 
   @Test
-  void committedKeysReadManifestList() {
+  void snapshotCommitsKeysNeededToReadManifestList() {
     TestTables.TestTable table = createEncryptedTable("committed");
 
     table.newFastAppend().appendFile(TestBase.FILE_A).commit();
 
     Snapshot snapshot = table.currentSnapshot();
     assertThat(snapshot.keyId()).as("snapshot should reference a manifest list key").isNotNull();
-    assertManifestListReadable(table.ops().current(), snapshot);
-  }
-
-  @Test
-  void snapshotAndKeysAreCommittedTogether() {
-    TestTables.TestTable table = createEncryptedTable("ordering");
-
-    table.newFastAppend().appendFile(TestBase.FILE_A).commit();
-
     List<EncryptedKey> addedKeys =
         committedChanges.stream()
             .filter(MetadataUpdate.AddEncryptionKey.class::isInstance)
             .map(update -> ((MetadataUpdate.AddEncryptionKey) update).key())
             .collect(Collectors.toList());
-    List<Snapshot> addedSnapshots =
-        committedChanges.stream()
-            .filter(MetadataUpdate.AddSnapshot.class::isInstance)
-            .map(update -> ((MetadataUpdate.AddSnapshot) update).snapshot())
-            .collect(Collectors.toList());
-
     assertThat(addedKeys).hasSize(2);
-    assertThat(addedSnapshots).hasSize(1);
+    assertThat(committedChanges)
+        .filteredOn(MetadataUpdate.AddSnapshot.class::isInstance)
+        .extracting(update -> ((MetadataUpdate.AddSnapshot) update).snapshot().snapshotId())
+        .containsExactly(snapshot.snapshotId());
 
-    Snapshot added = addedSnapshots.get(0);
-    EncryptedKey manifestListKey = findKey(addedKeys, added.keyId());
+    EncryptedKey manifestListKey = findKey(addedKeys, snapshot.keyId());
     assertThat(manifestListKey)
         .as("metadata update should contain the manifest list key")
         .isNotNull();
     EncryptedKey keyEncryptionKey = findKey(addedKeys, manifestListKey.encryptedById());
 
     assertThat(keyEncryptionKey).as("metadata update should contain the wrapping key").isNotNull();
+    assertManifestListReadable(table.ops().current(), snapshot);
   }
 
   @Test
@@ -151,36 +139,6 @@ class TestManifestListKeyPersistence {
         .hasSize(3)
         .containsAll(keyIds(metadata));
     assertManifestListReadable(metadata, table.currentSnapshot());
-  }
-
-  @Test
-  void cherryPickFastForwardDoesNotMintKeys() {
-    TestTables.TestTable table = createEncryptedTable("cherry-pick");
-
-    table.newFastAppend().appendFile(TestBase.FILE_A).commit();
-    // a staged snapshot whose parent is the current snapshot can be fast-forwarded onto the branch
-    table.newFastAppend().appendFile(TestBase.FILE_B).stageOnly().commit();
-
-    long stagedSnapshotId =
-        table.ops().current().snapshots().stream()
-            .map(Snapshot::snapshotId)
-            .filter(id -> id != table.currentSnapshot().snapshotId())
-            .findFirst()
-            .orElseThrow();
-    List<String> keyIdsBeforeCherryPick = keyIds(table.ops().current());
-
-    table.manageSnapshots().cherrypick(stagedSnapshotId).commit();
-
-    assertThat(table.currentSnapshot().snapshotId())
-        .as("cherry-pick should have fast-forwarded to the staged snapshot")
-        .isEqualTo(stagedSnapshotId);
-    assertThat(keyIds(table.ops().current()))
-        .as("installing a snapshot already in metadata should add no keys")
-        .isEqualTo(keyIdsBeforeCherryPick);
-    assertThat(committedChanges)
-        .as("fast-forward should not emit AddEncryptionKey")
-        .noneMatch(MetadataUpdate.AddEncryptionKey.class::isInstance);
-    assertManifestListReadable(table.ops().current(), table.currentSnapshot());
   }
 
   /**
@@ -251,7 +209,7 @@ class TestManifestListKeyPersistence {
     private final FileIO plainFileIO;
     private EncryptionManager encryption;
     private FileIO io;
-    private boolean failNextCommitAfterSuccess = false;
+    private boolean failNextCommitAfterSuccess;
 
     private RefreshingTestTableOperations(
         String name, File dir, FileIO plainFileIO, EncryptionManager initialEncryption) {

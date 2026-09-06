@@ -224,8 +224,6 @@ public class HiveTableOperations extends BaseMetastoreTableOperations
   protected void doCommit(TableMetadata base, TableMetadata metadata) {
     boolean newTable = base == null;
     encryptionPropsFromMetadata(metadata.properties());
-    // Validate encryption configuration even when registering prewritten metadata.
-    encryption();
 
     String newMetadataLocation = writeNewMetadataIfRequired(newTable, metadata);
 

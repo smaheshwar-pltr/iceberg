@@ -529,7 +529,6 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
             .countAttempts(commitMetrics().attempts())
             .run(
                 taskOps -> {
-                  this.manifestListKeys = List.of();
                   Snapshot newSnapshot = apply();
                   newSnapshotId.set(newSnapshot.snapshotId());
                   TableMetadata.Builder update = TableMetadata.buildFrom(base);
