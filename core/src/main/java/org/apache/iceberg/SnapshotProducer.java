@@ -308,8 +308,6 @@ abstract class SnapshotProducer<ThisT> implements SnapshotUpdate<ThisT> {
 
     OutputFile manifestList = manifestListPath();
 
-    // Hold the encryption manager that mints the manifest list key, so the key is resolved from
-    // the same instance rather than from whatever instance is ambient at commit time.
     EncryptionManager encryption = ops.encryption();
     ManifestListWriter writer =
         ManifestLists.write(
