@@ -132,6 +132,14 @@ public class StandardEncryptionManager implements EncryptionManager {
     return encryptionKeys;
   }
 
+  StandardEncryptionManager copy() {
+    StandardEncryptionManager copy =
+        new StandardEncryptionManager(
+            List.copyOf(encryptionKeys.values()), tableKeyId, dataKeyLength, kmsClient);
+    copy.testTimeShift = testTimeShift;
+    return copy;
+  }
+
   String keyEncryptionKeyID() {
     // Find unexpired key encryption key
     for (String keyID : encryptionKeys.keySet()) {

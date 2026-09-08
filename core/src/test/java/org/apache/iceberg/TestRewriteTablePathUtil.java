@@ -23,7 +23,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
+import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,6 +34,12 @@ import java.util.stream.Collectors;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.deletes.PositionDeleteWriter;
+import org.apache.iceberg.encryption.EncryptedOutputFile;
+import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionTestHelpers;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.DeleteSchemaUtil;
 import org.apache.iceberg.io.InputFile;
@@ -562,6 +571,137 @@ public class TestRewriteTablePathUtil extends TestBase {
     assertThat(result.rewrittenManifestLengths())
         .as("recorded length should be keyed by source path and match the rewritten manifest")
         .containsExactly(entry(manifest.path(), output.toInputFile().getLength()));
+  }
+
+  @TestTemplate
+  void rewritesManifestEncryptionMetadata() throws IOException {
+    assumeThat(formatVersion).isGreaterThanOrEqualTo(3);
+
+    String sourcePrefix = new File(URI.create(table.location())).getAbsolutePath();
+    String targetPrefix = sourcePrefix + "-target";
+    DataFile dataFile =
+        DataFiles.builder(SPEC)
+            .withPath(sourcePrefix + "/data/data.parquet")
+            .withFileSizeInBytes(10)
+            .withPartitionPath("data_bucket=0")
+            .withRecordCount(1)
+            .build();
+    table.newFastAppend().appendFile(dataFile).commit();
+    Snapshot snapshot = table.currentSnapshot();
+    ManifestFile sourceManifest = snapshot.allManifests(table.io()).get(0);
+
+    EncryptionManager encryptionManager = EncryptionTestHelpers.createEncryptionManager();
+    OutputFile rawManifestOutput =
+        Files.localOutput(temp.resolve("rewritten-manifest.avro").toFile());
+    EncryptedOutputFile manifestOutput = encryptionManager.encrypt(rawManifestOutput);
+    RewriteTablePathUtil.RewriteResult<DataFile> rewrittenManifest =
+        RewriteTablePathUtil.rewriteDataManifest(
+            sourceManifest,
+            Set.of(snapshot.snapshotId()),
+            manifestOutput,
+            table.io(),
+            formatVersion,
+            table.specs(),
+            sourcePrefix,
+            targetPrefix);
+
+    ByteBuffer manifestKeyMetadata =
+        rewrittenManifest.rewrittenManifestKeyMetadata(sourceManifest.path());
+    assertThat(manifestKeyMetadata).isNotNull();
+
+    EncryptingFileIO encryptingFileIO = EncryptingFileIO.combine(table.io(), encryptionManager);
+    String outputPath = temp.resolve("rewritten-manifest-list.avro").toString();
+    RewriteTablePathUtil.RewriteResult<ManifestFile> rewrittenManifestList =
+        RewriteTablePathUtil.rewriteManifestList(
+            snapshot,
+            encryptingFileIO,
+            table.ops().current(),
+            rewrittenManifest,
+            sourcePrefix,
+            targetPrefix,
+            temp.resolve("staging").toString(),
+            outputPath);
+
+    String manifestListKeyID =
+        rewrittenManifestList.rewrittenManifestListKeyIDs().get(snapshot.snapshotId());
+    assertThat(manifestListKeyID).isNotNull();
+    assertThat(EncryptionUtil.encryptionKeys(encryptionManager)).containsKey(manifestListKeyID);
+
+    ManifestListFile manifestListFile = new BaseManifestListFile(outputPath, manifestListKeyID);
+    List<ManifestFile> manifests =
+        ManifestLists.read(encryptingFileIO.newInputFile(manifestListFile));
+    assertThat(manifests)
+        .singleElement()
+        .satisfies(
+            manifest -> {
+              assertThat(manifest.path())
+                  .isEqualTo(
+                      RewriteTablePathUtil.newPath(
+                          sourceManifest.path(), sourcePrefix, targetPrefix));
+              assertThat(manifest.keyMetadata()).isEqualTo(manifestKeyMetadata);
+            });
+
+    ManifestFile encryptedManifest = sourceManifest.copy();
+    ((StructLike) encryptedManifest).set(0, rawManifestOutput.location());
+    ((StructLike) encryptedManifest)
+        .set(1, rewrittenManifest.rewrittenManifestLengths().get(sourceManifest.path()));
+    ((StructLike) encryptedManifest).set(14, manifestKeyMetadata);
+    String secondSourcePrefix = temp.getParent().toString();
+    String secondTargetPrefix = secondSourcePrefix + "/second-target";
+    OutputFile plaintextManifestOutput =
+        Files.localOutput(temp.resolve("plaintext-manifest.avro").toFile());
+    RewriteTablePathUtil.RewriteResult<DataFile> plaintextManifest =
+        RewriteTablePathUtil.rewriteDataManifest(
+            encryptedManifest,
+            Set.of(snapshot.snapshotId()),
+            plaintextManifestOutput,
+            encryptingFileIO,
+            formatVersion,
+            table.specs(),
+            secondSourcePrefix,
+            secondTargetPrefix);
+    assertThat(plaintextManifest.rewrittenManifestKeyMetadata(encryptedManifest.path())).isNull();
+
+    OutputFile encryptedSourceList =
+        Files.localOutput(temp.resolve("encrypted-source-list.avro").toFile());
+    try (ManifestListWriter writer =
+        ManifestLists.write(
+            formatVersion,
+            encryptedSourceList,
+            PlaintextEncryptionManager.instance(),
+            snapshot.snapshotId(),
+            snapshot.parentId(),
+            snapshot.sequenceNumber(),
+            snapshot.firstRowId())) {
+      writer.add(encryptedManifest);
+    }
+    Snapshot encryptedSnapshot =
+        new BaseSnapshot(
+            snapshot.sequenceNumber(),
+            snapshot.snapshotId(),
+            snapshot.parentId(),
+            snapshot.timestampMillis(),
+            snapshot.operation(),
+            snapshot.summary(),
+            snapshot.schemaId(),
+            encryptedSourceList.location(),
+            snapshot.firstRowId(),
+            snapshot.addedRows(),
+            null);
+    String plaintextListOutput = temp.resolve("plaintext-list.avro").toString();
+    RewriteTablePathUtil.rewriteManifestList(
+        encryptedSnapshot,
+        table.io(),
+        table.ops().current(),
+        plaintextManifest,
+        secondSourcePrefix,
+        secondTargetPrefix,
+        temp.resolve("second-staging").toString(),
+        plaintextListOutput);
+    assertThat(ManifestLists.read(table.io().newInputFile(plaintextListOutput)))
+        .singleElement()
+        .extracting(ManifestFile::keyMetadata)
+        .isNull();
   }
 
   @Test

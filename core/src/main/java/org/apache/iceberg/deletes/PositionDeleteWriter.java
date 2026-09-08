@@ -32,7 +32,7 @@ import org.apache.iceberg.MetricsUtil;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.encryption.EncryptionKeyMetadata;
-import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.FileWriter;
@@ -56,7 +56,7 @@ public class PositionDeleteWriter<T> implements FileWriter<PositionDelete<T>, De
   private final String location;
   private final PartitionSpec spec;
   private final StructLike partition;
-  private final ByteBuffer keyMetadata;
+  private final EncryptionKeyMetadata keyMetadata;
   private final CharSequenceSet referencedDataFiles;
   private DeleteFile deleteFile = null;
 
@@ -73,7 +73,7 @@ public class PositionDeleteWriter<T> implements FileWriter<PositionDelete<T>, De
     this.location = location;
     this.spec = spec;
     this.partition = partition;
-    this.keyMetadata = keyMetadata != null ? keyMetadata.buffer() : null;
+    this.keyMetadata = keyMetadata != null ? keyMetadata.copy() : null;
     this.referencedDataFiles = CharSequenceSet.empty();
   }
 
@@ -98,8 +98,7 @@ public class PositionDeleteWriter<T> implements FileWriter<PositionDelete<T>, De
               .withFormat(format)
               .withPath(location)
               .withPartition(partition)
-              .withEncryptionKeyMetadata(
-                  EncryptionUtil.setFileLength(keyMetadata, appender.length()))
+              .withEncryptionKeyMetadata(encryptionKeyMetadata(appender.length()))
               .withSplitOffsets(appender.splitOffsets())
               .withFileSizeInBytes(appender.length())
               .withMetrics(metrics())
@@ -128,5 +127,13 @@ public class PositionDeleteWriter<T> implements FileWriter<PositionDelete<T>, De
     } else {
       return MetricsUtil.copyWithoutFieldCounts(metrics, FILE_AND_POS_FIELD_IDS);
     }
+  }
+
+  private ByteBuffer encryptionKeyMetadata(long fileSizeInBytes) {
+    if (keyMetadata instanceof NativeEncryptionKeyMetadata nativeKeyMetadata) {
+      return nativeKeyMetadata.copyWithLength(fileSizeInBytes).buffer();
+    }
+
+    return keyMetadata != null ? keyMetadata.buffer() : null;
   }
 }

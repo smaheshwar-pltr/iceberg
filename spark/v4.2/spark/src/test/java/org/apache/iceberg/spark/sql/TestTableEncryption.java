@@ -25,10 +25,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumFileSystem;
 import org.apache.hadoop.fs.FileSystem;
@@ -36,17 +38,31 @@ import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
+import org.apache.iceberg.ManifestContent;
+import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.ManifestFiles;
+import org.apache.iceberg.ManifestReader;
 import org.apache.iceberg.MetadataTableType;
 import org.apache.iceberg.Parameters;
+import org.apache.iceberg.RewriteTablePathUtil;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.Transaction;
+import org.apache.iceberg.actions.RewriteTablePath;
+import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.deletes.BaseDVFileWriter;
+import org.apache.iceberg.deletes.DVFileWriter;
 import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
@@ -58,6 +74,7 @@ import org.apache.iceberg.spark.actions.SparkActions;
 import org.apache.iceberg.types.Types;
 import org.apache.parquet.crypto.ParquetCryptoRuntimeException;
 import org.apache.spark.SparkException;
+import org.apache.spark.sql.Row;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestTemplate;
@@ -96,6 +113,7 @@ public class TestTableEncryption extends CatalogTestBase {
   @AfterEach
   public void removeTables() {
     sql("DROP TABLE IF EXISTS %s", tableName);
+    sql("DROP TABLE IF EXISTS %s", tableName("rewritten_table"));
   }
 
   @TestTemplate
@@ -107,21 +125,150 @@ public class TestTableEncryption extends CatalogTestBase {
   }
 
   @TestTemplate
-  public void testRejectsRewriteTablePath() {
+  public void rewriteTablePathPreservesEncryption() throws Exception {
+    String shufflePartitions = spark.conf().get("spark.sql.shuffle.partitions");
+    try {
+      spark.conf().set("spark.sql.shuffle.partitions", "4");
+      assertRewriteTablePathPreservesEncryption();
+    } finally {
+      spark.conf().set("spark.sql.shuffle.partitions", shufflePartitions);
+    }
+  }
+
+  private void assertRewriteTablePathPreservesEncryption() throws Exception {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(tableIdent);
-    File stagingDir = temp.resolve("rewrite-table-path-staging").toFile();
+    String targetLocation = temp.resolve("rewrite-table-path-target").toUri().toString();
+    String stagingLocation = temp.resolve("rewrite-table-path-staging").toUri().toString();
+
+    addPositionDelete(table);
+    table.refresh();
+    sql("REFRESH TABLE %s", tableName);
+    List<Object[]> expected = sql("SELECT * FROM %s ORDER BY id", tableName);
+    int sourceKeyCount = EncryptionUtil.encryptionKeys(table.encryption()).size();
+
+    RewriteTablePath.Result result =
+        SparkActions.get()
+            .rewriteTablePath(table)
+            .rewriteLocationPrefix(table.location(), targetLocation)
+            .stagingLocation(stagingLocation)
+            .execute();
+    assertThat(EncryptionUtil.encryptionKeys(table.encryption())).hasSize(sourceKeyCount);
+
+    copyTableFiles(result);
+    String targetMetadataLocation =
+        RewriteTablePathUtil.combinePaths(targetLocation, "metadata/" + result.latestVersion());
+    TableIdentifier targetIdent = TableIdentifier.of("default", "rewritten_table");
+    validationCatalog.registerTable(targetIdent, targetMetadataLocation);
+
+    assertEquals(
+        "Should read all rows from the rewritten table",
+        expected,
+        sql("SELECT * FROM %s ORDER BY id", tableName("rewritten_table")));
+
+    Table rewrittenTable = validationCatalog.loadTable(targetIdent);
+    TableMetadata rewrittenMetadata = ((HasTableOperations) rewrittenTable).operations().current();
+    assertThat(rewrittenTable.currentSnapshot().keyId())
+        .isNotEqualTo(table.currentSnapshot().keyId());
+    assertThat(rewrittenMetadata.encryptionKeys())
+        .anyMatch(key -> key.keyId().equals(rewrittenTable.currentSnapshot().keyId()));
+    assertEncryptedMetadataFiles(rewrittenTable);
+    Map<Long, String> targetSnapshotKeyIDs =
+        Streams.stream(rewrittenTable.snapshots())
+            .collect(Collectors.toMap(Snapshot::snapshotId, Snapshot::keyId));
+
+    sql("INSERT INTO %s VALUES (4, 'd', 4.0)", tableName);
+    table.refresh();
+    RewriteTablePath.Result incrementalResult =
+        SparkActions.get()
+            .rewriteTablePath(table)
+            .rewriteLocationPrefix(table.location(), targetLocation)
+            .stagingLocation(temp.resolve("incremental-staging").toUri().toString())
+            .startVersion(result.latestVersion())
+            .execute();
+    copyTableFiles(incrementalResult);
+
+    sql("DROP TABLE %s", tableName("rewritten_table"));
+    validationCatalog.registerTable(
+        targetIdent,
+        RewriteTablePathUtil.combinePaths(
+            targetLocation, "metadata/" + incrementalResult.latestVersion()));
+    assertEquals(
+        "Should read all rows after an incremental rewrite",
+        sql("SELECT * FROM %s ORDER BY id", tableName),
+        sql("SELECT * FROM %s ORDER BY id", tableName("rewritten_table")));
+
+    Table incrementalTable = validationCatalog.loadTable(targetIdent);
+    Map<Long, String> incrementalSnapshotKeyIDs =
+        Streams.stream(incrementalTable.snapshots())
+            .collect(Collectors.toMap(Snapshot::snapshotId, Snapshot::keyId));
+    assertThat(incrementalSnapshotKeyIDs).containsAllEntriesOf(targetSnapshotKeyIDs);
+    assertThat(((HasTableOperations) incrementalTable).operations().current().encryptionKeys())
+        .extracting(key -> key.keyId())
+        .containsAll(targetSnapshotKeyIDs.values());
+    assertEncryptedMetadataFiles(incrementalTable);
+  }
+
+  @TestTemplate
+  public void encryptedIncrementalRewriteRequiresTargetStartVersion() {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(tableIdent);
+    String startVersion =
+        RewriteTablePathUtil.fileName(
+            ((HasTableOperations) table).operations().current().metadataFileLocation());
+    File stagingDir = temp.resolve("missing-target-staging").toFile();
 
     assertThatThrownBy(
             () ->
                 SparkActions.get()
                     .rewriteTablePath(table)
-                    .rewriteLocationPrefix(table.location(), table.location() + "-rewritten")
-                    .stagingLocation(stagingDir.getAbsolutePath())
+                    .rewriteLocationPrefix(
+                        table.location(), temp.resolve("missing-target").toUri().toString())
+                    .stagingLocation(stagingDir.toURI().toString())
+                    .startVersion(startVersion)
                     .execute())
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Cannot rewrite table paths for encrypted tables");
+        .hasMessageContaining("Cannot find target start version file");
     assertThat(stagingDir).doesNotExist();
+  }
+
+  private void assertEncryptedMetadataFiles(Table table) throws IOException {
+    checkMetadataFileEncryption(localInput(table.currentSnapshot().manifestListLocation()));
+    boolean foundDeleteFile = false;
+    for (ManifestFile manifest : table.currentSnapshot().allManifests(table.io())) {
+      checkMetadataFileEncryption(localInput(manifest.path()));
+      if (manifest.content() == ManifestContent.DELETES) {
+        try (ManifestReader<DeleteFile> reader =
+            ManifestFiles.readDeleteManifest(manifest, table.io(), table.specs())) {
+          for (DeleteFile deleteFile : reader) {
+            foundDeleteFile = true;
+            assertThat(deleteFile.keyMetadata()).isNotNull();
+            checkMetadataFileEncryption(localInput(deleteFile.location()));
+          }
+        }
+      }
+    }
+    assertThat(foundDeleteFile).isTrue();
+  }
+
+  private void addPositionDelete(Table table) throws IOException {
+    DataFile dataFile = currentDataFiles(table).get(0);
+    OutputFileFactory fileFactory =
+        OutputFileFactory.builderFor(table, 1, 1).format(FileFormat.PUFFIN).build();
+    DVFileWriter writer = new BaseDVFileWriter(fileFactory, path -> null);
+    try (writer) {
+      writer.delete(dataFile.location(), 0L, table.spec(), dataFile.partition());
+    }
+
+    table.newRowDelta().addDeletes(writer.result().deleteFiles().get(0)).commit();
+  }
+
+  private void copyTableFiles(RewriteTablePath.Result result) throws IOException {
+    for (Row filePair :
+        spark.read().format("csv").load(result.fileListLocation()).collectAsList()) {
+      FileUtils.copyFile(
+          new File(URI.create(filePair.getString(0))), new File(URI.create(filePair.getString(1))));
+    }
   }
 
   private static List<DataFile> currentDataFiles(Table table) {

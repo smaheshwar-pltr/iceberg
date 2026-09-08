@@ -182,6 +182,18 @@ public class EncryptionUtil {
   }
 
   /**
+   * Returns an encryption manager with independent key state when the manager maintains a key
+   * registry.
+   */
+  public static EncryptionManager copyEncryptionManager(EncryptionManager encryptionManager) {
+    if (encryptionManager.getClass() == StandardEncryptionManager.class) {
+      return ((StandardEncryptionManager) encryptionManager).copy();
+    }
+
+    return encryptionManager;
+  }
+
+  /**
    * Encrypts the key metadata for a manifest list.
    *
    * @param key key encryption key bytes

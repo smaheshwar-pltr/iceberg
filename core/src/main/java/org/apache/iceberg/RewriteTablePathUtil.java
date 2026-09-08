@@ -32,17 +32,23 @@ import java.util.stream.StreamSupport;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.deletes.PositionDelete;
 import org.apache.iceberg.deletes.PositionDeleteWriter;
+import org.apache.iceberg.encryption.EncryptedFiles;
+import org.apache.iceberg.encryption.EncryptedKey;
+import org.apache.iceberg.encryption.EncryptedOutputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
+import org.apache.iceberg.encryption.EncryptionKeyMetadata;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.NativeEncryptionKeyMetadata;
+import org.apache.iceberg.encryption.NativeEncryptionOutputFile;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.CloseableIterator;
-import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.puffin.Blob;
+import org.apache.iceberg.puffin.BlobMetadata;
 import org.apache.iceberg.puffin.Puffin;
 import org.apache.iceberg.puffin.PuffinCompressionCodec;
 import org.apache.iceberg.puffin.PuffinReader;
@@ -53,6 +59,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.util.ByteBuffers;
 import org.apache.iceberg.util.ContentFileUtil;
 import org.apache.iceberg.util.Pair;
 import org.slf4j.Logger;
@@ -77,6 +84,9 @@ public class RewriteTablePathUtil {
     private final Set<T> toRewrite = Sets.newHashSet();
     private final Set<Pair<String, String>> copyPlan = Sets.newHashSet();
     private final Map<String, Long> rewrittenManifestLengths = Maps.newHashMap();
+    private final Map<String, byte[]> rewrittenManifestKeyMetadata = Maps.newHashMap();
+    private final Map<String, String> rewrittenManifestStagingPaths = Maps.newHashMap();
+    private final Map<Long, String> rewrittenManifestListKeyIDs = Maps.newHashMap();
 
     public RewriteResult() {}
 
@@ -84,6 +94,9 @@ public class RewriteTablePathUtil {
       toRewrite.addAll(r1.toRewrite);
       copyPlan.addAll(r1.copyPlan);
       rewrittenManifestLengths.putAll(r1.rewrittenManifestLengths);
+      rewrittenManifestKeyMetadata.putAll(r1.rewrittenManifestKeyMetadata);
+      rewrittenManifestStagingPaths.putAll(r1.rewrittenManifestStagingPaths);
+      rewrittenManifestListKeyIDs.putAll(r1.rewrittenManifestListKeyIDs);
       return this;
     }
 
@@ -109,6 +122,70 @@ public class RewriteTablePathUtil {
     public Map<String, Long> rewrittenManifestLengths() {
       return Collections.unmodifiableMap(rewrittenManifestLengths);
     }
+
+    /** Records key metadata for the manifest rewritten from the given source manifest path. */
+    protected void addRewrittenManifestKeyMetadata(
+        String sourceManifestPath, ByteBuffer keyMetadata) {
+      rewrittenManifestKeyMetadata.put(
+          sourceManifestPath, ByteBuffers.toByteArray(ByteBuffers.copy(keyMetadata)));
+    }
+
+    /** Returns key metadata for the manifest rewritten from the given source manifest path. */
+    public ByteBuffer rewrittenManifestKeyMetadata(String sourceManifestPath) {
+      byte[] keyMetadata = rewrittenManifestKeyMetadata.get(sourceManifestPath);
+      return keyMetadata != null ? ByteBuffer.wrap(keyMetadata).asReadOnlyBuffer() : null;
+    }
+
+    /** Records the staging path for the manifest rewritten from the given source manifest path. */
+    protected void addRewrittenManifestStagingPath(String sourceManifestPath, String stagingPath) {
+      rewrittenManifestStagingPaths.put(sourceManifestPath, stagingPath);
+    }
+
+    /** Returns the staging path for the manifest rewritten from the given source manifest path. */
+    public String rewrittenManifestStagingPath(String sourceManifestPath) {
+      return rewrittenManifestStagingPaths.get(sourceManifestPath);
+    }
+
+    /** Records the key ID for a rewritten snapshot's manifest list. */
+    private void addRewrittenManifestListKeyID(long snapshotID, String keyID) {
+      if (keyID != null) {
+        rewrittenManifestListKeyIDs.put(snapshotID, keyID);
+      }
+    }
+
+    /** Returns rewritten manifest list key IDs, keyed by snapshot ID. */
+    public Map<Long, String> rewrittenManifestListKeyIDs() {
+      return Collections.unmodifiableMap(rewrittenManifestListKeyIDs);
+    }
+  }
+
+  /** Result of rewriting a single file. */
+  public static class RewriteFileResult implements Serializable {
+    private final long fileSizeInBytes;
+    private final byte[] keyMetadata;
+    private final String stagingPath;
+
+    private RewriteFileResult(long fileSizeInBytes, ByteBuffer keyMetadata) {
+      this(fileSizeInBytes, keyMetadata, null);
+    }
+
+    private RewriteFileResult(long fileSizeInBytes, ByteBuffer keyMetadata, String stagingPath) {
+      this.fileSizeInBytes = fileSizeInBytes;
+      this.keyMetadata = ByteBuffers.toByteArray(ByteBuffers.copy(keyMetadata));
+      this.stagingPath = stagingPath;
+    }
+
+    public long fileSizeInBytes() {
+      return fileSizeInBytes;
+    }
+
+    public ByteBuffer keyMetadata() {
+      return keyMetadata != null ? ByteBuffer.wrap(keyMetadata).asReadOnlyBuffer() : null;
+    }
+
+    private String stagingPath() {
+      return stagingPath;
+    }
   }
 
   /**
@@ -121,8 +198,29 @@ public class RewriteTablePathUtil {
    */
   public static TableMetadata replacePaths(
       TableMetadata metadata, String sourcePrefix, String targetPrefix) {
+    return replacePaths(
+        metadata, sourcePrefix, targetPrefix, Collections.emptyMap(), metadata.encryptionKeys());
+  }
+
+  /**
+   * Create a new table metadata object, replacing path and encryption references.
+   *
+   * @param metadata source table metadata
+   * @param sourcePrefix source prefix that will be replaced
+   * @param targetPrefix target prefix that will replace it
+   * @param snapshotKeyIDs replacement manifest list key IDs, keyed by snapshot ID
+   * @param encryptionKeys encryption keys to store in the rewritten metadata
+   * @return copy of table metadata with paths and encryption references replaced
+   */
+  public static TableMetadata replacePaths(
+      TableMetadata metadata,
+      String sourcePrefix,
+      String targetPrefix,
+      Map<Long, String> snapshotKeyIDs,
+      List<EncryptedKey> encryptionKeys) {
     String newLocation = newPath(metadata.location(), sourcePrefix, targetPrefix);
-    List<Snapshot> newSnapshots = updatePathInSnapshots(metadata, sourcePrefix, targetPrefix);
+    List<Snapshot> newSnapshots =
+        updatePathInSnapshots(metadata, sourcePrefix, targetPrefix, snapshotKeyIDs);
     List<TableMetadata.MetadataLogEntry> metadataLogEntries =
         updatePathInMetadataLogs(metadata, sourcePrefix, targetPrefix);
     long snapshotId =
@@ -156,7 +254,7 @@ public class RewriteTablePathUtil {
         updatePathInPartitionStatisticsFiles(
             metadata.partitionStatisticsFiles(), sourcePrefix, targetPrefix),
         metadata.nextRowId(),
-        metadata.encryptionKeys(),
+        ImmutableList.copyOf(encryptionKeys),
         metadata.changes());
   }
 
@@ -239,7 +337,10 @@ public class RewriteTablePathUtil {
   }
 
   private static List<Snapshot> updatePathInSnapshots(
-      TableMetadata metadata, String sourcePrefix, String targetPrefix) {
+      TableMetadata metadata,
+      String sourcePrefix,
+      String targetPrefix,
+      Map<Long, String> snapshotKeyIDs) {
     List<Snapshot> newSnapshots = Lists.newArrayListWithCapacity(metadata.snapshots().size());
     for (Snapshot snapshot : metadata.snapshots()) {
       String newManifestListLocation =
@@ -256,7 +357,9 @@ public class RewriteTablePathUtil {
               newManifestListLocation,
               snapshot.firstRowId(),
               snapshot.addedRows(),
-              snapshot.keyId());
+              snapshotKeyIDs.containsKey(snapshot.snapshotId())
+                  ? snapshotKeyIDs.get(snapshot.snapshotId())
+                  : snapshot.keyId());
       newSnapshots.add(newSnapshot);
     }
     return newSnapshots;
@@ -287,6 +390,78 @@ public class RewriteTablePathUtil {
       String targetPrefix,
       String stagingDir,
       String outputPath) {
+    RewriteResult<ContentFile<?>> rewrittenManifests = new RewriteResult<>();
+    rewrittenManifestLengths.forEach(rewrittenManifests::addRewrittenManifestLength);
+    return rewriteManifestList(
+        snapshot,
+        io,
+        tableMetadata,
+        rewrittenManifests,
+        sourcePrefix,
+        targetPrefix,
+        stagingDir,
+        outputPath);
+  }
+
+  /**
+   * Rewrite a manifest list representing a snapshot, replacing path and encryption references.
+   *
+   * @param snapshot snapshot represented by the manifest list
+   * @param io file io
+   * @param tableMetadata metadata of table
+   * @param rewrittenManifests metadata for manifests rewritten by this run
+   * @param sourcePrefix source prefix that will be replaced
+   * @param targetPrefix target prefix that will replace it
+   * @param stagingDir staging directory
+   * @param outputPath location to write the manifest list
+   * @return a copy plan and encryption metadata for files represented by the manifest list
+   */
+  public static RewriteResult<ManifestFile> rewriteManifestList(
+      Snapshot snapshot,
+      FileIO io,
+      TableMetadata tableMetadata,
+      RewriteResult<?> rewrittenManifests,
+      String sourcePrefix,
+      String targetPrefix,
+      String stagingDir,
+      String outputPath) {
+    return rewriteManifestList(
+        snapshot,
+        io,
+        tableMetadata,
+        rewrittenManifests,
+        Collections.emptyMap(),
+        sourcePrefix,
+        targetPrefix,
+        stagingDir,
+        outputPath);
+  }
+
+  /**
+   * Rewrite a manifest list, using existing target metadata for manifests carried over by an
+   * incremental rewrite.
+   *
+   * @param snapshot snapshot represented by the manifest list
+   * @param io file io
+   * @param tableMetadata metadata of table
+   * @param rewrittenManifests metadata for manifests rewritten by this run
+   * @param existingTargetManifests target metadata keyed by source manifest path
+   * @param sourcePrefix source prefix that will be replaced
+   * @param targetPrefix target prefix that will replace it
+   * @param stagingDir staging directory
+   * @param outputPath location to write the manifest list
+   * @return a copy plan and encryption metadata for files represented by the manifest list
+   */
+  public static RewriteResult<ManifestFile> rewriteManifestList(
+      Snapshot snapshot,
+      FileIO io,
+      TableMetadata tableMetadata,
+      RewriteResult<?> rewrittenManifests,
+      Map<String, ManifestFile> existingTargetManifests,
+      String sourcePrefix,
+      String targetPrefix,
+      String stagingDir,
+      String outputPath) {
     RewriteResult<ManifestFile> result = new RewriteResult<>();
     OutputFile outputFile = io.newOutputFile(outputPath);
 
@@ -301,7 +476,7 @@ public class RewriteTablePathUtil {
 
     long carriedOver =
         manifestFiles.stream()
-            .filter(mf -> !rewrittenManifestLengths.containsKey(mf.path()))
+            .filter(mf -> !rewrittenManifests.rewrittenManifestLengths.containsKey(mf.path()))
             .count();
     if (carriedOver > 0) {
       LOG.info(
@@ -316,7 +491,7 @@ public class RewriteTablePathUtil {
             ? ((EncryptingFileIO) io).encryptionManager()
             : PlaintextEncryptionManager.instance();
 
-    try (FileAppender<ManifestFile> writer =
+    ManifestListWriter writer =
         ManifestLists.write(
             tableMetadata.formatVersion(),
             outputFile,
@@ -324,27 +499,58 @@ public class RewriteTablePathUtil {
             snapshot.snapshotId(),
             snapshot.parentId(),
             snapshot.sequenceNumber(),
-            snapshot.firstRowId())) {
+            snapshot.firstRowId());
+
+    try (writer) {
 
       for (ManifestFile file : manifestFiles) {
         ManifestFile newFile = file.copy();
         ((StructLike) newFile).set(0, newPath(newFile.path(), sourcePrefix, targetPrefix));
-        ((StructLike) newFile)
-            .set(1, rewrittenManifestLengths.getOrDefault(file.path(), file.length()));
+        if (rewrittenManifests.rewrittenManifestLengths.containsKey(file.path())) {
+          ((StructLike) newFile)
+              .set(1, rewrittenManifests.rewrittenManifestLengths.get(file.path()));
+          setManifestKeyMetadata(
+              newFile, rewrittenManifests.rewrittenManifestKeyMetadata(file.path()));
+        } else {
+          ManifestFile existingTargetManifest = existingTargetManifests.get(file.path());
+          if (existingTargetManifest != null) {
+            ((StructLike) newFile).set(1, existingTargetManifest.length());
+            setManifestKeyMetadata(newFile, existingTargetManifest.keyMetadata());
+          }
+        }
+
         writer.add(newFile);
 
-        if (rewrittenManifestLengths.containsKey(file.path())) {
+        if (rewrittenManifests.rewrittenManifestLengths.containsKey(file.path())) {
           result.toRewrite().add(file);
+          String rewrittenStagingPath =
+              rewrittenManifests.rewrittenManifestStagingPath(file.path());
           result
               .copyPlan()
-              .add(Pair.of(stagingPath(file.path(), sourcePrefix, stagingDir), newFile.path()));
+              .add(
+                  Pair.of(
+                      rewrittenStagingPath != null
+                          ? rewrittenStagingPath
+                          : stagingPath(file.path(), sourcePrefix, stagingDir),
+                      newFile.path()));
         }
       }
-      return result;
     } catch (IOException e) {
       throw new UncheckedIOException(
           "Failed to rewrite the manifest list file " + snapshot.manifestListLocation(), e);
     }
+
+    ManifestListFile rewrittenManifestList;
+    synchronized (encryptionManager) {
+      rewrittenManifestList = writer.toManifestListFile();
+    }
+    result.addRewrittenManifestListKeyID(
+        snapshot.snapshotId(), rewrittenManifestList.encryptionKeyID());
+    return result;
+  }
+
+  private static void setManifestKeyMetadata(ManifestFile manifest, ByteBuffer keyMetadata) {
+    ((StructLike) manifest).set(14, keyMetadata);
   }
 
   private static List<ManifestFile> manifestFilesInSnapshot(FileIO io, Snapshot snapshot) {
@@ -380,6 +586,40 @@ public class RewriteTablePathUtil {
       String sourcePrefix,
       String targetPrefix)
       throws IOException {
+    return rewriteDataManifest(
+        manifestFile,
+        snapshotIds,
+        EncryptedFiles.plainAsEncryptedOutput(outputFile),
+        io,
+        format,
+        specsById,
+        sourcePrefix,
+        targetPrefix);
+  }
+
+  /**
+   * Rewrite a data manifest, replacing path references and retaining output encryption metadata.
+   *
+   * @param manifestFile source manifest file to rewrite
+   * @param snapshotIds snapshot ids for filtering returned data manifest entries
+   * @param outputFile encrypted output file to rewrite manifest file to
+   * @param io file io
+   * @param format format of the manifest file
+   * @param specsById map of partition specs by id
+   * @param sourcePrefix source prefix that will be replaced
+   * @param targetPrefix target prefix that will replace it
+   * @return a copy plan and metadata for the rewritten manifest
+   */
+  public static RewriteResult<DataFile> rewriteDataManifest(
+      ManifestFile manifestFile,
+      Set<Long> snapshotIds,
+      EncryptedOutputFile outputFile,
+      FileIO io,
+      int format,
+      Map<Integer, PartitionSpec> specsById,
+      String sourcePrefix,
+      String targetPrefix)
+      throws IOException {
     PartitionSpec spec = specsById.get(manifestFile.partitionSpecId());
     ManifestWriter<DataFile> writer =
         ManifestFiles.write(format, spec, outputFile, manifestFile.snapshotId());
@@ -396,7 +636,10 @@ public class RewriteTablePathUtil {
               .reduce(new RewriteResult<>(), RewriteResult::append);
     }
 
-    result.addRewrittenManifestLength(manifestFile.path(), writer.length());
+    ManifestFile rewrittenManifest = writer.toManifestFile();
+    result.addRewrittenManifestLength(manifestFile.path(), rewrittenManifest.length());
+    result.addRewrittenManifestKeyMetadata(manifestFile.path(), rewrittenManifest.keyMetadata());
+    result.addRewrittenManifestStagingPath(manifestFile.path(), rewrittenManifest.path());
     return result;
   }
 
@@ -478,6 +721,49 @@ public class RewriteTablePathUtil {
       String stagingLocation,
       Map<String, Long> rewrittenDeleteFileSizes)
       throws IOException {
+    Map<String, RewriteFileResult> rewrittenDeleteFiles = Maps.newHashMap();
+    rewrittenDeleteFileSizes.forEach(
+        (path, length) -> rewrittenDeleteFiles.put(path, new RewriteFileResult(length, null)));
+    return rewriteDeleteManifest(
+        manifestFile,
+        snapshotIds,
+        EncryptedFiles.plainAsEncryptedOutput(outputFile),
+        io,
+        format,
+        specsById,
+        sourcePrefix,
+        targetPrefix,
+        stagingLocation,
+        rewrittenDeleteFiles);
+  }
+
+  /**
+   * Rewrite a delete manifest, replacing path and encryption references.
+   *
+   * @param manifestFile source delete manifest to rewrite
+   * @param snapshotIds snapshot ids for filtering returned delete manifest entries
+   * @param outputFile encrypted output file to rewrite manifest file to
+   * @param io file io
+   * @param format format of the manifest file
+   * @param specsById map of partition specs by id
+   * @param sourcePrefix source prefix that will be replaced
+   * @param targetPrefix target prefix that will replace it
+   * @param stagingLocation staging location for rewritten position delete files
+   * @param rewrittenDeleteFiles metadata for rewritten position delete files, keyed by source path
+   * @return a copy plan and metadata for the rewritten manifest
+   */
+  public static RewriteResult<DeleteFile> rewriteDeleteManifest(
+      ManifestFile manifestFile,
+      Set<Long> snapshotIds,
+      EncryptedOutputFile outputFile,
+      FileIO io,
+      int format,
+      Map<Integer, PartitionSpec> specsById,
+      String sourcePrefix,
+      String targetPrefix,
+      String stagingLocation,
+      Map<String, RewriteFileResult> rewrittenDeleteFiles)
+      throws IOException {
     PartitionSpec spec = specsById.get(manifestFile.partitionSpecId());
     ManifestWriter<DeleteFile> writer =
         ManifestFiles.writeDeleteManifest(format, spec, outputFile, manifestFile.snapshotId());
@@ -498,11 +784,14 @@ public class RewriteTablePathUtil {
                           targetPrefix,
                           stagingLocation,
                           writer,
-                          rewrittenDeleteFileSizes))
+                          rewrittenDeleteFiles))
               .reduce(new RewriteResult<>(), RewriteResult::append);
     }
 
-    result.addRewrittenManifestLength(manifestFile.path(), writer.length());
+    ManifestFile rewrittenManifest = writer.toManifestFile();
+    result.addRewrittenManifestLength(manifestFile.path(), rewrittenManifest.length());
+    result.addRewrittenManifestKeyMetadata(manifestFile.path(), rewrittenManifest.keyMetadata());
+    result.addRewrittenManifestStagingPath(manifestFile.path(), rewrittenManifest.path());
     return result;
   }
 
@@ -542,7 +831,7 @@ public class RewriteTablePathUtil {
       String targetPrefix,
       String stagingLocation,
       ManifestWriter<DeleteFile> writer,
-      Map<String, Long> rewrittenDeleteFileSizes) {
+      Map<String, RewriteFileResult> rewrittenDeleteFiles) {
 
     DeleteFile file = entry.file();
     RewriteResult<DeleteFile> result = new RewriteResult<>();
@@ -551,20 +840,23 @@ public class RewriteTablePathUtil {
       case POSITION_DELETES:
         // Path rewrites change the file size; use the measured size, falling back to the original
         // for entries that were not rewritten (e.g. deleted entries not copied to the target).
-        long fileSizeInBytes =
-            rewrittenDeleteFileSizes.getOrDefault(file.location(), file.fileSizeInBytes());
+        RewriteFileResult rewrittenDeleteFile = rewrittenDeleteFiles.get(file.location());
         DeleteFile posDeleteFile =
-            newPositionDeleteEntry(file, spec, sourcePrefix, targetPrefix, fileSizeInBytes);
+            newPositionDeleteEntry(file, spec, sourcePrefix, targetPrefix, rewrittenDeleteFile);
         appendEntryWithFile(entry, writer, posDeleteFile);
         // keep the following entries in metadata but exclude them from copyPlan
         // 1) deleted position delete files
         // 2) entries not changed by snapshotIds
         if (entry.isLive() && snapshotIds.contains(entry.snapshotId())) {
+          String rewrittenStagingPath =
+              rewrittenDeleteFile != null ? rewrittenDeleteFile.stagingPath() : null;
           result
               .copyPlan()
               .add(
                   Pair.of(
-                      stagingPath(file.location(), sourcePrefix, stagingLocation),
+                      rewrittenStagingPath != null
+                          ? rewrittenStagingPath
+                          : stagingPath(file.location(), sourcePrefix, stagingLocation),
                       posDeleteFile.location()));
         }
         result.toRewrite().add(file.copy());
@@ -629,7 +921,7 @@ public class RewriteTablePathUtil {
       PartitionSpec spec,
       String sourcePrefix,
       String targetPrefix,
-      long fileSizeInBytes) {
+      RewriteFileResult rewrittenDeleteFile) {
     String path = file.location();
     Preconditions.checkArgument(
         path.startsWith(sourcePrefix),
@@ -641,8 +933,13 @@ public class RewriteTablePathUtil {
         FileMetadata.deleteFileBuilder(spec)
             .copy(file)
             .withPath(newPath(path, sourcePrefix, targetPrefix))
-            .withFileSizeInBytes(fileSizeInBytes)
             .withMetrics(ContentFileUtil.replacePathBounds(file, sourcePrefix, targetPrefix));
+
+    if (rewrittenDeleteFile != null) {
+      builder
+          .withFileSizeInBytes(rewrittenDeleteFile.fileSizeInBytes())
+          .withEncryptionKeyMetadata(rewrittenDeleteFile.keyMetadata());
+    }
 
     // Update referencedDataFile for DV files
     String newReferencedDataFile =
@@ -743,6 +1040,39 @@ public class RewriteTablePathUtil {
       String targetPrefix,
       PositionDeleteReaderWriter posDeleteReaderWriter)
       throws IOException {
+    return rewritePositionDelete(
+            deleteFile,
+            EncryptedFiles.plainAsEncryptedOutput(outputFile),
+            io,
+            spec,
+            sourcePrefix,
+            targetPrefix,
+            posDeleteReaderWriter)
+        .fileSizeInBytes();
+  }
+
+  /**
+   * Rewrite a position delete file, replacing path references and retaining output encryption
+   * metadata.
+   *
+   * @param deleteFile source position delete file to rewrite
+   * @param outputFile encrypted output file to write the rewritten delete file to
+   * @param io file io
+   * @param spec spec of delete file
+   * @param sourcePrefix source prefix that will be replaced
+   * @param targetPrefix target prefix to replace it
+   * @param posDeleteReaderWriter class to read and write position delete files
+   * @return the physical size and encryption metadata of the rewritten file
+   */
+  public static RewriteFileResult rewritePositionDelete(
+      DeleteFile deleteFile,
+      EncryptedOutputFile outputFile,
+      FileIO io,
+      PartitionSpec spec,
+      String sourcePrefix,
+      String targetPrefix,
+      PositionDeleteReaderWriter posDeleteReaderWriter)
+      throws IOException {
     String path = deleteFile.location();
     if (!path.startsWith(sourcePrefix)) {
       throw new UnsupportedOperationException(
@@ -755,7 +1085,7 @@ public class RewriteTablePathUtil {
     }
 
     // For non-DV position delete files (v2), rewrite using the reader/writer
-    InputFile sourceFile = io.newInputFile(path);
+    InputFile sourceFile = io.newInputFile(deleteFile);
     try (CloseableIterable<Record> reader =
         posDeleteReaderWriter.reader(sourceFile, deleteFile.format(), spec)) {
       Record record = null;
@@ -768,9 +1098,13 @@ public class RewriteTablePathUtil {
       if (record != null) {
         checkNoRowData(record, path);
 
+        OutputFile writerOutputFile =
+            outputFile instanceof NativeEncryptionOutputFile
+                ? (NativeEncryptionOutputFile) outputFile
+                : outputFile.encryptingOutputFile();
         try (PositionDeleteWriter<Record> writer =
             posDeleteReaderWriter.writer(
-                outputFile, deleteFile.format(), spec, deleteFile.partition())) {
+                writerOutputFile, deleteFile.format(), spec, deleteFile.partition())) {
 
           writer.write(newPositionDeleteRecord(record, sourcePrefix, targetPrefix));
 
@@ -783,12 +1117,27 @@ public class RewriteTablePathUtil {
           }
 
           writer.close();
-          return writer.length();
+          DeleteFile rewrittenDeleteFile = writer.toDeleteFile();
+          ByteBuffer rewrittenKeyMetadata = rewrittenDeleteFile.keyMetadata();
+          EncryptionKeyMetadata outputKeyMetadata = outputFile.keyMetadata();
+          if (rewrittenKeyMetadata == null
+              && outputKeyMetadata != null
+              && outputKeyMetadata.buffer() != null) {
+            rewrittenKeyMetadata =
+                deleteFile.format() == FileFormat.AVRO
+                    ? encryptionKeyMetadata(
+                        rewrittenDeleteFile.fileSizeInBytes(), outputKeyMetadata)
+                    : outputKeyMetadata.buffer();
+          }
+          return new RewriteFileResult(
+              rewrittenDeleteFile.fileSizeInBytes(),
+              rewrittenKeyMetadata,
+              rewrittenDeleteFile.location());
         }
       }
     }
 
-    return 0;
+    return new RewriteFileResult(0, null);
   }
 
   /**
@@ -799,21 +1148,21 @@ public class RewriteTablePathUtil {
    * @param io file io
    * @param sourcePrefix source prefix that will be replaced
    * @param targetPrefix target prefix to replace it
-   * @return the size in bytes of the rewritten DV file
+   * @return the physical size and encryption metadata of the rewritten DV file
    */
-  private static long rewriteDVFile(
+  private static RewriteFileResult rewriteDVFile(
       DeleteFile deleteFile,
-      OutputFile outputFile,
+      EncryptedOutputFile outputFile,
       FileIO io,
       String sourcePrefix,
       String targetPrefix)
       throws IOException {
     List<Blob> rewrittenBlobs = Lists.newArrayList();
-    try (PuffinReader reader = Puffin.read(io.newInputFile(deleteFile.location())).build()) {
+    try (PuffinReader reader = Puffin.read(io.newInputFile(deleteFile)).build()) {
       // Read all blobs and rewrite them with updated referenced data file paths
-      for (Pair<org.apache.iceberg.puffin.BlobMetadata, ByteBuffer> blobPair :
+      for (Pair<BlobMetadata, ByteBuffer> blobPair :
           reader.readAll(reader.fileMetadata().blobs())) {
-        org.apache.iceberg.puffin.BlobMetadata blobMetadata = blobPair.first();
+        BlobMetadata blobMetadata = blobPair.first();
         ByteBuffer blobData = blobPair.second();
 
         // Get the original properties and update the referenced data file path
@@ -838,11 +1187,24 @@ public class RewriteTablePathUtil {
     }
 
     try (PuffinWriter writer =
-        Puffin.write(outputFile).createdBy(IcebergBuild.fullVersion()).build()) {
+        Puffin.write(outputFile.encryptingOutputFile())
+            .createdBy(IcebergBuild.fullVersion())
+            .build()) {
       rewrittenBlobs.forEach(writer::write);
       writer.close();
-      return writer.length();
+      ByteBuffer keyMetadata = encryptionKeyMetadata(writer.length(), outputFile.keyMetadata());
+      return new RewriteFileResult(
+          writer.length(), keyMetadata, outputFile.encryptingOutputFile().location());
     }
+  }
+
+  private static ByteBuffer encryptionKeyMetadata(
+      long fileSizeInBytes, EncryptionKeyMetadata keyMetadata) {
+    if (keyMetadata instanceof NativeEncryptionKeyMetadata nativeKeyMetadata) {
+      return nativeKeyMetadata.copyWithLength(fileSizeInBytes).buffer();
+    }
+
+    return keyMetadata.buffer();
   }
 
   private static void checkNoRowData(Record record, String deleteFilePath) {
