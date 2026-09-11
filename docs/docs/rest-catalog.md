@@ -65,6 +65,29 @@ CREATE CATALOG prod WITH (
 
 See the [Flink catalog documentation](flink.md#rest-catalog) for details.
 
+## Client-configured table encryption
+
+The Java REST catalog client supports encrypted tables when the client supplies
+both storage and KMS access. Configure `encryption.kms-type` or
+`encryption.kms-impl` locally, along with the required storage and KMS settings.
+Client-configured credentials may come from workload identities or refreshing
+credential providers; they do not need to be static secrets.
+
+For a catalog configured with a local KMS, access delegation is currently
+unsupported. Do not request credential vending or remote signing through
+`header.X-Iceberg-Access-Delegation`, or enable `s3.remote-signing-enabled`.
+The client rejects delegated storage credentials and
+remote-signing configuration returned with tables, and storage credentials
+returned with scan plans.
+
+In this mode, FileIO and KMS initialization use only client configuration.
+Server-provided FileIO settings are not applied, including credentials, regions,
+endpoints, and credential-refresh configuration. Configure these settings locally.
+Server configuration still applies to catalog authentication, endpoints, and scan
+planning. This restriction applies to the whole catalog instance, including its
+unencrypted tables. Catalogs without a locally configured KMS retain their normal
+storage delegation behavior.
+
 ## Configuration
 
 Connecting to a REST catalog requires at minimum a `uri` pointing at the

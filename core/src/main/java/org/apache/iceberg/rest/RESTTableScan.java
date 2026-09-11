@@ -84,6 +84,7 @@ class RESTTableScan extends DataTableScan {
   private final Set<Endpoint> supportedEndpoints;
   private final ParserContext parserContext;
   private final Map<String, String> catalogProperties;
+  private final boolean clientCredentialsOnly;
   private final Object hadoopConf;
   private String planId = null;
   private FileIO scanFileIO = null;
@@ -100,6 +101,7 @@ class RESTTableScan extends DataTableScan {
       ResourcePaths resourcePaths,
       Set<Endpoint> supportedEndpoints,
       Map<String, String> catalogProperties,
+      boolean clientCredentialsOnly,
       Object hadoopConf) {
     super(table, schema, context);
     this.client = client;
@@ -114,6 +116,7 @@ class RESTTableScan extends DataTableScan {
             .add("caseSensitive", context().caseSensitive())
             .build();
     this.catalogProperties = catalogProperties;
+    this.clientCredentialsOnly = clientCredentialsOnly;
     this.hadoopConf = hadoopConf;
   }
 
@@ -132,6 +135,7 @@ class RESTTableScan extends DataTableScan {
             resourcePaths,
             supportedEndpoints,
             catalogProperties,
+            clientCredentialsOnly,
             hadoopConf);
     scan.useSnapshotSchema = useSnapshotSchema;
     return scan;
@@ -227,6 +231,10 @@ class RESTTableScan extends DataTableScan {
   }
 
   private FileIO scanFileIO(List<Credential> storageCredentials) {
+    Preconditions.checkArgument(
+        !clientCredentialsOnly,
+        "REST encryption currently requires client-configured storage credentials");
+
     ImmutableMap.Builder<String, String> builder =
         ImmutableMap.<String, String>builder().putAll(catalogProperties);
     if (null != planId) {

@@ -56,6 +56,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.catalog.SessionCatalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.CloseableIterator;
@@ -1468,6 +1469,69 @@ public class TestRESTScanPlanning extends TestBaseWithRESTServer {
         .containsKey(RESTCatalogProperties.REST_SCAN_PLAN_ID);
     assertThat(newScan.fileIO().get().properties().get(RESTCatalogProperties.REST_SCAN_PLAN_ID))
         .isNotEqualTo(planId);
+  }
+
+  @ParameterizedTest
+  @EnumSource(PlanningMode.class)
+  void localKmsRejectsPlanningCredentials(
+      Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode)
+      throws IOException {
+    try (RESTCatalog catalog = localKmsCatalogForPlanning(planMode, true)) {
+      Table table = restTableFor(catalog, "local_kms_vended_scan");
+      TableScan scan = table.newScan().caseSensitive(false);
+
+      assertThatThrownBy(scan::planFiles)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("client-configured storage credentials");
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(PlanningMode.class)
+  void localKmsUsesTableFileIOForPlanning(
+      Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode)
+      throws IOException {
+    try (RESTCatalog catalog = localKmsCatalogForPlanning(planMode, false)) {
+      Table table = restTableFor(catalog, "local_kms_local_scan");
+      TableScan scan = table.newScan().caseSensitive(false);
+
+      try (CloseableIterable<FileScanTask> tasks = scan.planFiles()) {
+        assertThat(tasks).hasSize(1);
+        assertThat(scan.fileIO().get()).isSameAs(table.io());
+      }
+    }
+  }
+
+  private RESTCatalog localKmsCatalogForPlanning(
+      Function<TestPlanningBehavior.Builder, TestPlanningBehavior.Builder> planMode,
+      boolean vendCredentials) {
+    RESTCatalogAdapter adapter =
+        new RESTCatalogAdapter(backendCatalog) {
+          @Override
+          public <T extends RESTResponse> T execute(
+              HTTPRequest request,
+              Class<T> responseType,
+              Consumer<ErrorResponse> errorHandler,
+              Consumer<Map<String, String>> responseHeaders,
+              ParserContext parserContext) {
+            T response =
+                super.execute(request, responseType, errorHandler, responseHeaders, parserContext);
+            return vendCredentials ? maybeAddStorageCredential(response) : response;
+          }
+        };
+    adapter.setPlanningBehavior(planMode.apply(TestPlanningBehavior.builder()).build());
+    RESTCatalog catalog =
+        new RESTCatalog(SessionCatalog.SessionContext.createEmpty(), config -> adapter);
+    catalog.initialize(
+        "test",
+        ImmutableMap.of(
+            CatalogProperties.FILE_IO_IMPL,
+            "org.apache.iceberg.inmemory.InMemoryFileIO",
+            CatalogProperties.ENCRYPTION_KMS_IMPL,
+            UnitestKMS.class.getName(),
+            RESTCatalogProperties.SCAN_PLANNING_MODE,
+            RESTCatalogProperties.ScanPlanningMode.SERVER.modeName()));
+    return catalog;
   }
 
   @SuppressWarnings("unchecked")

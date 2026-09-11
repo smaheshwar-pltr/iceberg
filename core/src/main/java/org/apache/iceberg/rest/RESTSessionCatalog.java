@@ -171,6 +171,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
   private Set<Endpoint> endpoints;
   private Supplier<Map<String, String>> mutationHeaders = Map::of;
   private KeyManagementClient keyManagementClient = null;
+  private Map<String, String> clientEncryptionProperties = null;
   private String namespaceSeparator = null;
   private ScanPlanningMode clientScanPlanningMode = null;
 
@@ -202,6 +203,8 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
     // catalog service
     Map<String, String> props = EnvironmentUtil.resolveAll(unresolved);
 
+    this.clientEncryptionProperties = clientEncryptionProperties(props);
+
     this.closeables = new CloseableGroup();
 
     this.authManager = AuthManagers.loadAuthManager(name, props);
@@ -217,6 +220,9 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
 
     // build the final configuration and set up the catalog's auth
     Map<String, String> mergedProps = config.merge(props);
+    if (clientEncryptionProperties != null) {
+      validateClientCredentialConfiguration(mergedProps);
+    }
 
     // Enable Idempotency-Key header for mutation endpoints if the server advertises support
     if (config.idempotencyKeyLifetime() != null) {
@@ -255,7 +261,10 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
           RESTCatalogProperties.PAGE_SIZE);
     }
 
-    this.io = newFileIO(SessionContext.createEmpty(), mergedProps);
+    this.io =
+        newFileIO(
+            SessionContext.createEmpty(),
+            clientEncryptionProperties != null ? clientEncryptionProperties : mergedProps);
 
     this.fileIOTracker = new FileIOTracker();
     this.closeables.addCloseable(this.io);
@@ -279,10 +288,12 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
             RESTCatalogProperties.METRICS_REPORTING_ENABLED,
             RESTCatalogProperties.METRICS_REPORTING_ENABLED_DEFAULT);
 
-    if (mergedProps.containsKey(CatalogProperties.ENCRYPTION_KMS_TYPE)
-        || mergedProps.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
-      this.keyManagementClient = EncryptionUtil.createKmsClient(mergedProps);
-      this.closeables.addCloseable(this.keyManagementClient);
+    this.keyManagementClient =
+        clientEncryptionProperties != null
+            ? EncryptionUtil.createKmsClient(clientEncryptionProperties)
+            : null;
+    if (keyManagementClient != null) {
+      this.closeables.addCloseable(keyManagementClient);
     }
 
     if (reportingViaRestEnabled) {
@@ -664,6 +675,7 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
           paths,
           endpoints,
           properties(),
+          clientEncryptionProperties != null,
           conf);
     }
 
@@ -1260,6 +1272,18 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
       List<Credential> storageCredentials,
       RemoteSigningConfig remoteSigningConfig) {
 
+    if (clientEncryptionProperties != null) {
+      Preconditions.checkArgument(
+          storageCredentials.isEmpty(),
+          "REST encryption currently requires client-configured storage credentials");
+      Preconditions.checkArgument(
+          remoteSigningConfig.isEmpty(),
+          "REST encryption currently does not support delegated remote signing");
+
+      // Response config may contain credentials or credential-refresh endpoints.
+      return newFileIO(context, clientEncryptionProperties);
+    }
+
     boolean canReuseCatalogIO =
         tableConf.isEmpty()
             && ioBuilder == null
@@ -1283,6 +1307,29 @@ public class RESTSessionCatalog extends BaseViewSessionCatalog
     }
 
     return newFileIO(context, fullConf.buildKeepingLast(), storageCredentials);
+  }
+
+  private static Map<String, String> clientEncryptionProperties(Map<String, String> properties) {
+    if (!properties.containsKey(CatalogProperties.ENCRYPTION_KMS_TYPE)
+        && !properties.containsKey(CatalogProperties.ENCRYPTION_KMS_IMPL)) {
+      return null;
+    }
+
+    validateClientCredentialConfiguration(properties);
+    Preconditions.checkArgument(
+        !PropertyUtil.propertyAsBoolean(properties, "s3.remote-signing-enabled", false),
+        "Cannot enable s3.remote-signing-enabled: REST encryption currently requires client-configured storage and KMS credentials");
+    return ImmutableMap.copyOf(properties);
+  }
+
+  private static void validateClientCredentialConfiguration(Map<String, String> properties) {
+    HTTPHeaders.of(RESTUtil.configHeaders(properties))
+        .entries("X-Iceberg-Access-Delegation")
+        .forEach(
+            header ->
+                Preconditions.checkArgument(
+                    header.value().isBlank(),
+                    "Cannot use X-Iceberg-Access-Delegation: REST encryption currently requires client-configured storage and KMS credentials"));
   }
 
   /**
