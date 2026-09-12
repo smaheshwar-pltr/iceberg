@@ -1,0 +1,13 @@
+Hi all,
+
+Wanted to revive this discussion - today, we saw some CI blockages [1] across Iceberg projects due to MinIO images being removed from Docker Hub, which adds another data point to moving away from MinIO.
+
+Worth noting that was a similar Iceberg thread to this one in the past [2] - also, Polaris now uses RustFS for its quickstart, and RustFS and Floci for integration tests (separating those questions) [3], and PyIceberg has moved to RustFS [4]. 
+
+Wondering what the community now thinks about moving away from MinIO for quickstarts and integration tests?
+
+[1] Iceberg Java: https://github.com/apache/iceberg/pull/18071
+[2] https://lists.apache.org/thread/vnw9jonmfcsz6bwojhfch1nmywyl50h3
+[3] https://lists.apache.org/thread/8o31ly7cd8ov70opjbtg630qlhrfl5yh
+[4] https://github.com/apache/iceberg-python/pull/3928
+
