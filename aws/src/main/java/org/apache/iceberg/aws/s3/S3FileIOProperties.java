@@ -31,6 +31,7 @@ import org.apache.iceberg.aws.AwsClientProperties;
 import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.aws.s3.signer.S3V4RestSignerClient;
 import org.apache.iceberg.common.DynMethods;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
@@ -372,6 +373,22 @@ public class S3FileIOProperties implements Serializable {
   public static final boolean WRITE_NAMESPACE_TAG_ENABLED_DEFAULT = false;
 
   /**
+   * Controls whether {@link S3OutputFile#create()} relies on an S3 conditional write instead of
+   * checking whether the object exists before writing, default to false.
+   *
+   * <p>When enabled, the upload is sent with {@code If-None-Match: *} and {@link
+   * AlreadyExistsException} is thrown when the output stream is closed if the object already
+   * exists. Only enable this for object stores that support conditional writes.
+   *
+   * <p>For more details, see
+   * https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html
+   */
+  public static final String WRITE_CONDITIONAL_CREATE_ENABLED =
+      "s3.write.conditional-create-enabled";
+
+  public static final boolean WRITE_CONDITIONAL_CREATE_ENABLED_DEFAULT = false;
+
+  /**
    * Tag name that will be used by {@link #WRITE_TAGS_PREFIX} when {@link #WRITE_TABLE_TAG_ENABLED}
    * is enabled
    *
@@ -525,6 +542,7 @@ public class S3FileIOProperties implements Serializable {
   private final Set<Tag> writeTags;
   private boolean isWriteTableTagEnabled;
   private boolean isWriteNamespaceTagEnabled;
+  private final boolean isWriteConditionalCreateEnabled;
   private final Set<Tag> deleteTags;
   private int deleteThreads;
   private boolean isDeleteEnabled;
@@ -568,6 +586,7 @@ public class S3FileIOProperties implements Serializable {
     this.writeTags = Sets.newHashSet();
     this.isWriteTableTagEnabled = WRITE_TABLE_TAG_ENABLED_DEFAULT;
     this.isWriteNamespaceTagEnabled = WRITE_NAMESPACE_TAG_ENABLED_DEFAULT;
+    this.isWriteConditionalCreateEnabled = WRITE_CONDITIONAL_CREATE_ENABLED_DEFAULT;
     this.deleteTags = Sets.newHashSet();
     this.deleteThreads = Runtime.getRuntime().availableProcessors();
     this.isDeleteEnabled = DELETE_ENABLED_DEFAULT;
@@ -670,6 +689,9 @@ public class S3FileIOProperties implements Serializable {
     this.isWriteNamespaceTagEnabled =
         PropertyUtil.propertyAsBoolean(
             properties, WRITE_NAMESPACE_TAG_ENABLED, WRITE_NAMESPACE_TAG_ENABLED_DEFAULT);
+    this.isWriteConditionalCreateEnabled =
+        PropertyUtil.propertyAsBoolean(
+            properties, WRITE_CONDITIONAL_CREATE_ENABLED, WRITE_CONDITIONAL_CREATE_ENABLED_DEFAULT);
     this.deleteTags = toS3Tags(properties, DELETE_TAGS_PREFIX);
     this.deleteThreads =
         PropertyUtil.propertyAsInt(
@@ -875,6 +897,10 @@ public class S3FileIOProperties implements Serializable {
 
   public void setWriteNamespaceTagEnabled(boolean writeNamespaceTagEnabled) {
     this.isWriteNamespaceTagEnabled = writeNamespaceTagEnabled;
+  }
+
+  public boolean isWriteConditionalCreateEnabled() {
+    return isWriteConditionalCreateEnabled;
   }
 
   public Set<Tag> deleteTags() {

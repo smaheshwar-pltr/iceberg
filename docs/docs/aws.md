@@ -438,6 +438,14 @@ If for any reason you have to use S3A, here are the instructions:
 To ensure integrity of uploaded objects, checksum validations for S3 writes can be turned on by setting catalog property `s3.checksum-enabled` to `true`.
 This is turned off by default.
 
+### S3 Conditional Create
+
+By default, `S3FileIO` checks that an object does not exist with a `HEAD` request before creating it.
+When the catalog property `s3.write.conditional-create-enabled` is set to `true`, the upload is instead made [conditional](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html) on the object not existing.
+This avoids the extra request and also detects objects created concurrently, but an existing object is reported when the output stream is closed rather than when it is created.
+Only enable this for object stores that support conditional writes with `If-None-Match`.
+This is turned off by default.
+
 ### S3 Tags
 
 Custom [tags](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-tagging.html) can be added to S3 objects while writing and deleting.

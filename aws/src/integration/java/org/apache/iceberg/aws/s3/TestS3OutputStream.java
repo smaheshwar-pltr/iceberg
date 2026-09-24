@@ -44,6 +44,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -65,6 +66,7 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.Tag;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 import software.amazon.awssdk.utils.BinaryUtils;
@@ -186,6 +188,45 @@ public class TestS3OutputStream {
     assertThatNoException().isThrownBy(stream::close);
   }
 
+  @Test
+  void conditionalCreate() {
+    Stream.of(1024, 10 * 1024 * 1024)
+        .forEach(
+            size -> {
+              S3URI uri = randomURI();
+              byte[] data = randomData(size);
+              writeIfNotExists(s3, uri, data);
+              assertThat(readS3Data(uri)).isEqualTo(data);
+            });
+  }
+
+  @Test
+  void conditionalCreateWhenObjectExists() {
+    S3URI uri = randomURI();
+    byte[] data = randomData(1024);
+    writeIfNotExists(s3, uri, data);
+
+    assertThatThrownBy(() -> writeIfNotExists(s3, uri, randomData(1024)))
+        .isInstanceOf(AlreadyExistsException.class)
+        .hasMessage("Location already exists: %s", uri)
+        .hasCauseInstanceOf(S3Exception.class);
+    assertThat(readS3Data(uri)).isEqualTo(data);
+  }
+
+  @Test
+  void conditionalMultipartCreateWhenObjectExists() {
+    S3URI uri = randomURI();
+    byte[] data = randomData(1024);
+    writeIfNotExists(s3, uri, data);
+
+    assertThatThrownBy(() -> writeIfNotExists(s3mock, uri, randomData(10 * 1024 * 1024)))
+        .isInstanceOf(AlreadyExistsException.class)
+        .hasMessage("Location already exists: %s", uri)
+        .hasCauseInstanceOf(S3Exception.class);
+    assertThat(readS3Data(uri)).isEqualTo(data);
+    verify(s3mock, times(1)).abortMultipartUpload((AbortMultipartUploadRequest) any());
+  }
+
   private void writeTest() {
     // Run tests for both byte and array write paths
     Stream.of(true, false)
@@ -300,6 +341,14 @@ public class TestS3OutputStream {
     // Verify all staging files are cleaned up
     try {
       assertThat(Files.list(tmpDir)).isEmpty();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+  private void writeIfNotExists(S3Client client, S3URI uri, byte[] data) {
+    try (S3OutputStream stream = new S3OutputStream(client, uri, properties, nullMetrics(), true)) {
+      stream.write(data);
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
