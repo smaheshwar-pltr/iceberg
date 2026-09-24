@@ -53,14 +53,19 @@ public class S3OutputFile extends BaseS3File implements OutputFile, NativelyEncr
   }
 
   /**
-   * Create an output stream for the specified location if the target object does not exist in S3 at
-   * the time of invocation.
+   * Create an output stream for the specified location if the target object does not exist in S3.
+   *
+   * <p>By default, the object's existence is checked when this method is called. When {@link
+   * S3FileIOProperties#WRITE_CONDITIONAL_CREATE_ENABLED} is enabled, the upload is conditional on
+   * the object not existing and {@link AlreadyExistsException} is thrown when the stream is closed.
    *
    * @return output stream
    */
   @Override
   public PositionOutputStream create() {
-    if (!exists()) {
+    if (s3FileIOProperties().isWriteConditionalCreateEnabled()) {
+      return newStream(true);
+    } else if (!exists()) {
       return createOrOverwrite();
     } else {
       throw new AlreadyExistsException("Location already exists: %s", uri());
@@ -69,8 +74,12 @@ public class S3OutputFile extends BaseS3File implements OutputFile, NativelyEncr
 
   @Override
   public PositionOutputStream createOrOverwrite() {
+    return newStream(false);
+  }
+
+  private PositionOutputStream newStream(boolean failIfExists) {
     try {
-      return new S3OutputStream(client(), uri(), s3FileIOProperties(), metrics());
+      return new S3OutputStream(client(), uri(), s3FileIOProperties(), metrics(), failIfExists);
     } catch (IOException e) {
       throw new UncheckedIOException("Failed to create output stream for location: " + uri(), e);
     }

@@ -117,6 +117,9 @@ public class TestS3FileIOProperties {
     assertThat(s3FileIOProperties.isWriteNamespaceTagEnabled())
         .isEqualTo(S3FileIOProperties.WRITE_NAMESPACE_TAG_ENABLED_DEFAULT);
 
+    assertThat(s3FileIOProperties.isWriteConditionalCreateEnabled())
+        .isEqualTo(S3FileIOProperties.WRITE_CONDITIONAL_CREATE_ENABLED_DEFAULT);
+
     assertThat(s3FileIOProperties.deleteTags()).isEqualTo(Sets.newHashSet());
 
     assertThat(s3FileIOProperties.deleteThreads())
@@ -242,6 +245,11 @@ public class TestS3FileIOProperties {
         .containsEntry(
             S3FileIOProperties.WRITE_NAMESPACE_TAG_ENABLED,
             String.valueOf(s3FileIOProperties.isWriteNamespaceTagEnabled()));
+
+    assertThat(map)
+        .containsEntry(
+            S3FileIOProperties.WRITE_CONDITIONAL_CREATE_ENABLED,
+            String.valueOf(s3FileIOProperties.isWriteConditionalCreateEnabled()));
 
     List<String> deleteTagValues =
         s3FileIOProperties.deleteTags().stream().map(Tag::value).collect(Collectors.toList());
@@ -432,6 +440,7 @@ public class TestS3FileIOProperties {
     map.put(S3FileIOProperties.WRITE_TAGS_PREFIX + S3_WRITE_TAG_KEY, S3_WRITE_TAG_VALUE);
     map.put(S3FileIOProperties.WRITE_TABLE_TAG_ENABLED, "true");
     map.put(S3FileIOProperties.WRITE_NAMESPACE_TAG_ENABLED, "true");
+    map.put(S3FileIOProperties.WRITE_CONDITIONAL_CREATE_ENABLED, "true");
     map.put(S3FileIOProperties.DELETE_TAGS_PREFIX + S3_DELETE_TAG_KEY, S3_DELETE_TAG_VALUE);
     map.put(S3FileIOProperties.DELETE_THREADS, "1");
     map.put(S3FileIOProperties.DELETE_ENABLED, "true");

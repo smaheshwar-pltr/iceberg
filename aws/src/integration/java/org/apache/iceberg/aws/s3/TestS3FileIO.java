@@ -61,6 +61,7 @@ import org.apache.iceberg.aws.AwsClientProperties;
 import org.apache.iceberg.aws.AwsProperties;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.common.DynMethods;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.io.BulkDeletionFailureException;
 import org.apache.iceberg.io.FileIO;
@@ -190,6 +191,36 @@ public class TestS3FileIO {
     s3FileIO.deleteFile(in);
 
     assertThat(s3FileIO.newInputFile(location).exists()).isFalse();
+  }
+
+  @Test
+  void conditionalCreate() throws IOException {
+    String location = "s3://bucket/path/to/file.txt";
+    byte[] expected = new byte[1024];
+    random.nextBytes(expected);
+
+    try (S3FileIO fileIO = new S3FileIO(() -> s3mock)) {
+      fileIO.initialize(
+          ImmutableMap.of(S3FileIOProperties.WRITE_CONDITIONAL_CREATE_ENABLED, "true"));
+
+      try (OutputStream os = fileIO.newOutputFile(location).create()) {
+        os.write(expected);
+      }
+
+      OutputStream os = fileIO.newOutputFile(location).create();
+      os.write(new byte[1024]);
+      assertThatThrownBy(os::close)
+          .isInstanceOf(AlreadyExistsException.class)
+          .hasMessage("Location already exists: %s", location);
+      verify(s3mock, never()).headObject(any(HeadObjectRequest.class));
+
+      byte[] actual = new byte[1024];
+      try (InputStream is = fileIO.newInputFile(location).newStream()) {
+        IOUtil.readFully(is, actual, 0, actual.length);
+      }
+
+      assertThat(actual).isEqualTo(expected);
+    }
   }
 
   @Test
