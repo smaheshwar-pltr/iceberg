@@ -49,6 +49,7 @@ import java.util.stream.Collectors;
 import org.apache.iceberg.BaseMetadataTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.BaseTransaction;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.IncrementalAppendScan;
 import org.apache.iceberg.MetadataUpdate.UpgradeFormatVersion;
@@ -833,7 +834,11 @@ public class CatalogHandlers {
       TableScan tableScan = table.newScan();
 
       if (request.snapshotId() != null) {
-        tableScan = tableScan.useSnapshot(request.snapshotId());
+        // the request states which schema the client resolved its names against
+        tableScan =
+            tableScan.useSnapshot(
+                request.snapshotId(),
+                request.useSnapshotSchema() ? BindingSchema.SNAPSHOT : BindingSchema.TABLE);
       }
 
       // Apply filters and projections using common method

@@ -22,6 +22,7 @@ import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,10 +39,14 @@ import org.apache.iceberg.MetadataTableUtils;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotParser;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TestHelpers;
 import org.apache.iceberg.TestTables;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -255,6 +260,58 @@ public class TestSnapshotUtil {
 
     assertThat(table.schema().asStruct()).isEqualTo(expected.asStruct());
     assertThat(SnapshotUtil.schemaFor(table, tag).asStruct()).isEqualTo(initialSchema.asStruct());
+  }
+
+  @Test
+  public void schemaForTagOnSnapshotWithoutSchemaId() {
+    // snapshots written before Iceberg recorded a schema ID have none
+    Snapshot legacySnapshot =
+        SnapshotParser.fromJson(
+            "{\"snapshot-id\":42,\"timestamp-ms\":1234,"
+                + "\"manifest-list\":\"file:/tmp/manifest-list.avro\","
+                + "\"summary\":{\"operation\":\"append\"}}");
+    assertThat(legacySnapshot.schemaId()).isNull();
+
+    TableMetadata metadata =
+        TableMetadata.buildFrom(
+                TableMetadata.newTableMetadata(
+                    SCHEMA,
+                    SPEC,
+                    "file:/tmp/legacy",
+                    ImmutableMap.of(TableProperties.FORMAT_VERSION, "1")))
+            .addSnapshot(legacySnapshot)
+            .setRef("legacy", SnapshotRef.tagBuilder(42).build())
+            .build();
+
+    // the Table overload falls back to the table schema for these snapshots. This overload used to
+    // throw NPE instead, unboxing the null ID to index a list.
+    assertThat(SnapshotUtil.schemaFor(metadata, "legacy").asStruct())
+        .isEqualTo(metadata.schema().asStruct());
+  }
+
+  @Test
+  public void schemaForTagResolvesBySchemaIdNotListPosition() {
+    // expiring snapshots removes the schemas they were the only reference to, which leaves the
+    // remaining schema IDs non-contiguous. Indexing metadata.schemas() by ID is then wrong.
+    table.updateSchema().addColumn("c1", Types.IntegerType.get()).commit();
+    table.newFastAppend().appendFile(FILE_A).commit();
+    table.updateSchema().addColumn("c2", Types.IntegerType.get()).commit();
+    long taggedSnapshotId = appendFileToMain().snapshotId();
+    table.manageSnapshots().createTag("tag", taggedSnapshotId).commit();
+
+    // drop every other snapshot, so the schemas only they referenced are removed too
+    table.expireSnapshots().cleanExpiredMetadata(true).expireOlderThan(Long.MAX_VALUE).commit();
+
+    TableMetadata metadata = table.operations().current();
+    int taggedSchemaId = metadata.snapshot(taggedSnapshotId).schemaId();
+    assumeThat(metadata.schemas().size())
+        .as("expected schema removal to leave IDs non-contiguous")
+        .isLessThanOrEqualTo(taggedSchemaId);
+
+    // the Table and TableMetadata overloads must agree, and both must resolve by ID
+    assertThat(SnapshotUtil.schemaFor(metadata, "tag").schemaId()).isEqualTo(taggedSchemaId);
+    assertThat(SnapshotUtil.schemaFor(metadata, "tag").asStruct())
+        .isEqualTo(SnapshotUtil.schemaFor(table, "tag").asStruct());
   }
 
   @Test

@@ -50,7 +50,10 @@ public class DataTableScan extends BaseTableScan {
     return appendsBetween(fromSnapshotId, currentSnapshot.snapshotId());
   }
 
+  // overrides the deprecated name so that hasDataSchema() keeps delegating to it. An out-of-tree
+  // subclass may override either name and still be honoured.
   @Override
+  @Deprecated
   protected boolean useSnapshotSchema() {
     return true;
   }
@@ -75,7 +78,7 @@ public class DataTableScan extends BaseTableScan {
             .select(scanColumns())
             .filterData(filter())
             .schemasById(schemas())
-            .specsById(specs())
+            .specsById(specs(specIdsIn(dataManifests, deleteManifests)))
             .scanMetrics(scanMetrics())
             .ignoreDeleted()
             .columnsToKeepStats(columnsToKeepStats());
