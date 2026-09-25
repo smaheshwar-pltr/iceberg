@@ -128,6 +128,7 @@ public class BaseDVFileWriter implements DVFileWriter {
       PuffinWriter writer =
           Puffin.write(outputFile.encryptingOutputFile())
               .createdBy(IcebergBuild.fullVersion())
+              .overwrite()
               .build();
 
       try (PuffinWriter closeableWriter = writer) {

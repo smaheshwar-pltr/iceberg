@@ -111,7 +111,8 @@ public class ComputeTableStatsSparkAction extends BaseSparkAction<ComputeTableSt
   private StatisticsFile writeStatsFile(List<Blob> blobs) {
     LOG.info("Writing stats for table {} for snapshot {}", table.name(), snapshotId());
     OutputFile outputFile = table.io().newOutputFile(outputPath());
-    try (PuffinWriter writer = Puffin.write(outputFile).createdBy(appIdentifier()).build()) {
+    try (PuffinWriter writer =
+        Puffin.write(outputFile).createdBy(appIdentifier()).overwrite().build()) {
       blobs.forEach(writer::add);
       writer.finish();
       return new GenericStatisticsFile(
