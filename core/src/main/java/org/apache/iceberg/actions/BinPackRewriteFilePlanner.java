@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileScanTask;
@@ -291,7 +292,8 @@ public class BinPackRewriteFilePlanner
         table().newScan().filter(filter).caseSensitive(caseSensitive).ignoreResiduals();
 
     if (snapshotId != null) {
-      scan = scan.useSnapshot(snapshotId);
+      // a consistency pin: freeze the file set, keep resolving names in the table schema
+      scan = scan.useSnapshot(snapshotId, BindingSchema.TABLE);
     }
 
     CloseableIterable<FileScanTask> fileScanTasks = scan.planFiles();

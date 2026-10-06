@@ -23,6 +23,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.iceberg.BindingSchema;
 import org.apache.iceberg.CombinedScanTask;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DataFile;
@@ -228,7 +229,8 @@ public abstract class BaseRewriteDataFilesAction<ThisT>
       fileScanTasks =
           table
               .newScan()
-              .useSnapshot(startingSnapshotId)
+              // a consistency pin: freeze the file set, keep resolving names in the table schema
+              .useSnapshot(startingSnapshotId, BindingSchema.TABLE)
               .caseSensitive(caseSensitive)
               .ignoreResiduals()
               .filter(filter)
