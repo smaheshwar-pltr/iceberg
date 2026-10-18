@@ -75,6 +75,7 @@ import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.CatalogTests;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
@@ -1284,6 +1285,62 @@ public class TestHiveCatalog extends CatalogTests<HiveCatalog> {
     } else {
       assertThat(base64EncodedHash).isNull();
     }
+  }
+
+  @Test
+  void changedKeyIdInHmsFailsRefresh() throws TException {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "encrypted_tbl");
+    Table table =
+        createEncryptedV3Table(initEncryptionCatalog(), identifier, UnitestKMS.MASTER_KEY_NAME1);
+    table.refresh();
+
+    // change the key ID in HMS without an Iceberg commit
+    org.apache.hadoop.hive.metastore.api.Table hmsTable =
+        HIVE_METASTORE_EXTENSION.metastoreClient().getTable(DB_NAME, identifier.name());
+    hmsTable.getParameters().put(ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2);
+    HIVE_METASTORE_EXTENSION.metastoreClient().alter_table(DB_NAME, identifier.name(), hmsTable);
+
+    assertThatThrownBy(table::refresh)
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(
+            "Table key ID does not match: current=%s != refreshed=%s",
+            UnitestKMS.MASTER_KEY_NAME1, UnitestKMS.MASTER_KEY_NAME2);
+  }
+
+  @Test
+  void recreatedTableUsesItsOwnKeyId() {
+    TableIdentifier identifier = TableIdentifier.of(DB_NAME, "encrypted_tbl");
+    HiveCatalog otherCatalog = initEncryptionCatalog();
+    Table table =
+        createEncryptedV3Table(initEncryptionCatalog(), identifier, UnitestKMS.MASTER_KEY_NAME1);
+    table.refresh();
+
+    otherCatalog.dropTable(identifier, false /* keep files */);
+    assertThatThrownBy(table::refresh).isInstanceOf(NoSuchTableException.class);
+    createEncryptedV3Table(otherCatalog, identifier, UnitestKMS.MASTER_KEY_NAME2);
+
+    table.refresh();
+    table.newFastAppend().appendFile(FILE_A).commit();
+
+    Table loaded = otherCatalog.loadTable(identifier);
+    assertThat(loaded.properties())
+        .containsEntry(ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME2);
+    assertThat(loaded.currentSnapshot().allManifests(loaded.io())).hasSize(1);
+  }
+
+  private HiveCatalog initEncryptionCatalog() {
+    return initCatalog(
+        "hive", ImmutableMap.of(CatalogProperties.ENCRYPTION_KMS_IMPL, UnitestKMS.class.getName()));
+  }
+
+  private Table createEncryptedV3Table(
+      HiveCatalog encryptionCatalog, TableIdentifier identifier, String keyId) {
+    return encryptionCatalog
+        .buildTable(identifier, SCHEMA)
+        .withPartitionSpec(SPEC)
+        .withProperty(TableProperties.FORMAT_VERSION, "3")
+        .withProperty(ENCRYPTION_TABLE_KEY, keyId)
+        .create();
   }
 
   @Test

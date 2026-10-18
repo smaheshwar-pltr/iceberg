@@ -20,6 +20,7 @@ package org.apache.iceberg.encryption;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
@@ -39,6 +40,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 public final class TableEncryptionState {
   private final KeyManagementClient kmsClient;
   private boolean loaded = false;
+  private String tableUuid = null;
   private String tableKeyId = null;
   private int dataKeyLength = TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
   private List<EncryptedKey> keys = List.of();
@@ -55,34 +57,47 @@ public final class TableEncryptionState {
   /**
    * Updates the state after the catalog loads the table's entry.
    *
-   * <p>The metadata is only used for its encryption keys. The table key ID and data key length must
-   * come from the catalog.
+   * <p>The metadata is only used for its encryption keys and UUID. A table with a different UUID,
+   * such as one created again under the same name, starts with a new state.
    *
-   * @param newTableKeyId the table key ID from the catalog, or null if the catalog has none
+   * @param newTableKeyId the table key ID from the catalog, or null if the table is not encrypted
    * @param newDataKeyLength the data encryption key length from the catalog
    * @param metadata the loaded table metadata
+   * @throws IllegalStateException if the key ID of the previously loaded table has changed
    */
   public synchronized void update(
       String newTableKeyId, int newDataKeyLength, TableMetadata metadata) {
+    boolean sameTable = loaded && Objects.equals(tableUuid, metadata.uuid());
+    Preconditions.checkState(
+        !sameTable || Objects.equals(tableKeyId, newTableKeyId),
+        "Table key ID does not match: current=%s != refreshed=%s",
+        tableKeyId,
+        newTableKeyId);
+
+    if (newTableKeyId != null) {
+      Map<String, EncryptedKey> keysById = Maps.newLinkedHashMap();
+      for (EncryptedKey key : metadata.encryptionKeys()) {
+        keysById.put(key.keyId(), key);
+      }
+
+      // keys created by the current encryption manager, for example for snapshots of open
+      // transactions, may not be in the loaded metadata yet. They belong to this table if it was
+      // loaded before or is being created, with the same key ID.
+      if ((sameTable || !loaded) && newTableKeyId.equals(tableKeyId)) {
+        for (EncryptedKey key : knownKeys()) {
+          keysById.putIfAbsent(key.keyId(), key);
+        }
+      }
+
+      this.dataKeyLength = newDataKeyLength;
+      this.keys = List.copyOf(keysById.values());
+    } else {
+      this.keys = List.of();
+    }
+
     this.loaded = true;
-    if (newTableKeyId == null) {
-      return;
-    }
-
-    Map<String, EncryptedKey> keysById = Maps.newLinkedHashMap();
-    for (EncryptedKey key : metadata.encryptionKeys()) {
-      keysById.put(key.keyId(), key);
-    }
-
-    // keys created by the current encryption manager, for example for snapshots of open
-    // transactions, may not be in the loaded metadata yet
-    for (EncryptedKey key : knownKeys()) {
-      keysById.putIfAbsent(key.keyId(), key);
-    }
-
+    this.tableUuid = metadata.uuid();
     this.tableKeyId = newTableKeyId;
-    this.dataKeyLength = newDataKeyLength;
-    this.keys = List.copyOf(keysById.values());
     this.encryptionManager = null;
     this.encryptingIO = null;
   }

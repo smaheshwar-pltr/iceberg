@@ -112,6 +112,63 @@ class TestTableEncryptionState {
   }
 
   @Test
+  void changedKeyIdOfLoadedTable() {
+    TableMetadata metadata = metadata(MASTER_KEY_NAME1);
+    state.update(MASTER_KEY_NAME1, DEK_LENGTH, metadata);
+    EncryptionManager encryption = state.encryption();
+
+    assertThatThrownBy(() -> state.update(MASTER_KEY_NAME2, DEK_LENGTH, metadata))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(keyIdMismatch(MASTER_KEY_NAME1, MASTER_KEY_NAME2));
+    assertThatThrownBy(() -> state.update(null, DEK_LENGTH, metadata))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(keyIdMismatch(MASTER_KEY_NAME1, null));
+    assertThat(state.encryption()).isSameAs(encryption);
+  }
+
+  @Test
+  void addedKeyIdOfLoadedTable() {
+    TableMetadata metadata = metadata(null);
+    state.update(null, DEK_LENGTH, metadata);
+
+    assertThatThrownBy(() -> state.update(MASTER_KEY_NAME1, DEK_LENGTH, metadata))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage(keyIdMismatch(null, MASTER_KEY_NAME1));
+    assertThat(state.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+  }
+
+  @Test
+  void tableWithDifferentUuid() {
+    state.update(MASTER_KEY_NAME1, DEK_LENGTH, metadata(MASTER_KEY_NAME1));
+    String keyId = ((StandardEncryptionManager) state.encryption()).keyEncryptionKeyID();
+
+    state.update(MASTER_KEY_NAME2, DEK_LENGTH, metadata(MASTER_KEY_NAME2));
+    assertThat(keyIds(state.encryption())).doesNotContain(keyId);
+
+    state.update(null, DEK_LENGTH, metadata(null));
+    assertThat(state.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+  }
+
+  @Test
+  void newTableWithDifferentKeyIdInCatalog() {
+    state.adoptForNewTable(metadata(MASTER_KEY_NAME1));
+    String keyId = ((StandardEncryptionManager) state.encryption()).keyEncryptionKeyID();
+
+    state.update(MASTER_KEY_NAME2, DEK_LENGTH, metadata(MASTER_KEY_NAME2));
+
+    assertThat(keyIds(state.encryption())).doesNotContain(keyId);
+  }
+
+  @Test
+  void newTableUnencryptedInCatalog() {
+    state.adoptForNewTable(metadata(MASTER_KEY_NAME1));
+
+    state.update(null, DEK_LENGTH, metadata(null));
+
+    assertThat(state.encryption()).isSameAs(PlaintextEncryptionManager.instance());
+  }
+
+  @Test
   void newTable() {
     state.adoptForNewTable(metadata(MASTER_KEY_NAME1));
 
@@ -178,6 +235,11 @@ class TestTableEncryptionState {
 
     return TableMetadata.newTableMetadata(
         SCHEMA, PartitionSpec.unpartitioned(), "file:/tmp/table", properties);
+  }
+
+  private static String keyIdMismatch(String currentKeyId, String refreshedKeyId) {
+    return String.format(
+        "Table key ID does not match: current=%s != refreshed=%s", currentKeyId, refreshedKeyId);
   }
 
   private static Set<String> keyIds(EncryptionManager encryption) {
