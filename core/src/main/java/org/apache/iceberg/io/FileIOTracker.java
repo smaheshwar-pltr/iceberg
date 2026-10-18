@@ -49,7 +49,23 @@ public class FileIOTracker implements Closeable {
 
   public void track(TableOperations ops) {
     Preconditions.checkArgument(null != ops, "Invalid table ops: null");
-    tracker.put(ops, ops.io());
+    track(ops, ops.io());
+  }
+
+  /**
+   * Tracks a FileIO used by the given table operations, closing it when the table operations are no
+   * longer referenced or when this tracker is closed.
+   *
+   * <p>Use this instead of {@link #track(TableOperations)} when {@link TableOperations#io()}
+   * returns a FileIO that wraps the one to close.
+   *
+   * @param ops table operations that use the FileIO
+   * @param io the FileIO to close
+   */
+  public void track(TableOperations ops, FileIO io) {
+    Preconditions.checkArgument(null != ops, "Invalid table ops: null");
+    Preconditions.checkArgument(null != io, "Invalid FileIO: null");
+    tracker.put(ops, io);
   }
 
   @VisibleForTesting
