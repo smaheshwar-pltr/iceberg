@@ -87,8 +87,9 @@ public class TestDeletes {
 
     DVFileWriter writer =
         Deletes.writeDVs(EncryptedFiles.plainAsEncryptedOutput(Files.localOutput(file)), p -> null);
-    writer.delete(PATH_A, 5L, PartitionSpec.unpartitioned(), null);
-    writer.close();
+    try (DVFileWriter closeableWriter = writer) {
+      closeableWriter.delete(PATH_A, 5L, PartitionSpec.unpartitioned(), null);
+    }
 
     DeleteFile dv = Iterables.getOnlyElement(writer.result().deleteFiles());
     assertThat(dv.fileSizeInBytes()).isEqualTo(file.length());
