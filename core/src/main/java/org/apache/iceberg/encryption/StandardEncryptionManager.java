@@ -34,7 +34,6 @@ import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.ByteBuffers;
-import org.apache.iceberg.util.SerializableMap;
 
 public class StandardEncryptionManager implements EncryptionManager {
   // Maximal lifespan of key encryption keys is 2 years according to NIST SP 800-57 (PART 1 REV. 5,
@@ -75,7 +74,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     this.dataKeyLength = dataKeyLength;
     this.testTimeShift = 0;
 
-    this.encryptionKeys = SerializableMap.copyOf(Maps.newLinkedHashMap());
+    this.encryptionKeys = Maps.newConcurrentMap();
     if (keys != null) {
       for (EncryptedKey key : keys) {
         this.encryptionKeys.put(
@@ -132,7 +131,7 @@ public class StandardEncryptionManager implements EncryptionManager {
     return encryptionKeys;
   }
 
-  String keyEncryptionKeyID() {
+  synchronized String keyEncryptionKeyID() {
     // Find unexpired key encryption key
     for (String keyID : encryptionKeys.keySet()) {
       EncryptedKey key = encryptionKeys.get(keyID);
