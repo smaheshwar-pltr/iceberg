@@ -52,6 +52,7 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.actions.RewriteManifests;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.encryption.Ciphers;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.encryption.UnitestKMS;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
@@ -394,6 +395,19 @@ public class TestTableEncryption extends CatalogTestBase {
 
     Table loaded = validationCatalog.loadTable(identifier);
     assertThat(loaded.currentSnapshot().allManifests(loaded.io())).hasSize(1);
+  }
+
+  @TestTemplate
+  public void testUnencryptedTableIgnoresDataKeyLength() {
+    String unencryptedTable = tableName(UNENCRYPTED_TABLE);
+    sql(
+        "CREATE TABLE %s (id bigint) USING iceberg "
+            + "TBLPROPERTIES ('format-version'='3', 'encryption.data-key-length'='not-a-number')",
+        unencryptedTable);
+
+    validationCatalog.initialize(catalogName, catalogConfig);
+    Table table = validationCatalog.loadTable(TableIdentifier.of("default", UNENCRYPTED_TABLE));
+    assertThat(table.encryption()).isInstanceOf(PlaintextEncryptionManager.class);
   }
 
   @TestTemplate
