@@ -22,7 +22,9 @@ import static org.apache.iceberg.Files.localInput;
 import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assumptions.assumeThat;
 
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +37,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileScanTask;
@@ -50,6 +53,7 @@ import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.actions.RewriteManifests;
+import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.encryption.Ciphers;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
@@ -58,8 +62,10 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Streams;
+import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.spark.CatalogTestBase;
 import org.apache.iceberg.spark.SparkCatalogConfig;
 import org.apache.iceberg.spark.actions.SparkActions;
@@ -88,6 +94,15 @@ public class TestTableEncryption extends CatalogTestBase {
         SparkCatalogConfig.HIVE.catalogName(),
         SparkCatalogConfig.HIVE.implementation(),
         appendCatalogEncryptionProperties(SparkCatalogConfig.HIVE.properties())
+      },
+      {
+        SparkCatalogConfig.REST.catalogName(),
+        SparkCatalogConfig.REST.implementation(),
+        appendCatalogEncryptionProperties(
+            ImmutableMap.<String, String>builder()
+                .putAll(SparkCatalogConfig.REST.properties())
+                .put(CatalogProperties.URI, restCatalog.properties().get(CatalogProperties.URI))
+                .build())
       }
     };
   }
@@ -238,7 +253,6 @@ public class TestTableEncryption extends CatalogTestBase {
     assertThat(currentDataFiles(table)).hasSize(dataFiles.size() + 2);
   }
 
-  // See CatalogTests#testConcurrentReplaceTransactions
   @TestTemplate
   public void testConcurrentReplaceTransactions() {
     validationCatalog.initialize(catalogName, catalogConfig);
@@ -247,7 +261,7 @@ public class TestTableEncryption extends CatalogTestBase {
     DataFile file = currentDataFiles(table).get(0);
     Schema schema = table.schema();
 
-    // Write data for a replace transaction that will be committed later
+    // Begin a replace transaction that will be committed second
     Transaction secondReplace =
         validationCatalog
             .buildTable(tableIdent, schema)
@@ -261,12 +275,15 @@ public class TestTableEncryption extends CatalogTestBase {
             .buildTable(tableIdent, schema)
             .withProperty("encryption.key-id", UnitestKMS.MASTER_KEY_NAME1)
             .replaceTransaction();
-    firstReplace.newFastAppend().appendFile(file).commit();
     firstReplace.commitTransaction();
 
+    // This second replace transaction fails but then retries after refreshing latest metadata.
     secondReplace.commitTransaction();
 
     Table afterSecondReplace = validationCatalog.loadTable(tableIdent);
+
+    // This tests that encryption keys are maintained on refreshing different metadata - if
+    // they are not, the table will be unreadable and this will fail.
     assertThat(currentDataFiles(afterSecondReplace)).hasSize(1);
   }
 
@@ -300,10 +317,14 @@ public class TestTableEncryption extends CatalogTestBase {
 
   @TestTemplate
   public void testMetadataTamperproofing() throws IOException {
-    ChecksumFileSystem fs = ((ChecksumFileSystem) FileSystem.newInstance(new Configuration()));
-    catalog.initialize(catalogName, catalogConfig);
+    assumeThat(validationCatalog)
+        .as("RESTCatalog does not store metadata file hashes")
+        .isNotInstanceOf(RESTCatalog.class);
 
-    Table table = catalog.loadTable(tableIdent);
+    ChecksumFileSystem fs = ((ChecksumFileSystem) FileSystem.newInstance(new Configuration()));
+    validationCatalog.initialize(catalogName, catalogConfig);
+
+    Table table = validationCatalog.loadTable(tableIdent);
     TableMetadata currentMetadata = ((HasTableOperations) table).operations().current();
     Path metadataFile = new Path(currentMetadata.metadataFileLocation());
     Path previousMetadataFile = new Path(Iterables.firstOf(currentMetadata.previousFiles()).file());
@@ -314,7 +335,7 @@ public class TestTableEncryption extends CatalogTestBase {
     fs.delete(metadataFile, false);
     fs.rename(previousMetadataFile, metadataFile);
 
-    assertThatThrownBy(() -> catalog.loadTable(tableIdent))
+    assertThatThrownBy(() -> validationCatalog.loadTable(tableIdent))
         .hasMessageContaining(
             String.format(
                 "The current metadata file %s might have been modified. Hash of metadata loaded from storage differs from HMS-stored metadata hash.",
@@ -405,6 +426,56 @@ public class TestTableEncryption extends CatalogTestBase {
     validationCatalog.initialize(catalogName, catalogConfig);
     Table table = validationCatalog.loadTable(TableIdentifier.of("default", UNENCRYPTED_TABLE));
     assertThat(table.encryption()).isInstanceOf(PlaintextEncryptionManager.class);
+  }
+
+  @TestTemplate
+  public void testLoadWithoutKeyManagementClient() throws IOException {
+    Map<String, String> properties = Maps.newHashMap(catalogConfig);
+    properties.remove(CatalogProperties.ENCRYPTION_KMS_IMPL);
+    Catalog catalogWithoutKms = CatalogUtil.buildIcebergCatalog(catalogName, properties, hiveConf);
+    try {
+      Table table = catalogWithoutKms.loadTable(tableIdent);
+      assertThat(table.properties())
+          .containsEntry(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1);
+      assertThatThrownBy(table::io)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageStartingWith(
+              "Cannot create encryption manager without a key management client");
+    } finally {
+      ((Closeable) catalogWithoutKms).close();
+    }
+  }
+
+  @TestTemplate
+  public void testCreateTransactionWithKeyIdSetInTransaction() {
+    validationCatalog.initialize(catalogName, catalogConfig);
+    TableIdentifier identifier = TableIdentifier.of("default", "created_table");
+    Transaction create =
+        validationCatalog
+            .buildTable(identifier, new Schema(optional(1, "id", Types.LongType.get())))
+            .withProperty(TableProperties.FORMAT_VERSION, "3")
+            .createTransaction();
+    create
+        .updateProperties()
+        .set(TableProperties.ENCRYPTION_TABLE_KEY, UnitestKMS.MASTER_KEY_NAME1)
+        .commit();
+    create
+        .newFastAppend()
+        .appendFile(
+            DataFiles.builder(PartitionSpec.unpartitioned())
+                .withPath("/path/to/data-a.parquet")
+                .withFileSizeInBytes(10)
+                .withRecordCount(1)
+                .build())
+        .commit();
+    create.commitTransaction();
+
+    try {
+      Table table = validationCatalog.loadTable(identifier);
+      assertThat(table.currentSnapshot().keyId()).isNotNull();
+    } finally {
+      validationCatalog.dropTable(identifier);
+    }
   }
 
   @TestTemplate

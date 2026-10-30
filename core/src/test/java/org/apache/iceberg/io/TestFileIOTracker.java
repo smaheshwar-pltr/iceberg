@@ -20,6 +20,7 @@ package org.apache.iceberg.io;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 
 import java.io.File;
@@ -40,6 +41,33 @@ public class TestFileIOTracker {
     assertThatThrownBy(() -> new FileIOTracker().track(null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Invalid table ops: null");
+  }
+
+  @Test
+  void trackedFileIOGetsClosed() {
+    FileIOTracker fileIOTracker = new FileIOTracker();
+    FileIO opsFileIO = Mockito.spy(new TestTables.LocalFileIO());
+    TestTables.TestTableOperations ops =
+        new TestTables.TestTableOperations("x", tableDir, opsFileIO);
+    FileIO trackedFileIO = Mockito.spy(new TestTables.LocalFileIO());
+
+    fileIOTracker.track(ops, trackedFileIO);
+    fileIOTracker.close();
+
+    Awaitility.await("FileIO gets closed")
+        .atMost(5, TimeUnit.SECONDS)
+        .untilAsserted(() -> Mockito.verify(trackedFileIO, times(1)).close());
+    Mockito.verify(opsFileIO, never()).close();
+  }
+
+  @SuppressWarnings("resource")
+  @Test
+  void nullFileIO() {
+    assertThatThrownBy(
+            () ->
+                new FileIOTracker().track(new TestTables.TestTableOperations("x", tableDir), null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid FileIO: null");
   }
 
   @SuppressWarnings("unchecked")

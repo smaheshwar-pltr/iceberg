@@ -33,6 +33,9 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateRequirement;
 import org.apache.iceberg.UpdateRequirements;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
+import org.apache.iceberg.encryption.KeyManagementClient;
+import org.apache.iceberg.encryption.TableEncryptionState;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
@@ -58,6 +61,7 @@ class RESTTableOperations implements TableOperations {
   private final Supplier<Map<String, String>> readHeaders;
   private final Supplier<Map<String, String>> mutationHeaders;
   private final FileIO io;
+  private final TableEncryptionState tableEncryption;
   private final List<MetadataUpdate> createChanges;
   private final TableMetadata replaceBase;
   private final Set<Endpoint> endpoints;
@@ -70,6 +74,7 @@ class RESTTableOperations implements TableOperations {
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
+      KeyManagementClient keyManagementClient,
       TableMetadata current,
       Set<Endpoint> endpoints) {
     this(
@@ -78,6 +83,7 @@ class RESTTableOperations implements TableOperations {
         headers,
         headers,
         io,
+        keyManagementClient,
         UpdateType.SIMPLE,
         Lists.newArrayList(),
         current,
@@ -90,6 +96,7 @@ class RESTTableOperations implements TableOperations {
       String path,
       Supplier<Map<String, String>> headers,
       FileIO io,
+      KeyManagementClient keyManagementClient,
       UpdateType updateType,
       List<MetadataUpdate> createChanges,
       TableMetadata current,
@@ -100,6 +107,7 @@ class RESTTableOperations implements TableOperations {
         headers,
         headers,
         io,
+        keyManagementClient,
         updateType,
         createChanges,
         current,
@@ -113,6 +121,7 @@ class RESTTableOperations implements TableOperations {
       Supplier<Map<String, String>> readHeaders,
       Supplier<Map<String, String>> mutationHeaders,
       FileIO io,
+      KeyManagementClient keyManagementClient,
       TableMetadata current,
       Set<Endpoint> endpoints,
       Map<String, String> readQueryParams) {
@@ -122,6 +131,7 @@ class RESTTableOperations implements TableOperations {
         readHeaders,
         mutationHeaders,
         io,
+        keyManagementClient,
         UpdateType.SIMPLE,
         Lists.newArrayList(),
         current,
@@ -135,6 +145,7 @@ class RESTTableOperations implements TableOperations {
       Supplier<Map<String, String>> readHeaders,
       Supplier<Map<String, String>> mutationHeaders,
       FileIO io,
+      KeyManagementClient keyManagementClient,
       UpdateType updateType,
       List<MetadataUpdate> createChanges,
       TableMetadata current,
@@ -145,6 +156,7 @@ class RESTTableOperations implements TableOperations {
     this.readHeaders = readHeaders;
     this.mutationHeaders = mutationHeaders;
     this.io = io;
+    this.tableEncryption = new TableEncryptionState(keyManagementClient);
     this.updateType = updateType;
     this.createChanges = createChanges;
     this.replaceBase = current;
@@ -155,6 +167,15 @@ class RESTTableOperations implements TableOperations {
     }
     this.endpoints = endpoints;
     this.readQueryParams = readQueryParams;
+
+    if (current != null) {
+      if (updateType == UpdateType.CREATE) {
+        // a table that is being created has no catalog entry yet
+        tableEncryption.adoptForNewTable(current);
+      } else {
+        updateEncryption(current);
+      }
+    }
   }
 
   @Override
@@ -217,6 +238,8 @@ class RESTTableOperations implements TableOperations {
             String.format("Update type %s is not supported", updateType));
     }
 
+    EncryptionUtil.checkKeyIdUnchanged(base, metadata);
+
     UpdateTableRequest request = new UpdateTableRequest(requirements, updates);
 
     // the error handler will throw necessary exceptions like CommitFailedException and
@@ -264,9 +287,15 @@ class RESTTableOperations implements TableOperations {
     }
   }
 
+  // TODO: Integrate and test encryption with REST scan planning
   @Override
   public FileIO io() {
-    return io;
+    return tableEncryption.io(io);
+  }
+
+  @Override
+  public EncryptionManager encryption() {
+    return tableEncryption.encryption();
   }
 
   private static Long expectedSnapshotIdIfSnapshotAddOnly(List<MetadataUpdate> updates) {
@@ -306,13 +335,27 @@ class RESTTableOperations implements TableOperations {
     return addedSnapshotId;
   }
 
+  private void updateEncryption(TableMetadata metadata) {
+    // encryption properties come from metadata returned by the REST server, not from metadata files
+    String tableKeyId = metadata.property(TableProperties.ENCRYPTION_TABLE_KEY, null);
+    int dataKeyLength =
+        tableKeyId != null
+            ? metadata.propertyAsInt(
+                TableProperties.ENCRYPTION_DEK_LENGTH,
+                TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT)
+            : TableProperties.ENCRYPTION_DEK_LENGTH_DEFAULT;
+    tableEncryption.update(tableKeyId, dataKeyLength, metadata);
+  }
+
   private TableMetadata updateCurrentMetadata(LoadTableResponse response) {
     // LoadTableResponse is used to deserialize the response, but config is not allowed by the REST
     // spec so it can be
     // safely ignored. there is no requirement to update config on refresh or commit.
     if (current == null
         || !Objects.equals(current.metadataFileLocation(), response.metadataLocation())) {
-      this.current = checkUUID(current, response.tableMetadata());
+      TableMetadata newMetadata = checkUUID(current, response.tableMetadata());
+      updateEncryption(newMetadata);
+      this.current = newMetadata;
     }
 
     return current;
@@ -353,6 +396,7 @@ class RESTTableOperations implements TableOperations {
 
   @Override
   public TableOperations temp(TableMetadata uncommittedMetadata) {
+    tableEncryption.adoptForNewTable(uncommittedMetadata);
     return new TableOperations() {
       @Override
       public TableMetadata current() {
