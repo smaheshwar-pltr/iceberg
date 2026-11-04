@@ -37,6 +37,7 @@ class IncrementalDataTableScan extends DataTableScan {
   }
 
   @Override
+  @Deprecated
   public TableScan asOfTime(long timestampMillis) {
     throw new UnsupportedOperationException(
         String.format(
@@ -58,6 +59,22 @@ class IncrementalDataTableScan extends DataTableScan {
         String.format(
             "Cannot scan table using scan snapshot id %s: configured for incremental data in snapshots (%s, %s]",
             scanSnapshotId, context().fromSnapshotId(), context().toSnapshotId()));
+  }
+
+  @Override
+  public TableScan useSnapshot(long scanSnapshotId, BindingSchema bindingSchema) {
+    throw new UnsupportedOperationException(
+        String.format(
+            "Cannot scan table using scan snapshot id %s: configured for incremental data in snapshots (%s, %s]",
+            scanSnapshotId, context().fromSnapshotId(), context().toSnapshotId()));
+  }
+
+  @Override
+  public TableScan asOfTime(long timestampMillis, BindingSchema bindingSchema) {
+    throw new UnsupportedOperationException(
+        String.format(
+            "Cannot scan table as of time %s: configured for incremental data in snapshots (%s, %s]",
+            timestampMillis, context().fromSnapshotId(), context().toSnapshotId()));
   }
 
   @Override

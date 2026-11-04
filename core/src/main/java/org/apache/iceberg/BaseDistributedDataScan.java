@@ -25,6 +25,7 @@ import static org.apache.iceberg.TableProperties.PLANNING_MODE_DEFAULT;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -169,7 +170,8 @@ abstract class BaseDistributedDataScan
 
     try {
       Iterable<CloseableIterable<ScanTask>> fileTasks =
-          toFileTasks(dataFuture, deletesFuture, copyDataFiles);
+          toFileTasks(
+              dataFuture, deletesFuture, copyDataFiles, specIdsIn(dataManifests, deleteManifests));
 
       if (shouldPlanWithExecutor() && (planDataLocally || mayHaveEqualityDeletes)) {
         return new ParallelIterable<>(fileTasks, planExecutor());
@@ -216,7 +218,8 @@ abstract class BaseDistributedDataScan
   }
 
   private List<ManifestFile> filterManifests(List<ManifestFile> manifests) {
-    Map<Integer, ManifestEvaluator> evalCache = specCache(this::newManifestEvaluator);
+    Map<Integer, ManifestEvaluator> evalCache =
+        specCache(this::newManifestEvaluator, specIdsIn(manifests));
 
     return manifests.stream()
         .filter(manifest -> manifest.hasAddedFiles() || manifest.hasExistingFiles())
@@ -305,7 +308,7 @@ abstract class BaseDistributedDataScan
 
     return builder
         .schemasById(schemas())
-        .specsById(specs())
+        .specsById(specs(specIdsIn(deleteManifests)))
         .filterData(filter())
         .caseSensitive(isCaseSensitive())
         .scanMetrics(scanMetrics())
@@ -335,11 +338,12 @@ abstract class BaseDistributedDataScan
   private Iterable<CloseableIterable<ScanTask>> toFileTasks(
       CompletableFuture<Iterable<CloseableIterable<DataFile>>> dataFuture,
       CompletableFuture<DeleteFileIndex> deletesFuture,
-      boolean copyDataFiles) {
+      boolean copyDataFiles,
+      Set<Integer> specIds) {
 
     String schemaString = SchemaParser.toJson(tableSchema());
-    Map<Integer, String> specStringCache = specCache(PartitionSpecParser::toJson);
-    Map<Integer, ResidualEvaluator> residualCache = specCache(this::newResidualEvaluator);
+    Map<Integer, String> specStringCache = specCache(PartitionSpecParser::toJson, specIds);
+    Map<Integer, ResidualEvaluator> residualCache = specCache(this::newResidualEvaluator, specIds);
 
     Iterable<CloseableIterable<DataFile>> dataFileGroups = dataFuture.join();
 
@@ -395,9 +399,9 @@ abstract class BaseDistributedDataScan
     return ResidualEvaluator.of(spec, residualFilter(), isCaseSensitive());
   }
 
-  private <R> Map<Integer, R> specCache(Function<PartitionSpec, R> load) {
+  private <R> Map<Integer, R> specCache(Function<PartitionSpec, R> load, Set<Integer> specIds) {
     Map<Integer, R> cache = Maps.newHashMap();
-    specs().forEach((specId, spec) -> cache.put(specId, load.apply(spec)));
+    specs(specIds).forEach((specId, spec) -> cache.put(specId, load.apply(spec)));
     return cache;
   }
 
