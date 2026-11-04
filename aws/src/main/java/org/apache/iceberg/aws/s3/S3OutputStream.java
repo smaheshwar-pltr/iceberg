@@ -42,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.stream.Collectors;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.io.FileIOMetricsContext;
 import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.metrics.Counter;
@@ -68,6 +69,7 @@ import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.Tag;
 import software.amazon.awssdk.services.s3.model.Tagging;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
@@ -77,6 +79,8 @@ import software.amazon.awssdk.utils.BinaryUtils;
 class S3OutputStream extends PositionOutputStream {
   private static final Logger LOG = LoggerFactory.getLogger(S3OutputStream.class);
   private static final String DIGEST_ALGORITHM = "MD5";
+  private static final String IF_NONE_MATCH_ANY = "*";
+  private static final int PRECONDITION_FAILED = 412;
 
   private static volatile ExecutorService executorService;
 
@@ -85,6 +89,7 @@ class S3OutputStream extends PositionOutputStream {
   private final S3URI location;
   private final S3FileIOProperties s3FileIOProperties;
   private final Set<Tag> writeTags;
+  private final boolean failIfExists;
 
   private CountingOutputStream stream;
   private final List<FileAndDigest> stagingFiles = Lists.newArrayList();
@@ -104,9 +109,19 @@ class S3OutputStream extends PositionOutputStream {
   private long pos = 0;
   private boolean closed = false;
 
-  @SuppressWarnings("StaticAssignmentInConstructor")
   S3OutputStream(
       S3Client s3, S3URI location, S3FileIOProperties s3FileIOProperties, MetricsContext metrics)
+      throws IOException {
+    this(s3, location, s3FileIOProperties, metrics, false);
+  }
+
+  @SuppressWarnings("StaticAssignmentInConstructor")
+  S3OutputStream(
+      S3Client s3,
+      S3URI location,
+      S3FileIOProperties s3FileIOProperties,
+      MetricsContext metrics,
+      boolean failIfExists)
       throws IOException {
     if (executorService == null) {
       synchronized (S3OutputStream.class) {
@@ -128,6 +143,7 @@ class S3OutputStream extends PositionOutputStream {
     this.location = location;
     this.s3FileIOProperties = s3FileIOProperties;
     this.writeTags = s3FileIOProperties.writeTags();
+    this.failIfExists = failIfExists;
 
     this.createStack = Thread.currentThread().getStackTrace();
 
@@ -268,6 +284,12 @@ class S3OutputStream extends PositionOutputStream {
       if (completeUploads) {
         completeUploads();
       }
+    } catch (S3Exception e) {
+      if (failIfExists && e.statusCode() == PRECONDITION_FAILED) {
+        throw new AlreadyExistsException(e, "Location already exists: %s", location);
+      }
+
+      throw e;
     } finally {
       cleanUpStagingFiles();
     }
@@ -374,6 +396,7 @@ class S3OutputStream extends PositionOutputStream {
             .key(location.key())
             .uploadId(multipartUploadId)
             .multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build())
+            .ifNoneMatch(failIfExists ? IF_NONE_MATCH_ANY : null)
             .build();
 
     Tasks.foreach(request)
@@ -435,6 +458,10 @@ class S3OutputStream extends PositionOutputStream {
 
       if (isChecksumEnabled) {
         requestBuilder.contentMD5(BinaryUtils.toBase64(completeMessageDigest.digest()));
+      }
+
+      if (failIfExists) {
+        requestBuilder.ifNoneMatch(IF_NONE_MATCH_ANY);
       }
 
       S3RequestUtil.configureEncryption(s3FileIOProperties, requestBuilder);
