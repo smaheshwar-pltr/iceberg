@@ -328,7 +328,7 @@ public class TestTableEncryption extends CatalogTestBase {
                     unencryptedTable, UnitestKMS.MASTER_KEY_NAME1))
         .isInstanceOf(SparkException.class)
         .hasMessage(
-            "[UNSUPPORTED_TABLE_CHANGE] Unsupported table change: Cannot modify key ID of an encrypted table SQLSTATE: 0A000");
+            "[UNSUPPORTED_TABLE_CHANGE] Unsupported table change: Cannot add key ID to an unencrypted table SQLSTATE: 0A000");
 
     // The rejected key ID must not be used for later writes to the table
     sql("INSERT INTO %s VALUES (1)", unencryptedTable);
@@ -363,7 +363,7 @@ public class TestTableEncryption extends CatalogTestBase {
     transaction.newFastAppend().appendFile(file).commit();
     assertThatThrownBy(transaction::commitTransaction)
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("Cannot modify key ID of an encrypted table");
+        .hasMessage("Cannot add key ID to an unencrypted table");
 
     // The rejected key ID must not be used for later writes to the table
     table.newFastAppend().appendFile(file).commit();
