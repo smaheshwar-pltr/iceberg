@@ -49,6 +49,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -63,6 +64,7 @@ import org.apache.iceberg.BaseTransaction;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.HistoryEntry;
 import org.apache.iceberg.MetadataUpdate;
@@ -90,6 +92,7 @@ import org.apache.iceberg.exceptions.RESTException;
 import org.apache.iceberg.exceptions.ServiceFailureException;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
@@ -131,6 +134,7 @@ import org.eclipse.jetty.server.Server;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -3879,6 +3883,61 @@ public class TestRESTCatalog extends CatalogTests<RESTCatalog> {
             () -> catalog.loadTable(TABLE).newFastAppend().appendFile(anotherFileOnMain).commit())
         .isInstanceOf(CommitFailedException.class)
         .hasMessageContaining("Validation failed, please retry");
+  }
+
+  @Test
+  @Timeout(10)
+  void commitDoesNotWaitForMetricsReport() {
+    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
+    RESTCatalog catalog = catalog(adapter);
+    catalog.createNamespace(TABLE.namespace());
+    Table table = catalog.createTable(TABLE, SCHEMA);
+
+    CountDownLatch unblockMetricsRequest = new CountDownLatch(1);
+    Mockito.doAnswer(
+            invocation -> {
+              unblockMetricsRequest.await();
+              return invocation.callRealMethod();
+            })
+        .when(adapter)
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.metrics(TABLE)), any(), any(), any());
+
+    try {
+      table.newAppend().appendFile(FILE_A).commit();
+    } finally {
+      unblockMetricsRequest.countDown();
+    }
+
+    verify(adapter, timeout(5000))
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.metrics(TABLE)), any(), any(), any());
+  }
+
+  @Test
+  @Timeout(10)
+  void scanPlanningDoesNotWaitForMetricsReport() throws IOException {
+    backendCatalog.createNamespace(TABLE.namespace());
+    backendCatalog.createTable(TABLE, SCHEMA).newAppend().appendFile(FILE_A).commit();
+
+    RESTCatalogAdapter adapter = Mockito.spy(new RESTCatalogAdapter(backendCatalog));
+    Table table = catalog(adapter).loadTable(TABLE);
+
+    CountDownLatch unblockMetricsRequest = new CountDownLatch(1);
+    Mockito.doAnswer(
+            invocation -> {
+              unblockMetricsRequest.await();
+              return invocation.callRealMethod();
+            })
+        .when(adapter)
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.metrics(TABLE)), any(), any(), any());
+
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
+      assertThat(tasks).hasSize(1);
+    } finally {
+      unblockMetricsRequest.countDown();
+    }
+
+    verify(adapter, timeout(5000))
+        .execute(matches(HTTPMethod.POST, RESOURCE_PATHS.metrics(TABLE)), any(), any(), any());
   }
 
   @Test
