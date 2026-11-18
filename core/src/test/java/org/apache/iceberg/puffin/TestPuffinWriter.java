@@ -32,8 +32,10 @@ import java.nio.file.Path;
 import java.util.Random;
 import org.apache.iceberg.Files;
 import org.apache.iceberg.encryption.AesGcmOutputFile;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.inmemory.InMemoryOutputFile;
 import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
@@ -86,6 +88,29 @@ public class TestPuffinWriter {
     assertThat(outputFile.toByteArray())
         .isEqualTo(readTestResource("v1/empty-puffin-uncompressed.bin"));
     assertThat(writer.footerSize()).isEqualTo(EMPTY_PUFFIN_UNCOMPRESSED_FOOTER_SIZE);
+  }
+
+  @Test
+  void writeFailsWhenFileExists() throws Exception {
+    InMemoryOutputFile outputFile = new InMemoryOutputFile();
+    Puffin.write(outputFile).build().close();
+
+    assertThatThrownBy(() -> Puffin.write(outputFile).build())
+        .isInstanceOf(AlreadyExistsException.class)
+        .hasMessage("Already exists");
+  }
+
+  @Test
+  void overwrite() throws Exception {
+    InMemoryOutputFile outputFile = new InMemoryOutputFile();
+    try (PositionOutputStream out = outputFile.create()) {
+      out.write(new byte[] {1, 2, 3});
+    }
+
+    Puffin.write(outputFile).overwrite().build().close();
+
+    assertThat(outputFile.toByteArray())
+        .isEqualTo(readTestResource("v1/empty-puffin-uncompressed.bin"));
   }
 
   @Test

@@ -152,7 +152,7 @@ public class PartitionStatsHandler {
     OutputFile outputFile = newPartitionStatsFile(table, fileFormat, snapshotId);
 
     try (FileAppender<StructLike> writer =
-        InternalData.write(fileFormat, outputFile).schema(dataSchema).build()) {
+        InternalData.write(fileFormat, outputFile).schema(dataSchema).overwrite().build()) {
       records.iterator().forEachRemaining(writer::add);
     }
 
