@@ -94,9 +94,10 @@ abstract class BaseIncrementalScan<ThisT, T extends ScanTask, G extends ScanTask
 
   @Override
   public CloseableIterable<T> planFiles() {
-    if (scanCurrentLineage() && table().currentSnapshot() == null) {
-      // If the table is empty (no current snapshot) and both from and to snapshots aren't set,
-      // simply return an empty iterable. In this case, the listener notification is also skipped.
+    if (scanCurrentLineage() && SnapshotUtil.latestSnapshot(table(), context().branch()) == null) {
+      // If the scanned branch has no snapshot (e.g. the table is empty) and both from and to
+      // snapshots aren't set, simply return an empty iterable. In this case, the listener
+      // notification is also skipped.
       return CloseableIterable.empty();
     }
 

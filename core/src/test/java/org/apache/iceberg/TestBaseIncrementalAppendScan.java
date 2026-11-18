@@ -138,6 +138,10 @@ public class TestBaseIncrementalAppendScan
     IncrementalAppendScan scan = newScan().fromSnapshotInclusive(tagSnapshotAName);
     assertThat(scan.planFiles()).hasSize(5);
 
+    // without a range, a scan reads the whole lineage of the branch head
+    assertThat(newScan().useBranch(SnapshotRef.MAIN_BRANCH).planFiles()).hasSize(5);
+    assertThat(newScan().useBranch(branchName).planFiles()).hasSize(3);
+
     IncrementalAppendScan scan2 =
         newScan().fromSnapshotInclusive(tagSnapshotAName).useBranch(branchName);
     assertThat(scan2.planFiles()).hasSize(3);
@@ -210,6 +214,18 @@ public class TestBaseIncrementalAppendScan
     assertThatThrownBy(() -> newScan().useBranch("nonExistingRef"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Cannot find ref: nonExistingRef");
+  }
+
+  @TestTemplate
+  void useBranchWithoutCurrentSnapshot() {
+    String branchName = "b1";
+    table.newFastAppend().appendFile(FILE_A).toBranch(branchName).commit();
+    table.newFastAppend().appendFile(FILE_B).toBranch(branchName).commit();
+
+    assertThat(table.currentSnapshot()).isNull();
+    assertThat(newScan().useBranch(branchName).planFiles())
+        .extracting(task -> task.file().location())
+        .containsExactlyInAnyOrder(FILE_A.location(), FILE_B.location());
   }
 
   @TestTemplate

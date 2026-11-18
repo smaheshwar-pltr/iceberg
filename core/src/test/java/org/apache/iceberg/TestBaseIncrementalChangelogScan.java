@@ -260,6 +260,23 @@ public class TestBaseIncrementalChangelogScan
         .hasMessage("Delete files are currently not supported in changelog scans");
   }
 
+  @TestTemplate
+  void useBranchWithoutCurrentSnapshot() {
+    String branchName = "b1";
+    table.newFastAppend().appendFile(FILE_A).toBranch(branchName).commit();
+    Snapshot snap1 = table.snapshot(branchName);
+
+    assertThat(table.currentSnapshot()).isNull();
+
+    List<ChangelogScanTask> tasks = plan(newScan().useBranch(branchName));
+
+    assertThat(tasks).as("Must have 1 task").hasSize(1);
+
+    AddedRowsScanTask t1 = (AddedRowsScanTask) Iterables.getOnlyElement(tasks);
+    assertThat(t1.commitSnapshotId()).as("Snapshot must match").isEqualTo(snap1.snapshotId());
+    assertThat(t1.file().location()).as("Data file must match").isEqualTo(FILE_A.location());
+  }
+
   // plans tasks and reorders them to have deterministic order
   private List<ChangelogScanTask> plan(IncrementalChangelogScan scan) {
     try (CloseableIterable<ChangelogScanTask> tasks = scan.planFiles()) {
